@@ -41,6 +41,8 @@ Output binaries go to `build/bin/`.
 | `offline_processor` | Batch process MKV recordings |
 | `camera_space_transform_sample` | Depth-to-color space transformation |
 | `sample_unity_bodytracking` | Unity integration |
+| `multi_device_body_viewer` | Multi-camera body tracking (Orbbec Femto Bolt) |
+| `multi_device_calibration` | Multi-camera extrinsic calibration tool |
 
 ### Other Samples
 - `opencv-kinfu-samples/` - OpenCV KinectFusion 3D reconstruction
@@ -100,6 +102,61 @@ The Unity sample (`sample_unity_bodytracking/`) requires:
 - 3D visualization samples share the `window_controller_3d` library for OpenGL rendering
 - Body tracking outputs 32 joints per body with confidence levels
 - Coordinate system: depth camera is origin, Y-up, Z-forward (into scene)
+
+## Orbbec Femto Bolt Setup
+
+The `multi_device_body_viewer` and `multi_device_calibration` samples use Orbbec Femto Bolt cameras via the K4A Wrapper.
+
+### Required Components
+| Component | Version | Path |
+|-----------|---------|------|
+| OrbbecSDK K4A Wrapper | v1.10.5 | `C:\OrbbecSDK_K4A_Wrapper_v1.10.5_windows_202510212040` |
+| OpenCV | 4.12.0 | `C:\opencv` |
+| Azure Kinect Body Tracking SDK | 1.1.2 | NuGet package |
+
+### DLL Replacement (Critical)
+After building, NuGet copies Azure Kinect DLLs which must be replaced with Orbbec versions:
+
+```powershell
+$src = "C:\OrbbecSDK_K4A_Wrapper_v1.10.5_windows_202510212040\bin"
+$dst = ".\build\bin\Release"
+
+# Replace K4A DLLs with Orbbec versions
+Copy-Item "$src\k4a.dll", "$src\k4arecord.dll", "$src\depthengine_2_0.dll" $dst -Force
+Copy-Item "$src\OrbbecSDK.dll", "$src\ob_usb.dll", "$src\live555.dll" $dst -Force
+Copy-Item "$src\OrbbecSDKConfig_v1.0.xml" $dst -Force
+
+# For calibration tool, also copy OpenCV
+Copy-Item "C:\opencv\build\x64\vc16\bin\opencv_world4120.dll" $dst -Force
+```
+
+**Verification**: k4a.dll should be ~283KB (Orbbec), not ~651KB (Azure Kinect)
+
+### Multi-Device Sync Configuration
+1. Connect cameras via Orbbec Sync Hub
+2. Configure Primary/Secondary in OrbbecViewer before running samples
+3. First device (index 0) = Primary/Master
+4. Other devices = Secondary/Subordinate with 160μs delay offset
+
+## Multi-Device Calibration
+
+The calibration tool (`multi_device_calibration`) computes extrinsic parameters using a checkerboard:
+
+### Algorithm (IEEE Paper)
+1. Detect checkerboard corners (OpenCV)
+2. Convert 2D to 3D via depth-color transformation
+3. SVD-based rotation/translation computation
+4. Output: R, t for each camera relative to primary
+
+### Usage
+```bash
+multi_device_calibration.exe --rows 6 --cols 9 --square 25.0 --output calibration
+# SPACE: capture, S: save, ESC: quit
+```
+
+### Output Files
+- `calibration.yml` - OpenCV FileStorage format
+- `calibration.json` - JSON format with R (3x3) and t (3x1)
 
 ## Ref Notes
 1. https://github.com/orbbec/OrbbecSDK-K4A-Wrapper

@@ -9,6 +9,10 @@
 #include <thread>
 #include <mutex>
 #include <atomic>
+#include <fstream>
+#include <iomanip>
+#include <sstream>
+#include <ctime>
 #include <k4a/k4a.h>
 #include <k4abt.h>
 
@@ -17,11 +21,19 @@
 #include <Window3dWrapper.h>
 
 // ============================================================================
+// Forward Declarations
+// ============================================================================
+struct DeviceInfo;
+void ExportCalibrationToYAML(const std::vector<DeviceInfo>& devices, const std::string& outputPath);
+void ExportCalibrationToJSON(const std::vector<DeviceInfo>& devices, const std::string& outputPath);
+
+// ============================================================================
 // Global State
 // ============================================================================
 std::atomic<bool> s_isRunning{true};
 Visualization::Layout3d s_layoutMode = Visualization::Layout3d::OnlyMainView;
 bool s_visualizeJointFrame = false;
+std::vector<DeviceInfo>* g_pDevices = nullptr;
 
 // Thread-safe storage for body tracking results
 std::mutex g_bodyDataMutex;
@@ -52,12 +64,22 @@ int64_t ProcessKey(void* /*context*/, int key)
     case GLFW_KEY_B:
         s_visualizeJointFrame = !s_visualizeJointFrame;
         break;
+    case GLFW_KEY_C:
+        // Save calibration files
+        if (g_pDevices != nullptr && !g_pDevices->empty())
+        {
+            ExportCalibrationToYAML(*g_pDevices, "intri.yml");
+            ExportCalibrationToJSON(*g_pDevices, "calibration.json");
+            std::cout << "\nCalibration files saved!" << std::endl;
+        }
+        break;
     case GLFW_KEY_H:
         std::cout << "\n=== Key Shortcuts ===\n"
                   << "ESC: quit\n"
                   << "h: help\n"
                   << "b: body visualization mode\n"
-                  << "k: 3d window layout\n" << std::endl;
+                  << "k: 3d window layout\n"
+                  << "c: save calibration (intri.yml, calibration.json)\n" << std::endl;
         break;
     }
     return 1;
@@ -291,6 +313,122 @@ void PrintUsage()
 }
 
 // ============================================================================
+// Export Calibration to EasyMocap Format (intri.yml)
+// ============================================================================
+void ExportCalibrationToYAML(const std::vector<DeviceInfo>& devices, const std::string& outputPath)
+{
+    std::ofstream file(outputPath);
+    if (!file.is_open())
+    {
+        std::cerr << "Failed to open file for writing: " << outputPath << std::endl;
+        return;
+    }
+
+    file << "%YAML:1.0\n";
+    file << "---\n";
+
+    // Write camera names
+    file << "names:\n";
+    for (size_t i = 0; i < devices.size(); i++)
+    {
+        file << "   - \"" << i << "\"\n";
+    }
+
+    // Write calibration for each camera
+    for (size_t i = 0; i < devices.size(); i++)
+    {
+        const auto& calib = devices[i].calibration.depth_camera_calibration;
+        const auto& params = calib.intrinsics.parameters.param;
+
+        // Intrinsic matrix K (3x3)
+        // | fx  0  cx |
+        // | 0  fy  cy |
+        // | 0   0   1 |
+        file << "K_" << i << ": !!opencv-matrix\n";
+        file << "   rows: 3\n";
+        file << "   cols: 3\n";
+        file << "   dt: d\n";
+        file << std::fixed << std::setprecision(6);
+        file << "   data: [ " << params.fx << ", 0., " << params.cx << ", "
+             << "0., " << params.fy << ", " << params.cy << ", "
+             << "0., 0., 1. ]\n";
+
+        // Distortion coefficients (k1, k2, p1, p2, k3)
+        // Note: K4A uses Brown-Conrady model with k1,k2,k3,k4,k5,k6,p1,p2
+        // OpenCV typically uses k1,k2,p1,p2,k3 (5 params) or more
+        file << "dist_" << i << ": !!opencv-matrix\n";
+        file << "   rows: 1\n";
+        file << "   cols: 5\n";
+        file << "   dt: d\n";
+        file << "   data: [ " << params.k1 << ", " << params.k2 << ", "
+             << params.p1 << ", " << params.p2 << ", " << params.k3 << " ]\n";
+
+        // Image dimensions
+        file << "H_" << i << ": " << calib.resolution_height << "\n";
+        file << "W_" << i << ": " << calib.resolution_width << "\n";
+    }
+
+    file.close();
+    std::cout << "Intrinsic calibration saved to: " << outputPath << std::endl;
+}
+
+// ============================================================================
+// Export Calibration to JSON Format (alternative)
+// ============================================================================
+void ExportCalibrationToJSON(const std::vector<DeviceInfo>& devices, const std::string& outputPath)
+{
+    std::ofstream file(outputPath);
+    if (!file.is_open())
+    {
+        std::cerr << "Failed to open file for writing: " << outputPath << std::endl;
+        return;
+    }
+
+    file << "{\n";
+    file << "  \"cameras\": [\n";
+
+    for (size_t i = 0; i < devices.size(); i++)
+    {
+        const auto& dev = devices[i];
+        const auto& calib = dev.calibration.depth_camera_calibration;
+        const auto& params = calib.intrinsics.parameters.param;
+
+        file << "    {\n";
+        file << "      \"id\": " << i << ",\n";
+        file << "      \"serial_number\": \"" << dev.serialNumber << "\",\n";
+        file << "      \"is_primary\": " << (dev.isPrimary ? "true" : "false") << ",\n";
+        file << "      \"width\": " << calib.resolution_width << ",\n";
+        file << "      \"height\": " << calib.resolution_height << ",\n";
+
+        // Intrinsic matrix K
+        file << std::fixed << std::setprecision(6);
+        file << "      \"K\": [\n";
+        file << "        [" << params.fx << ", 0.0, " << params.cx << "],\n";
+        file << "        [0.0, " << params.fy << ", " << params.cy << "],\n";
+        file << "        [0.0, 0.0, 1.0]\n";
+        file << "      ],\n";
+
+        // Distortion coefficients
+        file << "      \"dist\": [" << params.k1 << ", " << params.k2 << ", "
+             << params.p1 << ", " << params.p2 << ", " << params.k3 << ", "
+             << params.k4 << ", " << params.k5 << ", " << params.k6 << "],\n";
+
+        // Additional distortion parameters
+        file << "      \"codx\": " << params.codx << ",\n";
+        file << "      \"cody\": " << params.cody << ",\n";
+        file << "      \"metric_radius\": " << params.metric_radius << "\n";
+
+        file << "    }" << (i < devices.size() - 1 ? "," : "") << "\n";
+    }
+
+    file << "  ]\n";
+    file << "}\n";
+
+    file.close();
+    std::cout << "Calibration saved to: " << outputPath << std::endl;
+}
+
+// ============================================================================
 // Main
 // ============================================================================
 int main(int argc, char** argv)
@@ -427,6 +565,9 @@ int main(int argc, char** argv)
 
     std::cout << "\nAll devices started successfully!" << std::endl;
 
+    // Set global pointer for key callback
+    g_pDevices = &devices;
+
     // Initialize global body data storage
     g_deviceBodyData.resize(deviceCount);
 
@@ -443,7 +584,7 @@ int main(int argc, char** argv)
         captureThreads.emplace_back(DeviceCaptureThread, &devices[i], i);
     }
 
-    std::cout << "\nPress 'h' for help, ESC to quit\n" << std::endl;
+    std::cout << "\nPress 'h' for help, 'c' to save calibration, ESC to quit\n" << std::endl;
 
     // Main render loop
     while (s_isRunning)

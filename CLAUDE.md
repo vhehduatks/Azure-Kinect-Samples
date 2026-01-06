@@ -41,6 +41,7 @@ Output binaries go to `build/bin/`.
 | `offline_processor` | Batch process MKV recordings |
 | `camera_space_transform_sample` | Depth-to-color space transformation |
 | `sample_unity_bodytracking` | Unity integration |
+| `multi_device_body_viewer` | **Orbbec Femto Bolt 멀티 카메라 Body Tracking** |
 
 ### Other Samples
 - `opencv-kinfu-samples/` - OpenCV KinectFusion 3D reconstruction
@@ -101,8 +102,30 @@ The Unity sample (`sample_unity_bodytracking/`) requires:
 - Body tracking outputs 32 joints per body with confidence levels
 - Coordinate system: depth camera is origin, Y-up, Z-forward (into scene)
 
+## Orbbec Femto Bolt Multi-Device Setup
+
+Orbbec Femto Bolt 카메라로 Azure Kinect Body Tracking SDK를 사용하려면 K4A Wrapper가 필요합니다.
+
+**상세 문서:** [multi_device_body_viewer/README.md](body-tracking-samples/multi_device_body_viewer/README.md)
+
+### 빌드 후 필수 작업
+NuGet 패키지가 Azure Kinect DLL을 덮어쓰므로, 빌드 후 Orbbec DLL을 복사해야 합니다:
+```powershell
+$src = "C:\OrbbecSDK_K4A_Wrapper_v1.10.5_windows_202510212040\bin"
+Copy-Item "$src\k4a.dll", "$src\k4arecord.dll", "$src\depthengine_2_0.dll" .\build\bin\Release\ -Force
+Copy-Item "$src\OrbbecSDK.dll", "$src\ob_usb.dll", "$src\live555.dll" .\build\bin\Release\ -Force
+Copy-Item "$src\OrbbecSDKConfig_v1.0.xml" .\build\bin\Release\ -Force
+```
+
+### 캘리브레이션 내보내기
+`multi_device_body_viewer.exe` 실행 중 `C` 키를 누르면:
+- `intri.yml`: EasyMocap 형식 내부 파라미터
+- `calibration.json`: 상세 캘리브레이션 정보
+
 ## Ref Notes
 1. https://github.com/orbbec/OrbbecSDK-K4A-Wrapper
 2. https://doc.orbbec.com/documentation/Camera%20Accessories/Set%20up%20Cameras%20for%20External%20Synchronization
 3. C:\OrbbecSDK_C_C++_v1.10.27_20250925_0549823cb_win_x64_release\OrbbecSDK_v1.10.27\Example\cpp
+4. https://orbbec.github.io/docs/OrbbecSDK_K4A_Wrapper/main/index.html
+5. https://github.com/vhehduatks/EasyMocap/tree/master/apps/calibration
 

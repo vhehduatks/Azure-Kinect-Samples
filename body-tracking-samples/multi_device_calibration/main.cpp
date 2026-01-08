@@ -12,6 +12,8 @@
 #include <algorithm>
 #include <thread>
 #include <chrono>
+#include <mutex>
+#include <atomic>
 #include <k4a/k4a.h>
 
 // OpenCV headers
@@ -51,6 +53,20 @@ struct ExtrinsicCalibration {
     int deviceIndex;
     bool isValid = false;
 };
+
+// ============================================================================
+// Thread-safe capture data for each device
+// ============================================================================
+struct CaptureData {
+    cv::Mat colorImage;
+    k4a_image_t depthImage = nullptr;
+    std::vector<cv::Point2f> corners;
+    bool cornersFound = false;
+    bool hasNewData = false;
+    std::mutex mutex;
+};
+
+std::atomic<bool> g_captureRunning{true};
 
 // ============================================================================
 // Get Device Serial Number
@@ -433,6 +449,64 @@ void SaveCalibrationJSON(const std::vector<ExtrinsicCalibration>& calibrations,
 }
 
 // ============================================================================
+// Capture Thread Function - runs continuously for each device
+// ============================================================================
+void CaptureThread(DeviceInfo* device, CaptureData* captureData, cv::Size patternSize)
+{
+    std::cout << "[Device " << device->index << "] Capture thread started" << std::endl;
+
+    while (g_captureRunning)
+    {
+        k4a_capture_t capture = nullptr;
+        // Use shorter timeout (100ms) to be more responsive
+        k4a_wait_result_t result = k4a_device_get_capture(device->device, &capture, 100);
+
+        if (result == K4A_WAIT_RESULT_SUCCEEDED)
+        {
+            k4a_image_t colorImage = k4a_capture_get_color_image(capture);
+            k4a_image_t depthImage = k4a_capture_get_depth_image(capture);
+
+            if (colorImage && depthImage)
+            {
+                cv::Mat colorMat = K4AImageToMat(colorImage);
+                std::vector<cv::Point2f> corners;
+                bool found = DetectCheckerboardCorners(colorMat, corners, patternSize);
+
+                // Update capture data (thread-safe)
+                {
+                    std::lock_guard<std::mutex> lock(captureData->mutex);
+
+                    // Release previous depth image
+                    if (captureData->depthImage)
+                    {
+                        k4a_image_release(captureData->depthImage);
+                    }
+
+                    captureData->colorImage = colorMat;
+                    captureData->depthImage = depthImage;
+                    k4a_image_reference(depthImage);  // Keep reference
+                    captureData->corners = corners;
+                    captureData->cornersFound = found;
+                    captureData->hasNewData = true;
+                }
+            }
+
+            if (colorImage) k4a_image_release(colorImage);
+            if (depthImage) k4a_image_release(depthImage);
+            k4a_capture_release(capture);
+        }
+        else if (result == K4A_WAIT_RESULT_FAILED)
+        {
+            std::cerr << "[Device " << device->index << "] Capture failed" << std::endl;
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+        // K4A_WAIT_RESULT_TIMEOUT is normal, just continue
+    }
+
+    std::cout << "[Device " << device->index << "] Capture thread stopped" << std::endl;
+}
+
+// ============================================================================
 // Print Usage
 // ============================================================================
 void PrintUsage()
@@ -440,15 +514,18 @@ void PrintUsage()
     std::cout << "\n=== Multi-Device Extrinsic Calibration Tool ===\n"
               << "USAGE: multi_device_calibration.exe [OPTIONS]\n\n"
               << "Options:\n"
-              << "  --rows N       Checkerboard inner corners (rows), default: " << CHECKERBOARD_ROWS << "\n"
-              << "  --cols N       Checkerboard inner corners (cols), default: " << CHECKERBOARD_COLS << "\n"
-              << "  --square N     Square size in mm, default: " << SQUARE_SIZE_MM << "\n"
-              << "  --output FILE  Output filename prefix, default: calibration\n"
+              << "  --rows N         Checkerboard inner corners (rows), default: " << CHECKERBOARD_ROWS << "\n"
+              << "  --cols N         Checkerboard inner corners (cols), default: " << CHECKERBOARD_COLS << "\n"
+              << "  --square N       Square size in mm, default: " << SQUARE_SIZE_MM << "\n"
+              << "  --output FILE    Output filename prefix, default: calibration\n"
+              << "  --primary SERIAL Serial number of PRIMARY camera (sync hub master port)\n"
               << "\nInstructions:\n"
               << "  1. Place checkerboard visible to ALL cameras\n"
               << "  2. Press SPACE to capture and calibrate\n"
               << "  3. Press 'S' to save calibration\n"
               << "  4. Press ESC to quit\n"
+              << "\nExample:\n"
+              << "  multi_device_calibration.exe --primary CL8T75400DC --rows 4 --cols 5\n"
               << std::endl;
 }
 
@@ -467,6 +544,7 @@ int main(int argc, char** argv)
     int checkerboardCols = CHECKERBOARD_COLS;
     float squareSize = SQUARE_SIZE_MM;
     std::string outputPrefix = "calibration";
+    std::string primarySerial = "";  // Serial number of PRIMARY camera (sync hub master port)
 
     for (int i = 1; i < argc; i++)
     {
@@ -475,6 +553,7 @@ int main(int argc, char** argv)
         else if (arg == "--cols" && i + 1 < argc) checkerboardCols = std::atoi(argv[++i]);
         else if (arg == "--square" && i + 1 < argc) squareSize = std::atof(argv[++i]);
         else if (arg == "--output" && i + 1 < argc) outputPrefix = argv[++i];
+        else if (arg == "--primary" && i + 1 < argc) primarySerial = argv[++i];
         else if (arg == "--help" || arg == "-h") {
             PrintUsage();
             return 0;
@@ -514,10 +593,45 @@ int main(int argc, char** argv)
         }
 
         devices[i].serialNumber = GetDeviceSerialNumber(devices[i].device);
-        devices[i].isPrimary = (i == 0);
+    }
 
+    // Determine PRIMARY camera based on serial number
+    int primaryIndex = -1;
+    if (!primarySerial.empty())
+    {
+        for (uint32_t i = 0; i < deviceCount; i++)
+        {
+            if (devices[i].serialNumber == primarySerial)
+            {
+                primaryIndex = i;
+                break;
+            }
+        }
+        if (primaryIndex < 0)
+        {
+            std::cerr << "WARNING: Primary serial '" << primarySerial << "' not found!" << std::endl;
+            std::cerr << "Available devices:" << std::endl;
+            for (uint32_t i = 0; i < deviceCount; i++)
+            {
+                std::cerr << "  Device " << i << ": " << devices[i].serialNumber << std::endl;
+            }
+            std::cerr << "Falling back to device 0 as primary." << std::endl;
+            primaryIndex = 0;
+        }
+    }
+    else
+    {
+        // No primary specified, use device 0
+        primaryIndex = 0;
+        std::cout << "No --primary specified, using device 0 as primary." << std::endl;
+        std::cout << "Use --primary <serial> to specify sync hub master camera." << std::endl;
+    }
+
+    for (uint32_t i = 0; i < deviceCount; i++)
+    {
+        devices[i].isPrimary = (static_cast<int>(i) == primaryIndex);
         std::cout << "Device " << i << ": SN=" << devices[i].serialNumber
-                  << " (" << (devices[i].isPrimary ? "PRIMARY" : "SECONDARY") << ")" << std::endl;
+                  << " (" << (devices[i].isPrimary ? "PRIMARY/MASTER" : "SECONDARY/SUBORDINATE") << ")" << std::endl;
     }
 
     // Configure and start cameras
@@ -604,6 +718,19 @@ int main(int argc, char** argv)
         cv::resizeWindow(windowName, 640, 360);
     }
 
+    // Create capture data and start capture threads for each device
+    std::vector<CaptureData> captureData(deviceCount);
+    std::vector<std::thread> captureThreads;
+    g_captureRunning = true;
+
+    for (uint32_t i = 0; i < deviceCount; i++)
+    {
+        captureThreads.emplace_back(CaptureThread, &devices[i], &captureData[i], patternSize);
+    }
+
+    // Wait a moment for threads to start capturing
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
     std::vector<ExtrinsicCalibration> calibrations(deviceCount);
     bool calibrationDone = false;
     bool running = true;
@@ -615,30 +742,21 @@ int main(int argc, char** argv)
         std::vector<std::vector<cv::Point2f>> allCorners(deviceCount);
         std::vector<bool> cornersFound(deviceCount, false);
 
-        // Capture from all devices
+        // Get latest capture data from all devices (thread-safe)
         for (uint32_t i = 0; i < deviceCount; i++)
         {
-            k4a_capture_t capture = nullptr;
-            k4a_wait_result_t result = k4a_device_get_capture(devices[i].device, &capture, 1000);
+            std::lock_guard<std::mutex> lock(captureData[i].mutex);
 
-            if (result == K4A_WAIT_RESULT_SUCCEEDED)
+            if (captureData[i].hasNewData)
             {
-                k4a_image_t colorImage = k4a_capture_get_color_image(capture);
-                k4a_image_t depthImage = k4a_capture_get_depth_image(capture);
-
-                if (colorImage && depthImage)
+                colorImages[i] = captureData[i].colorImage.clone();
+                if (captureData[i].depthImage)
                 {
-                    colorImages[i] = K4AImageToMat(colorImage);
-                    depthImages[i] = depthImage;
-                    k4a_image_reference(depthImage);  // Keep reference
-
-                    // Detect checkerboard
-                    cornersFound[i] = DetectCheckerboardCorners(colorImages[i], allCorners[i], patternSize);
+                    depthImages[i] = captureData[i].depthImage;
+                    k4a_image_reference(depthImages[i]);  // Keep reference
                 }
-
-                if (colorImage) k4a_image_release(colorImage);
-                if (depthImage) k4a_image_release(depthImage);
-                k4a_capture_release(capture);
+                allCorners[i] = captureData[i].corners;
+                cornersFound[i] = captureData[i].cornersFound;
             }
         }
 
@@ -775,6 +893,26 @@ int main(int argc, char** argv)
 
     // Cleanup
     std::cout << "\nShutting down..." << std::endl;
+
+    // Stop capture threads
+    g_captureRunning = false;
+    for (auto& thread : captureThreads)
+    {
+        if (thread.joinable())
+        {
+            thread.join();
+        }
+    }
+
+    // Release depth images from capture data
+    for (auto& data : captureData)
+    {
+        if (data.depthImage)
+        {
+            k4a_image_release(data.depthImage);
+        }
+    }
+
     cv::destroyAllWindows();
 
     for (auto& device : devices)

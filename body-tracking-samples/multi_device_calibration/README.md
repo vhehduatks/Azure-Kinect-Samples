@@ -40,11 +40,18 @@ Copy-Item "C:\opencv\build\x64\vc16\bin\opencv_world4120.dll" $dst -Force
 multi_device_calibration.exe [OPTIONS]
 
 Options:
-  --rows N       Checkerboard inner corners (rows), default: 6
-  --cols N       Checkerboard inner corners (cols), default: 9
-  --square N     Square size in mm, default: 25.0
-  --output FILE  Output filename prefix, default: calibration
-  --help         Show help
+  --rows N         Checkerboard inner corners (rows), default: 6
+  --cols N         Checkerboard inner corners (cols), default: 9
+  --square N       Square size in mm, default: 25.0
+  --output FILE    Output filename prefix, default: calibration
+  --primary SERIAL Serial number of PRIMARY camera (sync hub master port)
+  --help           Show help
+```
+
+### Example
+
+```cmd
+multi_device_calibration.exe --primary CL8T75400DC --rows 4 --cols 5 --square 50
 ```
 
 ## Controls
@@ -57,11 +64,20 @@ Options:
 
 ## Calibration Procedure
 
-1. Connect all Femto Bolt cameras via sync hub
-2. Run the calibration tool
-3. Hold a checkerboard pattern visible to ALL cameras simultaneously
-4. Press SPACE when checkerboard is detected in all views (green indicator)
-5. Press S to save calibration results
+1. Connect all Femto Bolt cameras via Orbbec Sync Hub
+2. Configure sync hub in OrbbecViewer (set PRIMARY/SECONDARY ports)
+3. Note the serial number of the camera connected to the PRIMARY port
+4. Run the calibration tool with `--primary <serial>` option
+5. Hold a checkerboard pattern visible to ALL cameras simultaneously
+6. Press SPACE when checkerboard is detected in all views (green indicator)
+7. Press S to save calibration results
+
+### Sync Hub Configuration
+
+The `--primary` option must match the camera connected to the sync hub's PRIMARY/MASTER port:
+- The PRIMARY camera sends sync signals to SECONDARY cameras
+- If `--primary` is not specified or incorrect, secondary cameras won't receive frames
+- Use OrbbecViewer to verify which camera is connected to which port
 
 ## Output Files
 
@@ -129,6 +145,12 @@ The calibration follows the methodology from "Accurate Extrinsic Calibration of 
 - Ensure Orbbec DLLs are copied (not Azure Kinect DLLs)
 - Check OrbbecSDKConfig_v1.0.xml is in the executable directory
 - Verify k4a.dll size is ~283KB (Orbbec) not ~651KB (Azure Kinect)
+
+### Secondary cameras not showing frames
+- Verify `--primary` option matches the camera on sync hub's PRIMARY port
+- Check sync cable connections between cameras and sync hub
+- Ensure sync hub is powered and configured correctly in OrbbecViewer
+- The tool uses parallel capture threads - all cameras should display simultaneously
 
 ### Checkerboard not detected
 - Ensure adequate lighting

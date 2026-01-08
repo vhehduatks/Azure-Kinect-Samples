@@ -144,6 +144,42 @@ bool DetectCheckerboardCorners(const cv::Mat& colorImage,
 }
 
 // ============================================================================
+// Fix corner orientation between cameras
+// When checkerboard appears rotated 180 degrees, corners are detected in reverse order.
+// This function ensures all cameras have consistent corner ordering relative to primary.
+// Reference: green_screen example from OrbbecSDK-K4A-Wrapper
+// ============================================================================
+void FixCornerOrientation(const std::vector<cv::Point2f>& primaryCorners,
+                          std::vector<cv::Point2f>& secondaryCorners)
+{
+    if (primaryCorners.size() < 2 || secondaryCorners.size() < 2)
+    {
+        return;
+    }
+
+    // Vector from first to last corner in primary camera
+    cv::Vec2f primaryVec(
+        primaryCorners.back().x - primaryCorners.front().x,
+        primaryCorners.back().y - primaryCorners.front().y
+    );
+
+    // Vector from first to last corner in secondary camera
+    cv::Vec2f secondaryVec(
+        secondaryCorners.back().x - secondaryCorners.front().x,
+        secondaryCorners.back().y - secondaryCorners.front().y
+    );
+
+    // If dot product is negative, corners are in opposite order
+    float dotProduct = primaryVec[0] * secondaryVec[0] + primaryVec[1] * secondaryVec[1];
+
+    if (dotProduct <= 0.0f)
+    {
+        std::cout << "  Corner orientation mismatch detected, reversing order..." << std::endl;
+        std::reverse(secondaryCorners.begin(), secondaryCorners.end());
+    }
+}
+
+// ============================================================================
 // Convert 2D color points to 3D using depth and K4A calibration
 // Algorithm from IEEE paper: Use k4a_calibration_2d_to_3d
 // ============================================================================
@@ -648,22 +684,31 @@ int main(int argc, char** argv)
         config.synchronized_images_only = true;
 
         // Set sync mode for multi-device
+        // Depth delay prevents IR interference between cameras
+        // Reference: green_screen example from OrbbecSDK-K4A-Wrapper
+        constexpr int32_t MIN_TIME_BETWEEN_DEPTH_USEC = 160;
+
         if (deviceCount > 1)
         {
             if (devices[i].isPrimary)
             {
                 config.wired_sync_mode = K4A_WIRED_SYNC_MODE_MASTER;
                 config.subordinate_delay_off_master_usec = 0;
+                // Master: capture depth slightly BEFORE color (-80μs)
+                config.depth_delay_off_color_usec = -(MIN_TIME_BETWEEN_DEPTH_USEC / 2);
             }
             else
             {
                 config.wired_sync_mode = K4A_WIRED_SYNC_MODE_SUBORDINATE;
-                config.subordinate_delay_off_master_usec = 160 * devices[i].index;
+                config.subordinate_delay_off_master_usec = MIN_TIME_BETWEEN_DEPTH_USEC * devices[i].index;
+                // Subordinate: capture depth slightly AFTER color (+80μs)
+                config.depth_delay_off_color_usec = MIN_TIME_BETWEEN_DEPTH_USEC / 2;
             }
         }
         else
         {
             config.wired_sync_mode = K4A_WIRED_SYNC_MODE_STANDALONE;
+            config.depth_delay_off_color_usec = 0;
         }
 
         std::cout << "Starting device " << i << " ("
@@ -815,6 +860,28 @@ int main(int argc, char** argv)
             if (allFound)
             {
                 std::cout << "\n=== Computing Calibration ===" << std::endl;
+
+                // Find primary camera index
+                int primaryIdx = 0;
+                for (uint32_t i = 0; i < deviceCount; i++)
+                {
+                    if (devices[i].isPrimary)
+                    {
+                        primaryIdx = i;
+                        break;
+                    }
+                }
+
+                // Fix corner orientation for secondary cameras relative to primary
+                // This ensures consistent corner ordering even if checkerboard appears rotated
+                std::cout << "Checking corner orientation..." << std::endl;
+                for (uint32_t i = 0; i < deviceCount; i++)
+                {
+                    if (!devices[i].isPrimary)
+                    {
+                        FixCornerOrientation(allCorners[primaryIdx], allCorners[i]);
+                    }
+                }
 
                 // Convert 2D to 3D for each device
                 std::vector<std::vector<cv::Point3f>> allPoints3D(deviceCount);

@@ -1,20 +1,65 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 // Multi-device body tracking viewer for Orbbec Femto Bolt cameras
+// with multi-camera skeleton fusion support
 
 #include <array>
 #include <iostream>
+#include <fstream>
 #include <map>
 #include <vector>
 #include <thread>
 #include <mutex>
 #include <atomic>
+#include <cmath>
+#include <algorithm>
 #include <k4a/k4a.h>
 #include <k4abt.h>
+#include <nlohmann/json.hpp>
 
 #include <BodyTrackingHelpers.h>
 #include <Utilities.h>
 #include <Window3dWrapper.h>
+
+using json = nlohmann::json;
+
+// ============================================================================
+// Fusion Data Structures
+// ============================================================================
+struct CameraExtrinsics {
+    std::string serialNumber;
+    int deviceIndex;
+    bool isValid;
+    float rotation[3][3];    // 3x3 rotation matrix (row-major)
+    float translation[3];    // Translation vector (mm)
+};
+
+struct CalibrationData {
+    int numDevices;
+    std::vector<CameraExtrinsics> cameras;
+    bool isLoaded;
+};
+
+struct FusedJoint {
+    k4a_float3_t position;
+    k4a_quaternion_t orientation;
+    k4abt_joint_confidence_level_t confidence;
+    int sourceDeviceIndex;
+};
+
+struct FusedBody {
+    uint32_t id;
+    FusedJoint joints[K4ABT_JOINT_COUNT];
+};
+
+struct BodyMatch {
+    std::vector<int> bodyIndicesPerCamera;  // -1 if not visible in that camera
+};
+
+enum class FusionMode {
+    WINNER_TAKES_ALL,
+    WEIGHTED_AVERAGE
+};
 
 // ============================================================================
 // Global State
@@ -22,6 +67,15 @@
 std::atomic<bool> s_isRunning{true};
 Visualization::Layout3d s_layoutMode = Visualization::Layout3d::OnlyMainView;
 bool s_visualizeJointFrame = false;
+
+// Fusion state
+CalibrationData g_calibration = {0, {}, false};
+std::vector<FusedBody> g_fusedBodies;
+std::mutex g_fusedBodyMutex;
+bool g_fusionEnabled = false;
+FusionMode g_fusionMode = FusionMode::WEIGHTED_AVERAGE;
+std::string g_calibrationPath = "";
+const float BODY_MATCH_THRESHOLD_MM = 500.0f;
 
 // Thread-safe storage for body tracking results
 std::mutex g_bodyDataMutex;
@@ -52,12 +106,31 @@ int64_t ProcessKey(void* /*context*/, int key)
     case GLFW_KEY_B:
         s_visualizeJointFrame = !s_visualizeJointFrame;
         break;
+    case GLFW_KEY_F:
+        if (g_calibration.isLoaded) {
+            g_fusionEnabled = !g_fusionEnabled;
+            std::cout << "Skeleton fusion: " << (g_fusionEnabled ? "ON" : "OFF") << std::endl;
+        } else {
+            std::cout << "Fusion not available (no calibration loaded)" << std::endl;
+        }
+        break;
+    case GLFW_KEY_M:
+        if (g_fusionMode == FusionMode::WINNER_TAKES_ALL) {
+            g_fusionMode = FusionMode::WEIGHTED_AVERAGE;
+            std::cout << "Fusion mode: WEIGHTED_AVERAGE" << std::endl;
+        } else {
+            g_fusionMode = FusionMode::WINNER_TAKES_ALL;
+            std::cout << "Fusion mode: WINNER_TAKES_ALL" << std::endl;
+        }
+        break;
     case GLFW_KEY_H:
         std::cout << "\n=== Key Shortcuts ===\n"
                   << "ESC: quit\n"
                   << "h: help\n"
                   << "b: body visualization mode\n"
-                  << "k: 3d window layout\n" << std::endl;
+                  << "k: 3d window layout\n"
+                  << "f: toggle skeleton fusion\n"
+                  << "m: switch fusion mode (winner/weighted)\n" << std::endl;
         break;
     }
     return 1;
@@ -99,6 +172,490 @@ std::string GetDeviceSerialNumber(k4a_device_t device)
         serialNumber.pop_back();
     }
     return serialNumber;
+}
+
+// ============================================================================
+// Calibration Loading
+// ============================================================================
+bool LoadCalibration(const std::string& path, CalibrationData& cal)
+{
+    std::ifstream file(path);
+    if (!file.is_open()) {
+        std::cerr << "Failed to open calibration file: " << path << std::endl;
+        return false;
+    }
+
+    try {
+        json j;
+        file >> j;
+
+        cal.numDevices = j["num_devices"];
+        cal.cameras.clear();
+        cal.cameras.resize(cal.numDevices);
+
+        for (const auto& camJson : j["calibrations"]) {
+            CameraExtrinsics cam;
+            cam.deviceIndex = camJson["device_index"];
+            cam.serialNumber = camJson["serial_number"];
+            cam.isValid = camJson["is_valid"];
+
+            if (cam.isValid) {
+                // Load 3x3 rotation matrix
+                for (int r = 0; r < 3; r++) {
+                    for (int c = 0; c < 3; c++) {
+                        cam.rotation[r][c] = camJson["rotation"][r][c];
+                    }
+                }
+                // Load translation vector
+                for (int i = 0; i < 3; i++) {
+                    cam.translation[i] = camJson["translation"][i];
+                }
+            } else {
+                // Identity for invalid/primary camera
+                for (int r = 0; r < 3; r++) {
+                    for (int c = 0; c < 3; c++) {
+                        cam.rotation[r][c] = (r == c) ? 1.0f : 0.0f;
+                    }
+                    cam.translation[r] = 0.0f;
+                }
+            }
+
+            if (cam.deviceIndex >= 0 && cam.deviceIndex < cal.numDevices) {
+                cal.cameras[cam.deviceIndex] = cam;
+            }
+        }
+
+        cal.isLoaded = true;
+        std::cout << "Loaded calibration for " << cal.numDevices << " cameras" << std::endl;
+        return true;
+    }
+    catch (const std::exception& e) {
+        std::cerr << "Error parsing calibration JSON: " << e.what() << std::endl;
+        return false;
+    }
+}
+
+// ============================================================================
+// Coordinate Transformation Functions
+// ============================================================================
+
+// Transform a 3D point: P_primary = R * P_camera + t
+k4a_float3_t TransformPoint(const k4a_float3_t& point, const CameraExtrinsics& ext)
+{
+    k4a_float3_t result;
+    result.xyz.x = ext.rotation[0][0] * point.xyz.x
+                 + ext.rotation[0][1] * point.xyz.y
+                 + ext.rotation[0][2] * point.xyz.z
+                 + ext.translation[0];
+
+    result.xyz.y = ext.rotation[1][0] * point.xyz.x
+                 + ext.rotation[1][1] * point.xyz.y
+                 + ext.rotation[1][2] * point.xyz.z
+                 + ext.translation[1];
+
+    result.xyz.z = ext.rotation[2][0] * point.xyz.x
+                 + ext.rotation[2][1] * point.xyz.y
+                 + ext.rotation[2][2] * point.xyz.z
+                 + ext.translation[2];
+
+    return result;
+}
+
+// Convert rotation matrix to quaternion
+k4a_quaternion_t RotationMatrixToQuaternion(const float R[3][3])
+{
+    k4a_quaternion_t q;
+    float trace = R[0][0] + R[1][1] + R[2][2];
+
+    if (trace > 0) {
+        float s = 0.5f / sqrtf(trace + 1.0f);
+        q.wxyz.w = 0.25f / s;
+        q.wxyz.x = (R[2][1] - R[1][2]) * s;
+        q.wxyz.y = (R[0][2] - R[2][0]) * s;
+        q.wxyz.z = (R[1][0] - R[0][1]) * s;
+    } else if (R[0][0] > R[1][1] && R[0][0] > R[2][2]) {
+        float s = 2.0f * sqrtf(1.0f + R[0][0] - R[1][1] - R[2][2]);
+        q.wxyz.w = (R[2][1] - R[1][2]) / s;
+        q.wxyz.x = 0.25f * s;
+        q.wxyz.y = (R[0][1] + R[1][0]) / s;
+        q.wxyz.z = (R[0][2] + R[2][0]) / s;
+    } else if (R[1][1] > R[2][2]) {
+        float s = 2.0f * sqrtf(1.0f + R[1][1] - R[0][0] - R[2][2]);
+        q.wxyz.w = (R[0][2] - R[2][0]) / s;
+        q.wxyz.x = (R[0][1] + R[1][0]) / s;
+        q.wxyz.y = 0.25f * s;
+        q.wxyz.z = (R[1][2] + R[2][1]) / s;
+    } else {
+        float s = 2.0f * sqrtf(1.0f + R[2][2] - R[0][0] - R[1][1]);
+        q.wxyz.w = (R[1][0] - R[0][1]) / s;
+        q.wxyz.x = (R[0][2] + R[2][0]) / s;
+        q.wxyz.y = (R[1][2] + R[2][1]) / s;
+        q.wxyz.z = 0.25f * s;
+    }
+
+    return q;
+}
+
+// Multiply two quaternions: q_result = q1 * q2
+k4a_quaternion_t QuaternionMultiply(const k4a_quaternion_t& q1, const k4a_quaternion_t& q2)
+{
+    k4a_quaternion_t result;
+    result.wxyz.w = q1.wxyz.w*q2.wxyz.w - q1.wxyz.x*q2.wxyz.x
+                  - q1.wxyz.y*q2.wxyz.y - q1.wxyz.z*q2.wxyz.z;
+    result.wxyz.x = q1.wxyz.w*q2.wxyz.x + q1.wxyz.x*q2.wxyz.w
+                  + q1.wxyz.y*q2.wxyz.z - q1.wxyz.z*q2.wxyz.y;
+    result.wxyz.y = q1.wxyz.w*q2.wxyz.y - q1.wxyz.x*q2.wxyz.z
+                  + q1.wxyz.y*q2.wxyz.w + q1.wxyz.z*q2.wxyz.x;
+    result.wxyz.z = q1.wxyz.w*q2.wxyz.z + q1.wxyz.x*q2.wxyz.y
+                  - q1.wxyz.y*q2.wxyz.x + q1.wxyz.z*q2.wxyz.w;
+    return result;
+}
+
+// Transform joint orientation using rotation matrix
+k4a_quaternion_t TransformOrientation(const k4a_quaternion_t& orientation,
+                                       const CameraExtrinsics& ext)
+{
+    k4a_quaternion_t rotQuat = RotationMatrixToQuaternion(ext.rotation);
+    return QuaternionMultiply(rotQuat, orientation);
+}
+
+// ============================================================================
+// Body Matching Algorithm
+// ============================================================================
+float CalculateDistance(const k4a_float3_t& p1, const k4a_float3_t& p2)
+{
+    float dx = p1.xyz.x - p2.xyz.x;
+    float dy = p1.xyz.y - p2.xyz.y;
+    float dz = p1.xyz.z - p2.xyz.z;
+    return sqrtf(dx*dx + dy*dy + dz*dz);
+}
+
+// Structure for transformed body data per camera
+struct CameraBodyData {
+    int deviceIndex;
+    std::string serialNumber;
+    std::vector<k4abt_body_t> transformedBodies;
+};
+
+std::vector<BodyMatch> MatchBodiesAcrossCameras(
+    const std::vector<CameraBodyData>& cameraData,
+    int numCameras)
+{
+    std::vector<BodyMatch> matches;
+    if (numCameras == 0 || cameraData.empty()) return matches;
+
+    // Track which bodies have been matched per camera
+    std::vector<std::vector<bool>> used(numCameras);
+    for (int c = 0; c < numCameras; c++) {
+        if (c < static_cast<int>(cameraData.size())) {
+            used[c].resize(cameraData[c].transformedBodies.size(), false);
+        }
+    }
+
+    // Find camera with bodies to use as anchor (prefer camera 0)
+    int anchorCamera = -1;
+    for (int c = 0; c < numCameras && c < static_cast<int>(cameraData.size()); c++) {
+        if (!cameraData[c].transformedBodies.empty()) {
+            anchorCamera = c;
+            break;
+        }
+    }
+
+    if (anchorCamera < 0) return matches;
+
+    // Start with anchor camera bodies as anchors
+    for (size_t i = 0; i < cameraData[anchorCamera].transformedBodies.size(); i++) {
+        BodyMatch match;
+        match.bodyIndicesPerCamera.resize(numCameras, -1);
+        match.bodyIndicesPerCamera[anchorCamera] = static_cast<int>(i);
+        used[anchorCamera][i] = true;
+
+        const k4a_float3_t& pelvis0 =
+            cameraData[anchorCamera].transformedBodies[i].skeleton.joints[K4ABT_JOINT_PELVIS].position;
+
+        // Find closest body in each other camera
+        for (int c = 0; c < numCameras && c < static_cast<int>(cameraData.size()); c++) {
+            if (c == anchorCamera) continue;
+
+            float minDist = BODY_MATCH_THRESHOLD_MM;
+            int bestMatch = -1;
+
+            for (size_t j = 0; j < cameraData[c].transformedBodies.size(); j++) {
+                if (used[c][j]) continue;
+
+                const k4a_float3_t& pelvisC =
+                    cameraData[c].transformedBodies[j].skeleton.joints[K4ABT_JOINT_PELVIS].position;
+
+                float dist = CalculateDistance(pelvis0, pelvisC);
+                if (dist < minDist) {
+                    minDist = dist;
+                    bestMatch = static_cast<int>(j);
+                }
+            }
+
+            if (bestMatch >= 0) {
+                match.bodyIndicesPerCamera[c] = bestMatch;
+                used[c][bestMatch] = true;
+            }
+        }
+
+        matches.push_back(match);
+    }
+
+    // Add unmatched bodies from other cameras as new bodies
+    for (int c = 0; c < numCameras && c < static_cast<int>(cameraData.size()); c++) {
+        if (c == anchorCamera) continue;
+        for (size_t j = 0; j < cameraData[c].transformedBodies.size(); j++) {
+            if (!used[c][j]) {
+                BodyMatch match;
+                match.bodyIndicesPerCamera.resize(numCameras, -1);
+                match.bodyIndicesPerCamera[c] = static_cast<int>(j);
+                matches.push_back(match);
+            }
+        }
+    }
+
+    return matches;
+}
+
+// ============================================================================
+// Joint Fusion Algorithms
+// ============================================================================
+float ConfidenceToWeight(k4abt_joint_confidence_level_t conf)
+{
+    switch (conf) {
+        case K4ABT_JOINT_CONFIDENCE_NONE:   return 0.0f;
+        case K4ABT_JOINT_CONFIDENCE_LOW:    return 0.25f;
+        case K4ABT_JOINT_CONFIDENCE_MEDIUM: return 0.6f;
+        case K4ABT_JOINT_CONFIDENCE_HIGH:   return 1.0f;
+        default: return 0.0f;
+    }
+}
+
+FusedBody FuseBodyWinnerTakesAll(
+    const BodyMatch& match,
+    const std::vector<CameraBodyData>& cameraData,
+    uint32_t fusedBodyId)
+{
+    FusedBody fused;
+    fused.id = fusedBodyId;
+
+    for (int j = 0; j < K4ABT_JOINT_COUNT; j++) {
+        k4abt_joint_confidence_level_t bestConfidence = K4ABT_JOINT_CONFIDENCE_NONE;
+        int bestCamera = -1;
+
+        // Find camera with highest confidence for this joint
+        for (size_t c = 0; c < match.bodyIndicesPerCamera.size(); c++) {
+            int bodyIdx = match.bodyIndicesPerCamera[c];
+            if (bodyIdx < 0 || c >= cameraData.size()) continue;
+
+            const auto& joint = cameraData[c].transformedBodies[bodyIdx].skeleton.joints[j];
+
+            if (joint.confidence_level > bestConfidence) {
+                bestConfidence = joint.confidence_level;
+                bestCamera = static_cast<int>(c);
+            }
+        }
+
+        // Copy best joint
+        if (bestCamera >= 0) {
+            int bodyIdx = match.bodyIndicesPerCamera[bestCamera];
+            const auto& srcJoint = cameraData[bestCamera].transformedBodies[bodyIdx].skeleton.joints[j];
+
+            fused.joints[j].position = srcJoint.position;
+            fused.joints[j].orientation = srcJoint.orientation;
+            fused.joints[j].confidence = srcJoint.confidence_level;
+            fused.joints[j].sourceDeviceIndex = bestCamera;
+        } else {
+            fused.joints[j].position = {0, 0, 0};
+            fused.joints[j].orientation = {1, 0, 0, 0};
+            fused.joints[j].confidence = K4ABT_JOINT_CONFIDENCE_NONE;
+            fused.joints[j].sourceDeviceIndex = -1;
+        }
+    }
+
+    return fused;
+}
+
+FusedBody FuseBodyWeightedAverage(
+    const BodyMatch& match,
+    const std::vector<CameraBodyData>& cameraData,
+    uint32_t fusedBodyId)
+{
+    FusedBody fused;
+    fused.id = fusedBodyId;
+
+    for (int j = 0; j < K4ABT_JOINT_COUNT; j++) {
+        float totalWeight = 0.0f;
+        k4a_float3_t avgPosition = {0, 0, 0};
+        k4a_quaternion_t bestOrientation = {1, 0, 0, 0};
+        float bestOrientationWeight = 0.0f;
+        int bestCamera = -1;
+        k4abt_joint_confidence_level_t maxConf = K4ABT_JOINT_CONFIDENCE_NONE;
+
+        // Accumulate weighted positions
+        for (size_t c = 0; c < match.bodyIndicesPerCamera.size(); c++) {
+            int bodyIdx = match.bodyIndicesPerCamera[c];
+            if (bodyIdx < 0 || c >= cameraData.size()) continue;
+
+            const auto& joint = cameraData[c].transformedBodies[bodyIdx].skeleton.joints[j];
+            float weight = ConfidenceToWeight(joint.confidence_level);
+
+            if (weight > 0) {
+                avgPosition.xyz.x += joint.position.xyz.x * weight;
+                avgPosition.xyz.y += joint.position.xyz.y * weight;
+                avgPosition.xyz.z += joint.position.xyz.z * weight;
+                totalWeight += weight;
+
+                // Track best orientation and confidence
+                if (weight > bestOrientationWeight) {
+                    bestOrientationWeight = weight;
+                    bestOrientation = joint.orientation;
+                    bestCamera = static_cast<int>(c);
+                }
+                if (joint.confidence_level > maxConf) {
+                    maxConf = joint.confidence_level;
+                }
+            }
+        }
+
+        if (totalWeight > 0) {
+            fused.joints[j].position.xyz.x = avgPosition.xyz.x / totalWeight;
+            fused.joints[j].position.xyz.y = avgPosition.xyz.y / totalWeight;
+            fused.joints[j].position.xyz.z = avgPosition.xyz.z / totalWeight;
+            fused.joints[j].orientation = bestOrientation;
+            fused.joints[j].confidence = maxConf;
+            fused.joints[j].sourceDeviceIndex = bestCamera;
+        } else {
+            fused.joints[j].position = {0, 0, 0};
+            fused.joints[j].orientation = {1, 0, 0, 0};
+            fused.joints[j].confidence = K4ABT_JOINT_CONFIDENCE_NONE;
+            fused.joints[j].sourceDeviceIndex = -1;
+        }
+    }
+
+    return fused;
+}
+
+// ============================================================================
+// Main Fusion Pipeline
+// ============================================================================
+void PerformSkeletonFusion()
+{
+    if (!g_calibration.isLoaded) return;
+
+    std::lock_guard<std::mutex> dataLock(g_bodyDataMutex);
+
+    int numCameras = static_cast<int>(g_deviceBodyData.size());
+    if (numCameras == 0) return;
+
+    // Step 1: Gather and transform bodies from all cameras
+    std::vector<CameraBodyData> cameraData(numCameras);
+
+    for (int i = 0; i < numCameras; i++) {
+        cameraData[i].deviceIndex = g_deviceBodyData[i].deviceIndex;
+
+        // Find matching calibration by device index
+        const CameraExtrinsics* extrinsics = nullptr;
+        for (const auto& cam : g_calibration.cameras) {
+            if (cam.deviceIndex == cameraData[i].deviceIndex) {
+                extrinsics = &cam;
+                break;
+            }
+        }
+
+        // Transform bodies to primary frame
+        for (const auto& body : g_deviceBodyData[i].bodies) {
+            k4abt_body_t transformedBody;
+            transformedBody.id = body.id;
+
+            for (int j = 0; j < K4ABT_JOINT_COUNT; j++) {
+                if (extrinsics && extrinsics->isValid) {
+                    transformedBody.skeleton.joints[j].position =
+                        TransformPoint(body.skeleton.joints[j].position, *extrinsics);
+                    transformedBody.skeleton.joints[j].orientation =
+                        TransformOrientation(body.skeleton.joints[j].orientation, *extrinsics);
+                } else {
+                    // Primary camera or uncalibrated: use as-is
+                    transformedBody.skeleton.joints[j].position = body.skeleton.joints[j].position;
+                    transformedBody.skeleton.joints[j].orientation = body.skeleton.joints[j].orientation;
+                }
+                transformedBody.skeleton.joints[j].confidence_level = body.skeleton.joints[j].confidence_level;
+            }
+
+            cameraData[i].transformedBodies.push_back(transformedBody);
+        }
+    }
+
+    // Step 2: Match bodies across cameras
+    std::vector<BodyMatch> matches = MatchBodiesAcrossCameras(cameraData, numCameras);
+
+    // Step 3: Fuse matched bodies
+    std::vector<FusedBody> fusedBodies;
+    uint32_t fusedId = 0;
+
+    for (const auto& match : matches) {
+        FusedBody fused;
+        if (g_fusionMode == FusionMode::WINNER_TAKES_ALL) {
+            fused = FuseBodyWinnerTakesAll(match, cameraData, fusedId++);
+        } else {
+            fused = FuseBodyWeightedAverage(match, cameraData, fusedId++);
+        }
+        fusedBodies.push_back(fused);
+    }
+
+    // Step 4: Update global fused bodies
+    {
+        std::lock_guard<std::mutex> fusedLock(g_fusedBodyMutex);
+        g_fusedBodies = std::move(fusedBodies);
+    }
+}
+
+// ============================================================================
+// Render Fused Bodies
+// ============================================================================
+void RenderFusedBodies(Window3dWrapper& window3d)
+{
+    std::lock_guard<std::mutex> lock(g_fusedBodyMutex);
+
+    window3d.CleanJointsAndBones();
+
+    for (const auto& body : g_fusedBodies) {
+        Color color = g_bodyColors[body.id % g_bodyColors.size()];
+        color.a = 0.6f;
+        Color lowConfidenceColor = color;
+        lowConfidenceColor.a = 0.2f;
+
+        // Render joints
+        for (int j = 0; j < K4ABT_JOINT_COUNT; j++) {
+            if (body.joints[j].confidence >= K4ABT_JOINT_CONFIDENCE_LOW) {
+                window3d.AddJoint(
+                    body.joints[j].position,
+                    body.joints[j].orientation,
+                    body.joints[j].confidence >= K4ABT_JOINT_CONFIDENCE_MEDIUM
+                        ? color : lowConfidenceColor);
+            }
+        }
+
+        // Render bones
+        for (size_t boneIdx = 0; boneIdx < g_boneList.size(); boneIdx++) {
+            k4abt_joint_id_t j1 = g_boneList[boneIdx].first;
+            k4abt_joint_id_t j2 = g_boneList[boneIdx].second;
+
+            if (body.joints[j1].confidence >= K4ABT_JOINT_CONFIDENCE_LOW &&
+                body.joints[j2].confidence >= K4ABT_JOINT_CONFIDENCE_LOW) {
+
+                bool confidentBone =
+                    body.joints[j1].confidence >= K4ABT_JOINT_CONFIDENCE_MEDIUM &&
+                    body.joints[j2].confidence >= K4ABT_JOINT_CONFIDENCE_MEDIUM;
+
+                window3d.AddBone(
+                    body.joints[j1].position,
+                    body.joints[j2].position,
+                    confidentBone ? color : lowConfidenceColor);
+            }
+        }
+    }
 }
 
 // ============================================================================
@@ -280,13 +837,24 @@ void PrintUsage()
 {
     std::cout << "\n=== Multi-Device Body Tracking Viewer ===\n"
               << "USAGE: multi_device_body_viewer.exe [OPTIONS]\n\n"
-              << "Options:\n"
+              << "Depth Mode:\n"
               << "  NFOV_UNBINNED  - Narrow FOV Unbinned (default)\n"
-              << "  WFOV_BINNED    - Wide FOV Binned\n"
+              << "  WFOV_BINNED    - Wide FOV Binned\n\n"
+              << "Processing Mode:\n"
               << "  CPU            - CPU processing mode\n"
               << "  CUDA           - CUDA processing mode\n"
               << "  DIRECTML       - DirectML processing mode (default on Windows)\n"
-              << "  TENSORRT       - TensorRT processing mode\n"
+              << "  TENSORRT       - TensorRT processing mode\n\n"
+              << "Skeleton Fusion:\n"
+              << "  --calibration FILE   - Load calibration file and enable fusion\n"
+              << "  --fusion-mode MODE   - Fusion mode: winner | weighted (default: weighted)\n\n"
+              << "Runtime Controls:\n"
+              << "  F - Toggle skeleton fusion on/off\n"
+              << "  M - Switch fusion mode (winner/weighted)\n"
+              << "  B - Toggle body visualization\n"
+              << "  K - Change 3D window layout\n"
+              << "  H - Show help\n"
+              << "  ESC - Quit\n"
               << std::endl;
 }
 
@@ -313,6 +881,23 @@ int main(int argc, char** argv)
         else if (arg == "CUDA") processingMode = K4ABT_TRACKER_PROCESSING_MODE_GPU_CUDA;
         else if (arg == "DIRECTML") processingMode = K4ABT_TRACKER_PROCESSING_MODE_GPU_DIRECTML;
         else if (arg == "TENSORRT") processingMode = K4ABT_TRACKER_PROCESSING_MODE_GPU_TENSORRT;
+        else if (arg == "--calibration" && i + 1 < argc) {
+            g_calibrationPath = argv[++i];
+        }
+        else if (arg == "--fusion-mode" && i + 1 < argc) {
+            std::string mode(argv[++i]);
+            if (mode == "winner") g_fusionMode = FusionMode::WINNER_TAKES_ALL;
+            else if (mode == "weighted") g_fusionMode = FusionMode::WEIGHTED_AVERAGE;
+            else {
+                std::cerr << "Unknown fusion mode: " << mode << std::endl;
+                PrintUsage();
+                return -1;
+            }
+        }
+        else if (arg == "--help" || arg == "-h") {
+            PrintUsage();
+            return 0;
+        }
         else {
             std::cerr << "Unknown argument: " << arg << std::endl;
             PrintUsage();
@@ -353,6 +938,35 @@ int main(int argc, char** argv)
 
         std::cout << "Device " << i << ": SN=" << devices[i].serialNumber
                   << " (" << (devices[i].isPrimary ? "PRIMARY" : "SECONDARY") << ")" << std::endl;
+    }
+
+    // Load calibration if specified
+    if (!g_calibrationPath.empty()) {
+        std::cout << "\nLoading calibration from: " << g_calibrationPath << std::endl;
+        if (LoadCalibration(g_calibrationPath, g_calibration)) {
+            g_fusionEnabled = true;
+            std::cout << "Skeleton fusion enabled (mode: "
+                      << (g_fusionMode == FusionMode::WEIGHTED_AVERAGE ? "weighted" : "winner")
+                      << ")" << std::endl;
+
+            // Verify serial numbers match
+            for (const auto& cam : g_calibration.cameras) {
+                bool found = false;
+                for (const auto& dev : devices) {
+                    if (dev.serialNumber == cam.serialNumber) {
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) {
+                    std::cerr << "Warning: Calibration camera " << cam.serialNumber
+                              << " not found in connected devices" << std::endl;
+                }
+            }
+        } else {
+            std::cerr << "Warning: Failed to load calibration, fusion disabled" << std::endl;
+            g_fusionEnabled = false;
+        }
     }
 
     // Configure and start cameras
@@ -448,7 +1062,12 @@ int main(int argc, char** argv)
     // Main render loop
     while (s_isRunning)
     {
-        RenderAllBodies(window3d);
+        if (g_fusionEnabled && g_calibration.isLoaded) {
+            PerformSkeletonFusion();
+            RenderFusedBodies(window3d);
+        } else {
+            RenderAllBodies(window3d);
+        }
 
         window3d.SetLayout3d(s_layoutMode);
         window3d.SetJointFrameVisualization(s_visualizeJointFrame);

@@ -44,14 +44,14 @@
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ExecutablePath>$(ExecutablePath)</ExecutablePath>
-    <IncludePath>..\sample_helper_includes;..\sample_helper_libs\window_controller_3d;$(IncludePath)</IncludePath>
+    <IncludePath>..\sample_helper_includes;..\sample_helper_libs\window_controller_3d;..\extern\nlohmann_json\include;$(IncludePath)</IncludePath>
     <LibraryPath>$(LibraryPath)</LibraryPath>
     <OutDir>$(SolutionDir)\build\bin\$(Configuration)\</OutDir>
     <IntDir>$(SolutionDir)\build\temp\$(Configuration)\$(MSBuildProjectName)\</IntDir>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ExecutablePath>$(ExecutablePath)</ExecutablePath>
-    <IncludePath>..\sample_helper_includes;..\sample_helper_libs\window_controller_3d;$(IncludePath)</IncludePath>
+    <IncludePath>..\sample_helper_includes;..\sample_helper_libs\window_controller_3d;..\extern\nlohmann_json\include;$(IncludePath)</IncludePath>
     <LibraryPath>$(LibraryPath)</LibraryPath>
     <OutDir>$(SolutionDir)\build\bin\$(Configuration)\</OutDir>
     <IntDir>$(SolutionDir)\build\temp\$(Configuration)\$(MSBuildProjectName)\</IntDir>

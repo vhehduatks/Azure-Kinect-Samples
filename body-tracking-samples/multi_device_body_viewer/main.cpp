@@ -75,6 +75,7 @@ std::mutex g_fusedBodyMutex;
 bool g_fusionEnabled = false;
 FusionMode g_fusionMode = FusionMode::WEIGHTED_AVERAGE;
 std::string g_calibrationPath = "";
+std::string g_primarySerial = "";  // Serial number of PRIMARY camera (sync hub master port)
 const float BODY_MATCH_THRESHOLD_MM = 500.0f;
 
 // Thread-safe storage for body tracking results
@@ -845,6 +846,8 @@ void PrintUsage()
               << "  CUDA           - CUDA processing mode\n"
               << "  DIRECTML       - DirectML processing mode (default on Windows)\n"
               << "  TENSORRT       - TensorRT processing mode\n\n"
+              << "Multi-Camera Sync:\n"
+              << "  --primary SERIAL     - Serial number of PRIMARY camera (sync hub master port)\n\n"
               << "Skeleton Fusion:\n"
               << "  --calibration FILE   - Load calibration file and enable fusion\n"
               << "  --fusion-mode MODE   - Fusion mode: winner | weighted (default: weighted)\n\n"
@@ -883,6 +886,9 @@ int main(int argc, char** argv)
         else if (arg == "TENSORRT") processingMode = K4ABT_TRACKER_PROCESSING_MODE_GPU_TENSORRT;
         else if (arg == "--calibration" && i + 1 < argc) {
             g_calibrationPath = argv[++i];
+        }
+        else if (arg == "--primary" && i + 1 < argc) {
+            g_primarySerial = argv[++i];
         }
         else if (arg == "--fusion-mode" && i + 1 < argc) {
             std::string mode(argv[++i]);
@@ -934,10 +940,43 @@ int main(int argc, char** argv)
         }
 
         devices[i].serialNumber = GetDeviceSerialNumber(devices[i].device);
-        devices[i].isPrimary = (i == 0);  // First device is primary
 
-        std::cout << "Device " << i << ": SN=" << devices[i].serialNumber
-                  << " (" << (devices[i].isPrimary ? "PRIMARY" : "SECONDARY") << ")" << std::endl;
+        std::cout << "Device " << i << ": SN=" << devices[i].serialNumber << std::endl;
+    }
+
+    // Determine primary camera
+    if (!g_primarySerial.empty()) {
+        // Find device matching the specified serial number
+        bool found = false;
+        for (uint32_t i = 0; i < deviceCount; i++) {
+            if (devices[i].serialNumber == g_primarySerial) {
+                devices[i].isPrimary = true;
+                found = true;
+                std::cout << "Device " << i << " (SN=" << devices[i].serialNumber
+                          << ") set as PRIMARY (specified by --primary)" << std::endl;
+            } else {
+                devices[i].isPrimary = false;
+            }
+        }
+        if (!found) {
+            std::cerr << "Warning: Primary camera serial " << g_primarySerial
+                      << " not found! Using device 0 as primary." << std::endl;
+            devices[0].isPrimary = true;
+        }
+    } else {
+        // Default: first device is primary
+        for (uint32_t i = 0; i < deviceCount; i++) {
+            devices[i].isPrimary = (i == 0);
+        }
+        if (deviceCount > 1) {
+            std::cout << "Note: Use --primary SERIAL to specify sync hub master camera" << std::endl;
+        }
+    }
+
+    // Print device roles
+    for (uint32_t i = 0; i < deviceCount; i++) {
+        std::cout << "Device " << i << ": "
+                  << (devices[i].isPrimary ? "PRIMARY (MASTER)" : "SECONDARY (SUBORDINATE)") << std::endl;
     }
 
     // Load calibration if specified

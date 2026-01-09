@@ -545,16 +545,31 @@ void PerformSkeletonFusion()
 {
     if (!g_calibration.isLoaded) return;
 
-    std::lock_guard<std::mutex> dataLock(g_bodyDataMutex);
+    // Step 1: Quickly copy body data (minimize lock time)
+    std::vector<std::vector<k4abt_body_t>> bodiesCopy;
+    std::vector<int> deviceIndices;
+    int numCameras = 0;
 
-    int numCameras = static_cast<int>(g_deviceBodyData.size());
-    if (numCameras == 0) return;
+    {
+        std::lock_guard<std::mutex> dataLock(g_bodyDataMutex);
+        numCameras = static_cast<int>(g_deviceBodyData.size());
+        if (numCameras == 0) return;
 
-    // Step 1: Gather and transform bodies from all cameras
+        bodiesCopy.resize(numCameras);
+        deviceIndices.resize(numCameras);
+
+        for (int i = 0; i < numCameras; i++) {
+            deviceIndices[i] = g_deviceBodyData[i].deviceIndex;
+            bodiesCopy[i] = g_deviceBodyData[i].bodies;  // Copy bodies
+        }
+    }
+    // Lock released - capture threads can continue
+
+    // Step 2: Transform bodies to primary frame (no lock needed)
     std::vector<CameraBodyData> cameraData(numCameras);
 
     for (int i = 0; i < numCameras; i++) {
-        cameraData[i].deviceIndex = g_deviceBodyData[i].deviceIndex;
+        cameraData[i].deviceIndex = deviceIndices[i];
 
         // Find matching calibration by device index
         const CameraExtrinsics* extrinsics = nullptr;
@@ -566,7 +581,7 @@ void PerformSkeletonFusion()
         }
 
         // Transform bodies to primary frame
-        for (const auto& body : g_deviceBodyData[i].bodies) {
+        for (const auto& body : bodiesCopy[i]) {
             k4abt_body_t transformedBody;
             transformedBody.id = body.id;
 
@@ -588,10 +603,10 @@ void PerformSkeletonFusion()
         }
     }
 
-    // Step 2: Match bodies across cameras
+    // Step 3: Match bodies across cameras
     std::vector<BodyMatch> matches = MatchBodiesAcrossCameras(cameraData, numCameras);
 
-    // Step 3: Fuse matched bodies
+    // Step 4: Fuse matched bodies
     std::vector<FusedBody> fusedBodies;
     uint32_t fusedId = 0;
 
@@ -605,7 +620,7 @@ void PerformSkeletonFusion()
         fusedBodies.push_back(fused);
     }
 
-    // Step 4: Update global fused bodies
+    // Step 5: Update global fused bodies
     {
         std::lock_guard<std::mutex> fusedLock(g_fusedBodyMutex);
         g_fusedBodies = std::move(fusedBodies);

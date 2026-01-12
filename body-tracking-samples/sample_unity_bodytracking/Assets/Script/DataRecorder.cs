@@ -1,3 +1,4 @@
+using System;
 using System.Collections;
 using System.IO;
 using UnityEngine;
@@ -26,11 +27,11 @@ public class DataRecorder : MonoBehaviour
     private StreamWriter joint_sw, HMD_sw;
     private float interval;
 
-    // Current (Update¿¡¼­ ¸Å ÇÁ·¹ÀÓ °»½ÅµÇ´Â ÃÖ½Å°ª)
+    // Current (Updateï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ÅµÇ´ï¿½ ï¿½Ö½Å°ï¿½)
     private Vector3 curHmdPos, curLPos, curRPos;
     private Quaternion curHmdRot, curLRot, curRRot;
 
-    // Last Recorded (RecordRoutine¿¡¼­ ½ÇÁ¦·Î CSV¿¡ ¾´ °ª)
+    // Last Recorded (RecordRoutineï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ CSVï¿½ï¿½ ï¿½ï¿½ ï¿½ï¿½)
     private int recFrame = -1;
     private float recUnityTime = 0f;
     private string recTimestamp = "";
@@ -47,6 +48,12 @@ public class DataRecorder : MonoBehaviour
         return $"{pos.x:F4},{pos.y:F4},{pos.z:F4},{e.x:F3},{e.y:F3},{e.z:F3}";
     }
 
+    // Get system timestamp in milliseconds (epoch time)
+    long GetTimestampMs()
+    {
+        return DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+    }
+
     void Awake()
     {
         interval = (frameRate > 0f) ? (1f / frameRate) : (1f / 30f);
@@ -54,31 +61,31 @@ public class DataRecorder : MonoBehaviour
 
     void Start()
     {
-        // UI´Â ³ìÈ­ ¿©ºÎ¿Í »ó°ü¾øÀÌ °è¼Ó º¸¿©ÁÖ±â
+        // UIï¿½ï¿½ ï¿½ï¿½È­ ï¿½ï¿½ï¿½Î¿ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½Ö±ï¿½
         uiRoutine = StartCoroutine(UIRoutine());
     }
 
     void OnDisable()
     {
-        // ¾ÈÀü Á¾·á
+        // ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½
         if (uiRoutine != null) StopCoroutine(uiRoutine);
         StopRecording();
     }
 
     void Update()
     {
-        // ³ìÈ­ Åä±Û
+        // ï¿½ï¿½È­ ï¿½ï¿½ï¿½
         if (Input.GetKeyDown(KeyCode.R))
         {
             if (!isRecording) StartRecording();
             else StopRecording();
         }
 
-        // ---- pose °»½Å (¸Å ÇÁ·¹ÀÓ ÃÖ½Å°ª) ----
+        // ---- pose ï¿½ï¿½ï¿½ï¿½ (ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½Ö½Å°ï¿½) ----
         UpdateCurrentPoses();
 
-        // (¼±ÅÃ) Å×½ºÆ® Å¥ºê µ¿±âÈ­
-        // Cube_L / Cube_R ¸¦ Ç×»ó µû¶ó¿À°Ô ÇÏ·Á¸é ¾Æ·¡ ÁÖ¼® ÇØÁ¦
+        // (ï¿½ï¿½ï¿½ï¿½) ï¿½×½ï¿½Æ® Å¥ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½È­
+        // Cube_L / Cube_R ï¿½ï¿½ ï¿½×»ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½Ï·ï¿½ï¿½ï¿½ ï¿½Æ·ï¿½ ï¿½Ö¼ï¿½ ï¿½ï¿½ï¿½ï¿½
         /*
         if (Cube_L != null)
         {
@@ -97,13 +104,13 @@ public class DataRecorder : MonoBehaviour
     {
         Transform camTf = Camera.main != null ? Camera.main.transform : null;
 
-        // HMD: centerEyeAnchor(¿ùµå). ¾øÀ¸¸é Camera.main »ç¿ë
+        // HMD: centerEyeAnchor(ï¿½ï¿½ï¿½ï¿½). ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ Camera.main ï¿½ï¿½ï¿½
         Transform hmdTf = (rig != null && rig.centerEyeAnchor != null) ? rig.centerEyeAnchor : camTf;
 
         curHmdPos = hmdTf != null ? hmdTf.position : Vector3.zero;
         curHmdRot = hmdTf != null ? hmdTf.rotation : Quaternion.identity;
 
-        // Controllers: hand anchors(¿ùµå)
+        // Controllers: hand anchors(ï¿½ï¿½ï¿½ï¿½)
         Transform lTf = (rig != null) ? rig.leftHandAnchor : null;
         Transform rTf = (rig != null) ? rig.rightHandAnchor : null;
 
@@ -127,15 +134,14 @@ public class DataRecorder : MonoBehaviour
 
         joint_sw = new StreamWriter(joint_path);
 
-        // 1-1) Joint Çì´õ
-        string header = "Frame,Time";
-        string last_header = ",Timestamp";
+        // 1-1) Joint header
+        string header = "timestamp_ms,frame,unity_time";
 
         string jointsPart = "";
         for (int i = 0; i < 32; i++)
-            jointsPart += $",P{i}_posX,P{i}_posY,P{i}_posZ";
+            jointsPart += $",joint{i}_x,joint{i}_y,joint{i}_z";
 
-        joint_sw.WriteLine(header + jointsPart + last_header);
+        joint_sw.WriteLine(header + jointsPart);
 
         // 2) HMD, Controller CSV
         string hmd_folderPath = Path.Combine(Application.dataPath, "HMD_CSV");
@@ -147,23 +153,23 @@ public class DataRecorder : MonoBehaviour
         HMD_sw = new StreamWriter(hmd_path);
 
         string hmdsPart = "";
-        hmdsPart += ",HMD_PosX,HMD_PosY,HMD_PosZ,HMD_RotX,HMD_RotY,HMD_RotZ";
-        hmdsPart += ",L_ctrl_PosX,L_ctrl_PosY,L_ctrl_PosZ,L_ctrl_RotX,L_ctrl_RotY,L_ctrl_RotZ";
-        hmdsPart += ",R_ctrl_PosX,R_ctrl_PosY,R_ctrl_PosZ,R_ctrl_RotX,R_ctrl_RotY,R_ctrl_RotZ";
+        hmdsPart += ",hmd_pos_x,hmd_pos_y,hmd_pos_z,hmd_rot_x,hmd_rot_y,hmd_rot_z";
+        hmdsPart += ",left_pos_x,left_pos_y,left_pos_z,left_rot_x,left_rot_y,left_rot_z";
+        hmdsPart += ",right_pos_x,right_pos_y,right_pos_z,right_rot_x,right_rot_y,right_rot_z";
 
-        HMD_sw.WriteLine(header + hmdsPart + last_header);
+        HMD_sw.WriteLine(header + hmdsPart);
 
-        // ±â·Ï ½ÃÀÛ
+        // ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½
         isRecording = true;
 
-        // ÇÁ·¹ÀÓ Ä«¿îÆ® ÃÊ±âÈ­
+        // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ Ä«ï¿½ï¿½Æ® ï¿½Ê±ï¿½È­
         recFrame = -1;
 
-        // ÀÌ¹Ì µ¹°í ÀÖÀ¸¸é Á¤¸®
+        // ï¿½Ì¹ï¿½ ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½
         if (recordRoutine != null) StopCoroutine(recordRoutine);
         recordRoutine = StartCoroutine(RecordRoutine());
 
-        Debug.Log($"<color=blue>±â·Ï ½ÃÀÛ:</color> {joint_path}");
+        Debug.Log($"<color=blue>ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½:</color> {joint_path}");
     }
 
     IEnumerator RecordRoutine()
@@ -173,13 +179,12 @@ public class DataRecorder : MonoBehaviour
 
         while (isRecording)
         {
-            // CSV prefix/suffix
+            // Get timestamp in milliseconds (epoch time for synchronization)
+            long timestampMs = GetTimestampMs();
             float unityTime = Time.time;
-            string prefix = $"{frameCount},{unityTime}";
-            string timestamp = System.DateTime.Now.ToString("MM-dd HH:mm:ss.fff");
-            string suffix = $",{timestamp}";
+            string prefix = $"{timestampMs},{frameCount},{unityTime:F4}";
 
-            // ---- Joint ±â·Ï ----
+            // ---- Joint recording ----
             string joints = "";
             if (pointsParent != null)
             {
@@ -190,17 +195,17 @@ public class DataRecorder : MonoBehaviour
             }
             else
             {
-                // pointsParent ¾øÀ¸¸é 32°³ 0À¸·Î Ã¤¿ì±â
+                // If pointsParent is null, fill with zeros
                 for (int i = 0; i < 32; i++) joints += ",0,0,0";
             }
 
-            joint_sw.WriteLine(prefix + joints + suffix);
+            joint_sw.WriteLine(prefix + joints);
+            joint_sw.Flush();  // Ensure data is written immediately
 
-            // ---- HMD/Controller ±â·Ï (UpdateÀÇ ÃÖ½Å°ªÀ» »ç¿ë) ----
-            // "ÀÌ¹ø ÇÁ·¹ÀÓ¿¡ CSV¿¡ ¾´ °ª"À» snapshotÀ¸·Î ÀúÀåÇØ UI¿¡ Ç¥½Ã
+            // ---- HMD/Controller recording ----
             recFrame = frameCount;
             recUnityTime = unityTime;
-            recTimestamp = timestamp;
+            recTimestamp = timestampMs.ToString();
 
             recHmdPos = curHmdPos; recHmdRot = curHmdRot;
             recLPos = curLPos; recLRot = curLRot;
@@ -211,7 +216,8 @@ public class DataRecorder : MonoBehaviour
                 "," + Pose6(recLPos, recLRot) +
                 "," + Pose6(recRPos, recRRot);
 
-            HMD_sw.WriteLine(prefix + payload + suffix);
+            HMD_sw.WriteLine(prefix + payload);
+            HMD_sw.Flush();  // Ensure data is written immediately
 
             frameCount++;
             yield return wait;
@@ -232,8 +238,8 @@ public class DataRecorder : MonoBehaviour
                 Vector3 rle = recLRot.eulerAngles;
                 Vector3 rre = recRRot.eulerAngles;
 
-                // Current: ¸Å ÇÁ·¹ÀÓ °»½ÅµÇ´Â °ª
-                // Recorded: ½ÇÁ¦ CSV¿¡ ¸¶Áö¸·À¸·Î ±â·ÏµÈ °ª(ÇÁ·¹ÀÓ·¹ÀÌÆ® ±â¹Ý)
+                // Current: ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ÅµÇ´ï¿½ ï¿½ï¿½
+                // Recorded: ï¿½ï¿½ï¿½ï¿½ CSVï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½Ïµï¿½ ï¿½ï¿½(ï¿½ï¿½ï¿½ï¿½ï¿½Ó·ï¿½ï¿½ï¿½Æ® ï¿½ï¿½ï¿½)
                 info_txt.text =
                     $"                Position                     Rotation \n" +
                     $"          X        Y         Z         X         Y         Z\n" +
@@ -242,7 +248,7 @@ public class DataRecorder : MonoBehaviour
                     $"R      : {curRPos.x:F2}, {curRPos.y:F2}, {curRPos.z:F2}  | {cre.x:F1}, {cre.y:F1}, {cre.z:F1}\n";
             }
 
-            // UI °»½Åµµ frameRate(Hz)·Î ¸ÂÃß±â
+            // UI ï¿½ï¿½ï¿½Åµï¿½ frameRate(Hz)ï¿½ï¿½ ï¿½ï¿½ï¿½ß±ï¿½
             float uiInterval = (frameRate > 0f) ? (1f / frameRate) : (1f / 30f);
             yield return new WaitForSecondsRealtime(uiInterval);
         }
@@ -263,6 +269,6 @@ public class DataRecorder : MonoBehaviour
         if (joint_sw != null) { joint_sw.Close(); joint_sw = null; }
         if (HMD_sw != null) { HMD_sw.Close(); HMD_sw = null; }
 
-        Debug.Log("<color=red>³ìÈ­ Á¾·á.</color>");
+        Debug.Log("<color=red>ï¿½ï¿½È­ ï¿½ï¿½ï¿½ï¿½.</color>");
     }
 }

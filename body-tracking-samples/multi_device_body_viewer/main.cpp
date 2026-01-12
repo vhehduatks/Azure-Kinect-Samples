@@ -6,6 +6,7 @@
 #include <array>
 #include <iostream>
 #include <fstream>
+#include <sstream>
 #include <map>
 #include <vector>
 #include <thread>
@@ -13,6 +14,8 @@
 #include <atomic>
 #include <cmath>
 #include <algorithm>
+#include <chrono>
+#include <iomanip>
 #include <k4a/k4a.h>
 #include <k4abt.h>
 #include <nlohmann/json.hpp>
@@ -68,6 +71,13 @@ std::atomic<bool> s_isRunning{true};
 Visualization::Layout3d s_layoutMode = Visualization::Layout3d::OnlyMainView;
 bool s_visualizeJointFrame = false;
 
+// CSV Recording State
+std::atomic<bool> g_isRecording{false};
+std::ofstream g_csvFile;
+std::mutex g_csvMutex;
+std::string g_outputPath = "";
+std::chrono::steady_clock::time_point g_recordingStartTime;
+
 // Fusion state
 CalibrationData g_calibration = {0, {}, false};
 std::vector<FusedBody> g_fusedBodies;
@@ -90,6 +100,98 @@ struct DeviceBodyData {
     int deviceIndex = 0;
 };
 std::vector<DeviceBodyData> g_deviceBodyData;
+
+// ============================================================================
+// CSV Recording Functions
+// ============================================================================
+int64_t GetSystemTimestampMs()
+{
+    auto now = std::chrono::system_clock::now();
+    auto duration = now.time_since_epoch();
+    return std::chrono::duration_cast<std::chrono::milliseconds>(duration).count();
+}
+
+std::string GenerateTimestampFilename(const std::string& prefix)
+{
+    auto now = std::chrono::system_clock::now();
+    auto time_t_now = std::chrono::system_clock::to_time_t(now);
+    std::tm tm_now;
+    localtime_s(&tm_now, &time_t_now);
+
+    std::ostringstream oss;
+    oss << prefix << "_"
+        << std::put_time(&tm_now, "%Y%m%d_%H%M%S")
+        << ".csv";
+    return oss.str();
+}
+
+void StartRecording(const std::string& outputPath)
+{
+    std::lock_guard<std::mutex> lock(g_csvMutex);
+
+    std::string filename = outputPath.empty()
+        ? GenerateTimestampFilename("skeleton_data")
+        : outputPath;
+
+    g_csvFile.open(filename);
+    if (!g_csvFile.is_open()) {
+        std::cerr << "Failed to open CSV file: " << filename << std::endl;
+        return;
+    }
+
+    // Write CSV header
+    g_csvFile << "timestamp_ms,device_index,body_id,joint_id,joint_name,"
+              << "pos_x,pos_y,pos_z,rot_w,rot_x,rot_y,rot_z,confidence\n";
+
+    g_recordingStartTime = std::chrono::steady_clock::now();
+    g_isRecording = true;
+
+    std::cout << "Recording started: " << filename << std::endl;
+}
+
+void StopRecording()
+{
+    std::lock_guard<std::mutex> lock(g_csvMutex);
+
+    if (g_csvFile.is_open()) {
+        g_csvFile.close();
+        std::cout << "Recording stopped." << std::endl;
+    }
+    g_isRecording = false;
+}
+
+void RecordSkeletonFrame(int deviceIndex, const std::vector<k4abt_body_t>& bodies)
+{
+    if (!g_isRecording) return;
+
+    std::lock_guard<std::mutex> lock(g_csvMutex);
+    if (!g_csvFile.is_open()) return;
+
+    int64_t timestamp = GetSystemTimestampMs();
+
+    for (const auto& body : bodies) {
+        for (int j = 0; j < K4ABT_JOINT_COUNT; j++) {
+            const auto& joint = body.skeleton.joints[j];
+
+            g_csvFile << timestamp << ","
+                      << deviceIndex << ","
+                      << body.id << ","
+                      << j << ","
+                      << g_jointNames[j] << ","
+                      << std::fixed << std::setprecision(3)
+                      << joint.position.xyz.x << ","
+                      << joint.position.xyz.y << ","
+                      << joint.position.xyz.z << ","
+                      << joint.orientation.wxyz.w << ","
+                      << joint.orientation.wxyz.x << ","
+                      << joint.orientation.wxyz.y << ","
+                      << joint.orientation.wxyz.z << ","
+                      << static_cast<int>(joint.confidence_level) << "\n";
+        }
+    }
+
+    g_csvFile.flush();  // Ensure data is written immediately
+}
 
 // ============================================================================
 // Input Handling
@@ -124,6 +226,13 @@ int64_t ProcessKey(void* /*context*/, int key)
             std::cout << "Fusion mode: WINNER_TAKES_ALL" << std::endl;
         }
         break;
+    case GLFW_KEY_R:
+        if (g_isRecording) {
+            StopRecording();
+        } else {
+            StartRecording(g_outputPath);
+        }
+        break;
     case GLFW_KEY_H:
         std::cout << "\n=== Key Shortcuts ===\n"
                   << "ESC: quit\n"
@@ -131,7 +240,8 @@ int64_t ProcessKey(void* /*context*/, int key)
                   << "b: body visualization mode\n"
                   << "k: 3d window layout\n"
                   << "f: toggle skeleton fusion\n"
-                  << "m: switch fusion mode (winner/weighted)\n" << std::endl;
+                  << "m: switch fusion mode (winner/weighted)\n"
+                  << "r: start/stop CSV recording\n" << std::endl;
         break;
     }
     return 1;
@@ -749,6 +859,11 @@ void DeviceCaptureThread(DeviceInfo* deviceInfo, int dataIndex)
 
                 data.hasNewData = true;
 
+                // Record to CSV if recording is enabled
+                if (g_isRecording && !data.bodies.empty()) {
+                    RecordSkeletonFrame(deviceInfo->index, data.bodies);
+                }
+
                 k4a_capture_release(originalCapture);
                 k4abt_frame_release(bodyFrame);
             }
@@ -866,7 +981,10 @@ void PrintUsage()
               << "Skeleton Fusion:\n"
               << "  --calibration FILE   - Load calibration file and enable fusion\n"
               << "  --fusion-mode MODE   - Fusion mode: winner | weighted (default: weighted)\n\n"
+              << "CSV Recording:\n"
+              << "  --output FILE        - Output CSV file path (default: skeleton_data_YYYYMMDD_HHMMSS.csv)\n\n"
               << "Runtime Controls:\n"
+              << "  R - Start/stop CSV recording\n"
               << "  F - Toggle skeleton fusion on/off\n"
               << "  M - Switch fusion mode (winner/weighted)\n"
               << "  B - Toggle body visualization\n"
@@ -914,6 +1032,9 @@ int main(int argc, char** argv)
                 PrintUsage();
                 return -1;
             }
+        }
+        else if (arg == "--output" && i + 1 < argc) {
+            g_outputPath = argv[++i];
         }
         else if (arg == "--help" || arg == "-h") {
             PrintUsage();
@@ -1131,6 +1252,11 @@ int main(int argc, char** argv)
     // Cleanup
     std::cout << "\nShutting down..." << std::endl;
     s_isRunning = false;
+
+    // Stop recording if active
+    if (g_isRecording) {
+        StopRecording();
+    }
 
     // Wait for capture threads
     for (auto& thread : captureThreads)

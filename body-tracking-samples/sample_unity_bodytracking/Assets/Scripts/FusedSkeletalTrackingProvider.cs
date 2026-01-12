@@ -124,7 +124,7 @@ public class FusedSkeletalTrackingProvider : BackgroundDataProvider
                 rawBodiesPerDevice[i] = new Body[20]; // Max 20 bodies per device
                 for (int j = 0; j < 20; j++)
                 {
-                    rawBodiesPerDevice[i][j] = new Body(Skeleton.JointCount);
+                    rawBodiesPerDevice[i][j] = new Body(32); // K4ABT_JOINT_COUNT = 32
                 }
                 bodyCountsPerDevice[i] = 0;
                 deviceLocks[i] = new object();
@@ -313,8 +313,7 @@ public class FusedSkeletalTrackingProvider : BackgroundDataProvider
                     CameraFPS = FPS.FPS30,
                     ColorResolution = ColorResolution.Off,
                     DepthMode = DepthMode.NFOV_Unbinned,
-                    WiredSyncMode = WiredSyncMode.Standalone,
-                    SubordinateDelayOffUsec = (i == 0) ? 0 : 160
+                    WiredSyncMode = WiredSyncMode.Standalone
                 });
 
                 deviceCalibrations[i] = devices[i].GetCalibration();
@@ -323,7 +322,7 @@ public class FusedSkeletalTrackingProvider : BackgroundDataProvider
                     deviceCalibrations[i],
                     new TrackerConfiguration()
                     {
-                        ProcessingMode = TrackerProcessingMode.Gpu,
+                        ProcessingMode = TrackerProcessingMode.Cuda,
                         SensorOrientation = SensorOrientation.Default
                     });
 
@@ -398,7 +397,7 @@ public class FusedSkeletalTrackingProvider : BackgroundDataProvider
 
             using (Tracker tracker = Tracker.Create(deviceCalibration, new TrackerConfiguration()
             {
-                ProcessingMode = TrackerProcessingMode.Gpu,
+                ProcessingMode = TrackerProcessingMode.Cuda,
                 SensorOrientation = SensorOrientation.Default
             }))
             {

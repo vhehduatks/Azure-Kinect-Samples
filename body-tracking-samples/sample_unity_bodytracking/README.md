@@ -1,147 +1,132 @@
-# Sample Unity Body Tracking Application
+# Unity Body Tracking Sample
 
-### Directions for getting started:
+Unity sample demonstrating Azure Kinect Body Tracking SDK integration with multi-camera skeleton fusion support.
 
-#### 1) First get the latest nuget packages of libraries:
+## Features
 
-Open the sample_unity_bodytracking project in Unity.
-Open the Visual Studio Solution associated with this project.
-If there is no Visual Studio Solution yet you can make one by opening the Unity Editor
-and selecting one of the csharp files in the project and opening it for editing.
-You may also need to set the preferences->External Tools to Visual Studio
+- Single-camera body tracking with 3D avatar rendering
+- **Multi-camera skeleton fusion** for occlusion compensation
+- Runtime fusion mode switching
+- Support for Azure Kinect DK and Orbbec Femto Bolt cameras
 
-In Visual Studio:
-Select Tools->NuGet Package Manager-> Package Manager Console
+## Requirements
 
-On the command line of the console at type the following command:
+- Unity 2021.3 or later
+- Azure Kinect Body Tracking SDK 1.1.2
+- Visual C++ Redistributable
+- CUDA/cuDNN/TensorRT (for CUDA processing mode)
 
-Update-Package -reinstall
+### For Orbbec Femto Bolt
 
-The latest libraries will be put in the Packages folder under sample_unity_bodytracking
+Replace DLLs in `Assets/Plugins/` with Orbbec K4A Wrapper versions:
 
-#### 2) Next add these libraries to the Assets/Plugins folder:
+| File | Description |
+|------|-------------|
+| `k4a.dll` | ~283KB (Orbbec) instead of ~651KB (Azure) |
+| `k4arecord.dll` | Orbbec version |
+| `depthengine_2_0.dll` | Orbbec version |
+| `OrbbecSDK.dll` | Add new |
+| `ob_usb.dll` | Add new |
+| `live555.dll` | Add new |
+| `OrbbecSDKConfig_v1.0.xml` | Add new |
 
-You can do this by hand or just **run the batch file MoveLibraryFile.bat** in the sample_unity_bodytracking directory
+Source: `C:\OrbbecSDK_K4A_Wrapper_v1.10.5_windows_202510212040\bin\`
 
-From Packages/Microsoft.Azure.Kinect.BodyTracking.1.1.2/lib/netstandard2.0
+## Setup
 
-- Microsoft.Azure.Kinect.BodyTracking.deps.json
-- Microsoft.Azure.Kinect.BodyTracking.xml
-- Microsoft.Azure.Kinect.BodyTracking.dll
-- Microsoft.Azure.Kinect.BodyTracking.pdb
+1. Open the project in Unity
+2. Run `Update-Package -reinstall` in VS Package Manager Console (if needed)
+3. Run `MoveLibraryFile.bat` to copy DLLs to Assets/Plugins
+4. For Orbbec cameras, replace DLLs as described above
 
-From Packages/Microsoft.Azure.Kinect.BodyTracking.1.1.2/lib/native/amd64/release/
+## Multi-Camera Skeleton Fusion
 
-- k4abt.dll
+Skeleton fusion combines body tracking data from multiple calibrated cameras to compensate for occlusion.
 
-From Packages/Microsoft.Azure.Kinect.BodyTracking.ONNXRuntime.1.10.0/lib/native/amd64/release
+### Architecture
 
-- directml.dll
-- onnxruntime.dll
-- onnxruntime_providers_cuda.dll
-- onnxruntime_providers_shared.dll
-- onnxruntime_providers_tensorrt.dll
+```
+Camera 1 → Tracker 1 → Skeleton 1 ─┐
+Camera 2 → Tracker 2 → Skeleton 2 ─┼→ Transform → Match → Fuse → Fused Skeleton
+Camera N → Tracker N → Skeleton N ─┘
+```
 
-From Packages/Microsoft.Azure.Kinect.Sensor.1.4.1/lib/netstandard2.0
+### Calibration
 
-- Microsoft.Azure.Kinect.Sensor.deps.json
-- Microsoft.Azure.Kinect.Sensor.xml
-- Microsoft.Azure.Kinect.Sensor.dll
-- Microsoft.Azure.Kinect.Sensor.pdb
+Generate `calibration.json` using the `multi_device_calibration` tool:
 
-From Packages/Microsoft.Azure.Kinect.Sensor.1.4.1/lib/native/amd64/release
+```bash
+multi_device_calibration.exe --rows 6 --cols 9 --square 25.0 --output calibration
+```
 
-- depthengine_2_0.dll
-- k4a.dll
-- k4arecord.dll
+Place the `calibration.json` file in one of these locations:
+- `Assets/StreamingAssets/calibration.json` (recommended)
+- Absolute path specified in Inspector
 
-From Packages/System.Buffers.4.4.0/lib/netstandard2.0
+### Configuration
 
-- System.Buffers.dll
+In Unity Inspector on the `main` GameObject:
 
-From Packages/System.Memory.4.5.3/lib/netstandard2.0
+| Setting | Description |
+|---------|-------------|
+| **Enable Fusion** | Enable multi-camera skeleton fusion |
+| **Calibration File** | Path to calibration.json |
+| **Fusion Mode** | WeightedAverage or WinnerTakesAll |
 
-- System.Memory.dll
+### Runtime Controls
 
-From Packages/System.Reflection.Emit.Lightweight.4.6.0/lib/netstandard2.0
+| Key | Action |
+|-----|--------|
+| `F` | Toggle fusion on/off |
+| `M` | Switch fusion mode |
 
-- System.Reflection.Emit.Lightweight.dll
+### Fusion Modes
 
-From Packages/System.Runtime.CompilerServices.Unsafe.4.5.2/lib/netstandard2.0
+| Mode | Description |
+|------|-------------|
+| **WeightedAverage** | Confidence-weighted position averaging (recommended) |
+| **WinnerTakesAll** | Use joint from camera with highest confidence |
 
-- System.Runtime.CompilerServices.Unsafe.dll
+### Confidence Weights
 
+| Level | Weight |
+|-------|--------|
+| None | 0.0 |
+| Low | 0.25 |
+| Medium | 0.6 |
+| High | 1.0 |
 
-#### 3) Then add these libraries to the sample_unity_bodytracking project root directory that contains the Assets folder:
+## Scripts
 
-You can do this by hand or just **run the batch file MoveLibraryFile.bat** in the sample_unity_bodytracking directory
+| File | Description |
+|------|-------------|
+| `main.cs` | Entry point, fusion configuration |
+| `SkeletalTrackingProvider.cs` | Single-camera body tracking |
+| `FusedSkeletalTrackingProvider.cs` | Multi-camera fusion provider |
+| `CalibrationLoader.cs` | Parses calibration.json |
+| `SkeletonFusion.cs` | Transform, match, fuse algorithms |
+| `TrackerHandler.cs` | Avatar rendering |
+| `Body.cs` | Body data structure |
+| `BackgroundData.cs` | Frame data container |
 
-From Packages/Microsoft.Azure.Kinect.BodyTracking.1.1.2/content
+## Troubleshooting
 
-- dnn_model_2_0_op11.onnx
+### "No devices connected!"
+- For Orbbec cameras: Replace DLLs with Orbbec K4A Wrapper versions
+- Check USB connections
+- Verify cameras work in OrbbecViewer first
 
-From Packages/Microsoft.Azure.Kinect.BodyTracking.ONNXRuntime.1.10.0/lib/native/amd64/release
+### Fusion not working
+- Verify `calibration.json` path is correct
+- Check Unity Console for calibration loading messages
+- Ensure all cameras are connected and detected
 
-- directml.dll
-- onnxruntime.dll
-- onnxruntime_providers_cuda.dll
-- onnxruntime_providers_shared.dll
-- onnxruntime_providers_tensorrt.dll
+### Poor tracking quality
+- Ensure cameras are properly calibrated
+- Check camera sync hub configuration
+- Try switching fusion modes
 
+## See Also
 
-#### 4) Next make sure you have all the [required DLLs for ONNX Runtime execution](https://docs.microsoft.com/en-us/azure/kinect-dk/body-sdk-setup#required-dlls-for-onnx-runtime-execution-environments):
-
-First, download and install [Visual C++ Redistributable](https://docs.microsoft.com/en-us/azure/kinect-dk/body-sdk-setup#visual-c-redistributable-for-visual-studio-2015).
-
-Additionally:
-
-**For CUDA**:
-* Download and install appropriate version of CUDA and make sure that CUDA_PATH exists as an environment variable (e.g C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v11.4).
-* Download and install appropriate version of cuDNN and add a value to the PATH environment variable for it (e.g C:\Program Files\NVIDIA GPU Computing Toolkit\cuda-8.2.2.6\bin).
-
-**For TensorRT**:
-* Download and install appropriate version of CUDA and make sure that CUDA_PATH exists as an environment variable (e.g C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v11.4).
-* Download and install appropriate version of TensorRT and add a value to the PATH environment variable for it (e.g C:\Program Files\NVIDIA GPU Computing Toolkit\TensorRT-8.2.1.8\lib).
-
-**For DirectML**:
-* Copy the **directml.dll** from the sample_unity_bodytracking folder to the unity editor directory (e.g C:\Program Files\Unity\Hub\Editor\2019.1.2f1\Editor)
-
-
-#### 5) Then specify Execution Provider for the tracking:
-
-In the ...\sample_unity_bodytracking\Assets\Scripts\SkeletalTrackingProvider.cs change the ProcessingMode to the one you want.
-
-* TrackerProcessingMode.GPU (Defaults to DirectML for Windows)
-* TrackerProcessingMode.CPU
-* TrackerProcessingMode.Cuda
-* TrackerProcessingMode.TensorRT
-* TrackerProcessingMode.DirectML
-
-
-#### 6) Open the Unity Project and under Scenes/  select the Kinect4AzureSampleScene:
-
-![alt text](./UnitySampleGettingStarted.png)
-
-
-Press play.
-
-
-#### If you wish to create a new scene:
-
-* Create a gameobject and add the component for the main.cs script.
-* Go to the prefab folder and drop in the Kinect4AzureTracker prefab.
-* Now drag the gameobject for the Kinect4AzureTracker onto the Tracker slot in the main object in the inspector.
-
-
-### Finally if you Build a Standalone Executable:
-
-You will need to put [required DLLs for ONNX Runtime execution](https://docs.microsoft.com/en-us/azure/kinect-dk/body-sdk-setup#required-dlls-for-onnx-runtime-execution-environments) in the same directory with the .exe:
-
-You can copy ONNXRuntime and DirectML files from nuget package by hand or from sample_unity_bodytracking directory after running **the batch file MoveLibraryFile.bat** (Step #3)
-
-For the CUDA/cuDNN/TensorRT DLLs (Step #4) you can either have them in the PATH environment variable or copy required set of DLLs from the installation locations:
-
-e.g. 
-* from C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v11.4\bin for the CUDA files.
-* from C:\Program Files\NVIDIA GPU Computing Toolkit\cuda-8.2.2.6\bin for the cuDNN files.
-* from C:\Program Files\NVIDIA GPU Computing Toolkit\TensorRT-8.2.1.8\lib for the TensorRT files.
+- [multi_device_calibration](../multi_device_calibration/) - Calibration tool
+- [multi_device_body_viewer](../multi_device_body_viewer/) - C++ fusion viewer

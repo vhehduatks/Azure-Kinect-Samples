@@ -71,6 +71,11 @@ std::atomic<bool> s_isRunning{true};
 Visualization::Layout3d s_layoutMode = Visualization::Layout3d::OnlyMainView;
 bool s_visualizeJointFrame = false;
 
+// Camera view mode: -1 = all cameras, 0+ = specific camera index
+int g_cameraViewMode = -1;
+int g_numDevices = 0;
+std::vector<std::string> g_deviceSerialNumbers;
+
 // CSV Recording State
 std::atomic<bool> g_isRecording{false};
 std::ofstream g_csvFile;
@@ -177,7 +182,7 @@ void RecordSkeletonFrame(int deviceIndex, const std::vector<k4abt_body_t>& bodie
                       << deviceIndex << ","
                       << body.id << ","
                       << j << ","
-                      << g_jointNames[j] << ","
+                      << g_jointNames.at(static_cast<k4abt_joint_id_t>(j)) << ","
                       << std::fixed << std::setprecision(3)
                       << joint.position.xyz.x << ","
                       << joint.position.xyz.y << ","
@@ -204,7 +209,17 @@ int64_t ProcessKey(void* /*context*/, int key)
         s_isRunning = false;
         break;
     case GLFW_KEY_K:
-        s_layoutMode = (Visualization::Layout3d)(((int)s_layoutMode + 1) % (int)Visualization::Layout3d::Count);
+        // Cycle through camera views: All(-1) -> Cam0 -> Cam1 -> ... -> All(-1)
+        g_cameraViewMode++;
+        if (g_cameraViewMode >= g_numDevices) {
+            g_cameraViewMode = -1;
+        }
+        if (g_cameraViewMode == -1) {
+            std::cout << "Camera view: ALL CAMERAS" << std::endl;
+        } else {
+            std::cout << "Camera view: Device " << g_cameraViewMode
+                      << " (SN: " << g_deviceSerialNumbers[g_cameraViewMode] << ")" << std::endl;
+        }
         break;
     case GLFW_KEY_B:
         s_visualizeJointFrame = !s_visualizeJointFrame;
@@ -238,7 +253,7 @@ int64_t ProcessKey(void* /*context*/, int key)
                   << "ESC: quit\n"
                   << "h: help\n"
                   << "b: body visualization mode\n"
-                  << "k: 3d window layout\n"
+                  << "k: cycle camera view (All -> Cam0 -> Cam1 -> ...)\n"
                   << "f: toggle skeleton fusion\n"
                   << "m: switch fusion mode (winner/weighted)\n"
                   << "r: start/stop CSV recording\n" << std::endl;
@@ -892,25 +907,31 @@ void RenderAllBodies(Window3dWrapper& window3d)
     {
         if (!data.hasNewData) continue;
 
+        // Filter by camera view mode (-1 = all, 0+ = specific camera)
+        if (g_cameraViewMode >= 0 && data.deviceIndex != g_cameraViewMode) continue;
+
         // Render point cloud from first device with new data
-        if (data.depthImage && data.bodyIndexMap)
+        if (data.depthImage && data.bodyIndexMap && data.depthWidth > 0 && data.depthHeight > 0)
         {
-            std::vector<Color> pointCloudColors(data.depthWidth * data.depthHeight,
-                                                 {0.4f, 0.4f, 0.4f, 0.3f});
-
             const uint8_t* bodyIndexMapBuffer = k4a_image_get_buffer(data.bodyIndexMap);
-            for (int i = 0; i < data.depthWidth * data.depthHeight; i++)
+            if (bodyIndexMapBuffer != nullptr)
             {
-                uint8_t bodyIndex = bodyIndexMapBuffer[i];
-                if (bodyIndex != K4ABT_BODY_INDEX_MAP_BACKGROUND)
-                {
-                    // Use device-specific color offset
-                    int colorIdx = (bodyIndex + data.deviceIndex * 5) % g_bodyColors.size();
-                    pointCloudColors[i] = g_bodyColors[colorIdx];
-                }
-            }
+                std::vector<Color> pointCloudColors(data.depthWidth * data.depthHeight,
+                                                     {0.4f, 0.4f, 0.4f, 0.3f});
 
-            window3d.UpdatePointClouds(data.depthImage, pointCloudColors);
+                for (int i = 0; i < data.depthWidth * data.depthHeight; i++)
+                {
+                    uint8_t bodyIndex = bodyIndexMapBuffer[i];
+                    if (bodyIndex != K4ABT_BODY_INDEX_MAP_BACKGROUND)
+                    {
+                        // Use device-specific color offset
+                        int colorIdx = (bodyIndex + data.deviceIndex * 5) % g_bodyColors.size();
+                        pointCloudColors[i] = g_bodyColors[colorIdx];
+                    }
+                }
+
+                window3d.UpdatePointClouds(data.depthImage, pointCloudColors);
+            }
         }
 
         // Render skeletons
@@ -984,11 +1005,11 @@ void PrintUsage()
               << "CSV Recording:\n"
               << "  --output FILE        - Output CSV file path (default: skeleton_data_YYYYMMDD_HHMMSS.csv)\n\n"
               << "Runtime Controls:\n"
+              << "  K - Cycle camera view (All -> Cam0 -> Cam1 -> ...)\n"
               << "  R - Start/stop CSV recording\n"
               << "  F - Toggle skeleton fusion on/off\n"
               << "  M - Switch fusion mode (winner/weighted)\n"
               << "  B - Toggle body visualization\n"
-              << "  K - Change 3D window layout\n"
               << "  H - Show help\n"
               << "  ESC - Quit\n"
               << std::endl;
@@ -1218,12 +1239,27 @@ int main(int argc, char** argv)
 
     // Initialize global body data storage
     g_deviceBodyData.resize(deviceCount);
+    g_numDevices = static_cast<int>(deviceCount);
+    g_deviceSerialNumbers.resize(deviceCount);
+    for (uint32_t i = 0; i < deviceCount; i++) {
+        g_deviceBodyData[i].deviceIndex = static_cast<int>(i);
+        g_deviceBodyData[i].depthWidth = devices[i].depthWidth;
+        g_deviceBodyData[i].depthHeight = devices[i].depthHeight;
+        g_deviceSerialNumbers[i] = devices[i].serialNumber;
+    }
 
     // Create 3D window (use first device's calibration)
+    std::cout << "Creating 3D window..." << std::endl;
     Window3dWrapper window3d;
-    window3d.Create("Multi-Device Body Tracking", devices[0].calibration);
-    window3d.SetCloseCallback(CloseCallback);
-    window3d.SetKeyCallback(ProcessKey);
+    try {
+        window3d.Create("Multi-Device Body Tracking", devices[0].calibration);
+        window3d.SetCloseCallback(CloseCallback);
+        window3d.SetKeyCallback(ProcessKey);
+        std::cout << "3D window created successfully." << std::endl;
+    } catch (const std::exception& e) {
+        std::cerr << "Failed to create 3D window: " << e.what() << std::endl;
+        return -1;
+    }
 
     // Start capture threads
     std::vector<std::thread> captureThreads;
@@ -1235,18 +1271,35 @@ int main(int argc, char** argv)
     std::cout << "\nPress 'h' for help, ESC to quit\n" << std::endl;
 
     // Main render loop
-    while (s_isRunning)
-    {
-        if (g_fusionEnabled && g_calibration.isLoaded) {
-            PerformSkeletonFusion();
-            RenderFusedBodies(window3d);
-        } else {
-            RenderAllBodies(window3d);
-        }
+    int frameCount = 0;
+    try {
+        while (s_isRunning)
+        {
+            try {
+                if (g_fusionEnabled && g_calibration.isLoaded) {
+                    PerformSkeletonFusion();
+                    RenderFusedBodies(window3d);
+                } else {
+                    RenderAllBodies(window3d);
+                }
 
-        window3d.SetLayout3d(s_layoutMode);
-        window3d.SetJointFrameVisualization(s_visualizeJointFrame);
-        window3d.Render();
+                window3d.SetLayout3d(s_layoutMode);
+                window3d.SetJointFrameVisualization(s_visualizeJointFrame);
+                window3d.Render();
+
+                frameCount++;
+                if (frameCount % 100 == 0) {
+                    std::cout << "[Frame " << frameCount << "] Running..." << std::endl;
+                }
+            } catch (const std::exception& e) {
+                std::cerr << "Exception in frame " << frameCount << ": " << e.what() << std::endl;
+            }
+        }
+        std::cout << "Render loop ended normally (s_isRunning = false)" << std::endl;
+    } catch (const std::exception& e) {
+        std::cerr << "Exception in render loop: " << e.what() << std::endl;
+    } catch (...) {
+        std::cerr << "Unknown exception in render loop" << std::endl;
     }
 
     // Cleanup

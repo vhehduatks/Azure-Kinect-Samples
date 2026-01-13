@@ -158,6 +158,17 @@ multi_device_calibration.exe --rows 6 --cols 9 --square 25.0 --output calibratio
 - `calibration.yml` - OpenCV FileStorage format
 - `calibration.json` - JSON format with R (3x3) and t (3x1)
 
+## Detailed Documentation
+
+For detailed usage, see the README files in each project:
+
+| Project | README | Description |
+|---------|--------|-------------|
+| `multi_device_body_viewer` | [README.md](body-tracking-samples/multi_device_body_viewer/README.md) | Multi-camera body tracking with skeleton fusion, CSV recording, camera view switching |
+| `multi_device_calibration` | [README.md](body-tracking-samples/multi_device_calibration/README.md) | Multi-camera extrinsic calibration using checkerboard |
+| `sample_unity_bodytracking` | [README.md](body-tracking-samples/sample_unity_bodytracking/README.md) | Unity integration with multi-camera fusion and HMD recording |
+| `scripts` | [README.md](body-tracking-samples/scripts/README.md) | Python synchronization scripts for skeleton/HMD data alignment |
+
 ## Ref Notes
 1. https://github.com/orbbec/OrbbecSDK-K4A-Wrapper
 2. https://doc.orbbec.com/documentation/Camera%20Accessories/Set%20up%20Cameras%20for%20External%20Synchronization

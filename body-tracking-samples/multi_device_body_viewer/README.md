@@ -8,6 +8,8 @@ Multi-camera body tracking viewer for Orbbec Femto Bolt cameras with skeleton fu
 - Hardware sync via Orbbec Sync Hub
 - **Skeleton Fusion**: Combine tracking data from multiple cameras to compensate for occlusion
 - Two fusion modes: Winner-Takes-All and Weighted Average
+- **Camera View Switching**: View individual camera feeds or all cameras combined
+- **CSV Recording**: Record skeleton data with epoch timestamps for offline synchronization
 - Real-time 3D visualization
 
 ## Requirements
@@ -25,7 +27,11 @@ Multi-camera body tracking viewer for Orbbec Femto Bolt cameras with skeleton fu
 3. Build Release x64
 4. Copy Orbbec DLLs to output directory:
 
-```powershell
+```bash
+# Option 1: Use batch file
+copy_orbbec_dlls.bat
+
+# Option 2: Manual PowerShell
 $src = "C:\OrbbecSDK_K4A_Wrapper_v1.10.5_windows_202510212040\bin"
 $dst = ".\build\bin\Release"
 Copy-Item "$src\k4a.dll", "$src\k4arecord.dll", "$src\depthengine_2_0.dll" $dst -Force
@@ -56,6 +62,9 @@ Multi-Camera Sync:
 Skeleton Fusion:
   --calibration FILE Load calibration file and enable fusion
   --fusion-mode MODE Fusion mode: winner | weighted (default: weighted)
+
+CSV Recording:
+  --output FILE      Output CSV file path (default: skeleton_data_YYYYMMDD_HHMMSS.csv)
 ```
 
 ### Examples
@@ -75,10 +84,11 @@ multi_device_body_viewer.exe --primary CL8T75400DC --calibration calibration.jso
 
 | Key | Action |
 |-----|--------|
+| K | Cycle camera view (All → Cam0 → Cam1 → Cam2 → All) |
+| R | Start/stop CSV recording |
 | F | Toggle skeleton fusion on/off |
 | M | Switch fusion mode (winner/weighted) |
 | B | Toggle body visualization mode |
-| K | Change 3D window layout |
 | H | Show help |
 | ESC | Quit |
 
@@ -121,6 +131,47 @@ multi_device_body_viewer.exe --primary CL8T75400DC --calibration calibration.jso
 
 Bodies are matched across cameras using pelvis position proximity (threshold: 500mm). The same person seen by multiple cameras is identified and their joint data is fused.
 
+## CSV Recording
+
+Record skeleton data to CSV for offline analysis or synchronization with other data sources (e.g., HMD tracking from Unity).
+
+### Usage
+
+Press `R` to start/stop recording. CSV file is saved with epoch timestamps for synchronization.
+
+```bash
+# With custom output path
+multi_device_body_viewer.exe --primary CL8T75400DC --output my_recording.csv
+```
+
+### CSV Format
+
+```csv
+timestamp_ms,device_index,body_id,joint_id,joint_name,pos_x,pos_y,pos_z,rot_w,rot_x,rot_y,rot_z,confidence
+1704067200000,0,100,0,PELVIS,0.123,0.456,0.789,1.0,0.0,0.0,0.0,2
+...
+```
+
+| Column | Description |
+|--------|-------------|
+| timestamp_ms | System time in epoch milliseconds |
+| device_index | Camera index (0, 1, 2, ...) |
+| body_id | Body ID (offset by device: device0=0-99, device1=100-199, ...) |
+| joint_id | Joint index (0-31) |
+| joint_name | Joint name (PELVIS, SPINE_NAVAL, ...) |
+| pos_x/y/z | Joint position in mm |
+| rot_w/x/y/z | Joint orientation quaternion |
+| confidence | Confidence level (0=NONE, 1=LOW, 2=MEDIUM, 3=HIGH) |
+
+### Synchronization with HMD Data
+
+Use the Python script to synchronize with Unity HMD recordings:
+
+```bash
+cd ../scripts
+python sync_skeleton_hmd.py --skeleton skeleton_data.csv --hmd HMD_Walk_P01.csv --output synced.csv
+```
+
 ## Sync Hub Configuration
 
 The `--primary` option must match the camera connected to the sync hub's PRIMARY/MASTER port:
@@ -156,6 +207,8 @@ If `--primary` is not specified, device 0 is assumed to be primary.
 ## Related Projects
 
 - `multi_device_calibration` - Multi-camera extrinsic calibration tool
+- `scripts/` - Python synchronization scripts for offline data alignment
+- `sample_unity_bodytracking` - Unity body tracking with HMD recording
 - `simple_3d_viewer` - Single camera body tracking
 
 ## License

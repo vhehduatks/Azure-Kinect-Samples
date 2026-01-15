@@ -20,6 +20,14 @@
 #include <k4abt.h>
 #include <nlohmann/json.hpp>
 
+// Winsock for UDP communication
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#pragma comment(lib, "ws2_32.lib")
+#endif
+
 #include <BodyTrackingHelpers.h>
 #include <Utilities.h>
 #include <Window3dWrapper.h>
@@ -106,6 +114,190 @@ struct DeviceBodyData {
 };
 std::vector<DeviceBodyData> g_deviceBodyData;
 
+// Forward declarations for CSV recording functions (used by UDP listener)
+void StartRecording(const std::string& outputPath);
+void StopRecording();
+
+// ============================================================================
+// UDP Command Listener (for Unity sync)
+// ============================================================================
+#ifdef _WIN32
+int g_udpListenPort = 9000;
+int g_udpSendPort = 9001;
+std::string g_udpTargetIP = "127.0.0.1";
+std::atomic<bool> g_udpRunning{false};
+SOCKET g_udpSocket = INVALID_SOCKET;
+std::thread g_udpThread;
+
+// Command queue
+std::mutex g_commandMutex;
+std::vector<std::string> g_pendingCommands;
+
+void UdpListenerThread()
+{
+    char buffer[256];
+    sockaddr_in senderAddr;
+    int senderAddrSize = sizeof(senderAddr);
+
+    std::cout << "[UDP] Listener started on port " << g_udpListenPort << std::endl;
+
+    while (g_udpRunning)
+    {
+        int recvLen = recvfrom(g_udpSocket, buffer, sizeof(buffer) - 1, 0,
+                               (sockaddr*)&senderAddr, &senderAddrSize);
+
+        if (recvLen > 0)
+        {
+            buffer[recvLen] = '\0';
+            std::string command(buffer);
+
+            // Trim whitespace
+            command.erase(0, command.find_first_not_of(" \t\n\r"));
+            command.erase(command.find_last_not_of(" \t\n\r") + 1);
+
+            if (!command.empty())
+            {
+                std::lock_guard<std::mutex> lock(g_commandMutex);
+                g_pendingCommands.push_back(command);
+                std::cout << "[UDP] Received command: " << command << std::endl;
+            }
+        }
+        else if (recvLen == SOCKET_ERROR)
+        {
+            int err = WSAGetLastError();
+            if (err != WSAEWOULDBLOCK && err != WSAETIMEDOUT && g_udpRunning)
+            {
+                std::cerr << "[UDP] Receive error: " << err << std::endl;
+            }
+        }
+    }
+
+    std::cout << "[UDP] Listener stopped" << std::endl;
+}
+
+bool InitUdpListener(int port)
+{
+    WSADATA wsaData;
+    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0)
+    {
+        std::cerr << "[UDP] WSAStartup failed" << std::endl;
+        return false;
+    }
+
+    g_udpSocket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (g_udpSocket == INVALID_SOCKET)
+    {
+        std::cerr << "[UDP] Socket creation failed" << std::endl;
+        WSACleanup();
+        return false;
+    }
+
+    // Set socket timeout (100ms)
+    DWORD timeout = 100;
+    setsockopt(g_udpSocket, SOL_SOCKET, SO_RCVTIMEO, (char*)&timeout, sizeof(timeout));
+
+    // Bind to port
+    sockaddr_in localAddr;
+    localAddr.sin_family = AF_INET;
+    localAddr.sin_port = htons(port);
+    localAddr.sin_addr.s_addr = INADDR_ANY;
+
+    if (bind(g_udpSocket, (sockaddr*)&localAddr, sizeof(localAddr)) == SOCKET_ERROR)
+    {
+        std::cerr << "[UDP] Bind failed on port " << port << std::endl;
+        closesocket(g_udpSocket);
+        WSACleanup();
+        return false;
+    }
+
+    g_udpListenPort = port;
+    g_udpRunning = true;
+    g_udpThread = std::thread(UdpListenerThread);
+
+    return true;
+}
+
+void SendUdpCommand(const std::string& command)
+{
+    if (g_udpSocket == INVALID_SOCKET) return;
+
+    sockaddr_in targetAddr;
+    targetAddr.sin_family = AF_INET;
+    targetAddr.sin_port = htons(g_udpSendPort);
+    inet_pton(AF_INET, g_udpTargetIP.c_str(), &targetAddr.sin_addr);
+
+    sendto(g_udpSocket, command.c_str(), (int)command.length(), 0,
+           (sockaddr*)&targetAddr, sizeof(targetAddr));
+
+    std::cout << "[UDP] Sent: " << command << " -> " << g_udpTargetIP << ":" << g_udpSendPort << std::endl;
+}
+
+void ShutdownUdpListener()
+{
+    g_udpRunning = false;
+
+    if (g_udpSocket != INVALID_SOCKET)
+    {
+        closesocket(g_udpSocket);
+        g_udpSocket = INVALID_SOCKET;
+    }
+
+    if (g_udpThread.joinable())
+    {
+        g_udpThread.join();
+    }
+
+    WSACleanup();
+    std::cout << "[UDP] Shutdown complete" << std::endl;
+}
+
+std::vector<std::string> GetPendingCommands()
+{
+    std::lock_guard<std::mutex> lock(g_commandMutex);
+    std::vector<std::string> commands = std::move(g_pendingCommands);
+    g_pendingCommands.clear();
+    return commands;
+}
+
+void ProcessUdpCommands()
+{
+    auto commands = GetPendingCommands();
+    for (const auto& cmd : commands)
+    {
+        if (cmd == "TOGGLE_RECORD")
+        {
+            if (g_isRecording) {
+                StopRecording();
+                SendUdpCommand("STOP_RECORD");
+            } else {
+                StartRecording(g_outputPath);
+                SendUdpCommand("START_RECORD");
+            }
+        }
+        else if (cmd == "START_RECORD")
+        {
+            if (!g_isRecording) {
+                StartRecording(g_outputPath);
+            }
+        }
+        else if (cmd == "STOP_RECORD")
+        {
+            if (g_isRecording) {
+                StopRecording();
+            }
+        }
+        else if (cmd == "CYCLE_CAMERA")
+        {
+            g_cameraViewMode++;
+            if (g_cameraViewMode >= g_numDevices) {
+                g_cameraViewMode = -1;
+            }
+            std::cout << "Camera view: " << (g_cameraViewMode == -1 ? "ALL" : std::to_string(g_cameraViewMode)) << std::endl;
+        }
+    }
+}
+#endif // _WIN32
+
 // ============================================================================
 // CSV Recording Functions
 // ============================================================================
@@ -144,9 +336,14 @@ void StartRecording(const std::string& outputPath)
         return;
     }
 
-    // Write CSV header
-    g_csvFile << "timestamp_ms,device_index,body_id,joint_id,joint_name,"
-              << "pos_x,pos_y,pos_z,rot_w,rot_x,rot_y,rot_z,confidence\n";
+    // Write CSV header (wide format: one row per frame)
+    g_csvFile << "timestamp_ms,device_index,body_id";
+
+    // Add columns for each joint: J{id}_x, J{id}_y, J{id}_z, J{id}_conf
+    for (int j = 0; j < K4ABT_JOINT_COUNT; j++) {
+        g_csvFile << ",J" << j << "_x,J" << j << "_y,J" << j << "_z,J" << j << "_conf";
+    }
+    g_csvFile << "\n";
 
     g_recordingStartTime = std::chrono::steady_clock::now();
     g_isRecording = true;
@@ -174,25 +371,22 @@ void RecordSkeletonFrame(int deviceIndex, const std::vector<k4abt_body_t>& bodie
 
     int64_t timestamp = GetSystemTimestampMs();
 
+    // Wide format: one row per body, all joints in columns
     for (const auto& body : bodies) {
+        g_csvFile << timestamp << ","
+                  << deviceIndex << ","
+                  << body.id;
+
+        // Write all joints in sequence
         for (int j = 0; j < K4ABT_JOINT_COUNT; j++) {
             const auto& joint = body.skeleton.joints[j];
-
-            g_csvFile << timestamp << ","
-                      << deviceIndex << ","
-                      << body.id << ","
-                      << j << ","
-                      << g_jointNames.at(static_cast<k4abt_joint_id_t>(j)) << ","
-                      << std::fixed << std::setprecision(3)
-                      << joint.position.xyz.x << ","
-                      << joint.position.xyz.y << ","
-                      << joint.position.xyz.z << ","
-                      << joint.orientation.wxyz.w << ","
-                      << joint.orientation.wxyz.x << ","
-                      << joint.orientation.wxyz.y << ","
-                      << joint.orientation.wxyz.z << ","
-                      << static_cast<int>(joint.confidence_level) << "\n";
+            g_csvFile << std::fixed << std::setprecision(3)
+                      << "," << joint.position.xyz.x
+                      << "," << joint.position.xyz.y
+                      << "," << joint.position.xyz.z
+                      << "," << static_cast<int>(joint.confidence_level);
         }
+        g_csvFile << "\n";
     }
 
     g_csvFile.flush();  // Ensure data is written immediately
@@ -244,8 +438,14 @@ int64_t ProcessKey(void* /*context*/, int key)
     case GLFW_KEY_R:
         if (g_isRecording) {
             StopRecording();
+#ifdef _WIN32
+            SendUdpCommand("STOP_RECORD");
+#endif
         } else {
             StartRecording(g_outputPath);
+#ifdef _WIN32
+            SendUdpCommand("START_RECORD");
+#endif
         }
         break;
     case GLFW_KEY_H:
@@ -1004,6 +1204,9 @@ void PrintUsage()
               << "  --fusion-mode MODE   - Fusion mode: winner | weighted (default: weighted)\n\n"
               << "CSV Recording:\n"
               << "  --output FILE        - Output CSV file path (default: skeleton_data_YYYYMMDD_HHMMSS.csv)\n\n"
+              << "UDP Sync (for Unity):\n"
+              << "  --udp-port PORT      - UDP listen port (default: 9000)\n"
+              << "  --no-udp             - Disable UDP listener\n\n"
               << "Runtime Controls:\n"
               << "  K - Cycle camera view (All -> Cam0 -> Cam1 -> ...)\n"
               << "  R - Start/stop CSV recording\n"
@@ -1028,6 +1231,8 @@ int main(int argc, char** argv)
     // Parse arguments
     k4a_depth_mode_t depthMode = K4A_DEPTH_MODE_NFOV_UNBINNED;
     k4abt_tracker_processing_mode_t processingMode = K4ABT_TRACKER_PROCESSING_MODE_GPU_DIRECTML;
+    bool enableUdp = true;
+    int udpPort = 9000;
 
     for (int i = 1; i < argc; i++)
     {
@@ -1056,6 +1261,12 @@ int main(int argc, char** argv)
         }
         else if (arg == "--output" && i + 1 < argc) {
             g_outputPath = argv[++i];
+        }
+        else if (arg == "--udp-port" && i + 1 < argc) {
+            udpPort = std::stoi(argv[++i]);
+        }
+        else if (arg == "--no-udp") {
+            enableUdp = false;
         }
         else if (arg == "--help" || arg == "-h") {
             PrintUsage();
@@ -1268,6 +1479,17 @@ int main(int argc, char** argv)
         captureThreads.emplace_back(DeviceCaptureThread, &devices[i], i);
     }
 
+    // Initialize UDP listener for Unity sync
+#ifdef _WIN32
+    if (enableUdp) {
+        if (InitUdpListener(udpPort)) {
+            std::cout << "UDP sync enabled on port " << udpPort << std::endl;
+        } else {
+            std::cout << "Warning: Failed to initialize UDP listener" << std::endl;
+        }
+    }
+#endif
+
     std::cout << "\nPress 'h' for help, ESC to quit\n" << std::endl;
 
     // Main render loop
@@ -1276,6 +1498,11 @@ int main(int argc, char** argv)
         while (s_isRunning)
         {
             try {
+                // Process UDP commands from Unity
+#ifdef _WIN32
+                ProcessUdpCommands();
+#endif
+
                 if (g_fusionEnabled && g_calibration.isLoaded) {
                     PerformSkeletonFusion();
                     RenderFusedBodies(window3d);
@@ -1310,6 +1537,11 @@ int main(int argc, char** argv)
     if (g_isRecording) {
         StopRecording();
     }
+
+    // Shutdown UDP listener
+#ifdef _WIN32
+    ShutdownUdpListener();
+#endif
 
     // Wait for capture threads
     for (auto& thread : captureThreads)

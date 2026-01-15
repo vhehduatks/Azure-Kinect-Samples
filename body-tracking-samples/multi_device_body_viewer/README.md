@@ -165,12 +165,61 @@ timestamp_ms,device_index,body_id,joint_id,joint_name,pos_x,pos_y,pos_z,rot_w,ro
 
 ### Synchronization with HMD Data
 
-Use the Python script to synchronize with Unity HMD recordings:
+Use the Python script to synchronize with Unity HMD recordings. The script uses **coordinate-system invariant cross-correlation** based on inter-point distances.
 
 ```bash
 cd ../scripts
-python sync_skeleton_hmd.py --skeleton skeleton_data.csv --hmd HMD_Walk_P01.csv --output synced.csv
+
+# Recommended: Inter-point distance method
+python sync_skeleton_hmd.py --skeleton skeleton_data.csv --hmd HMD_Walk_P01.csv --method distance
+
+# With visualization
+python sync_skeleton_hmd.py --skeleton skeleton_data.csv --hmd HMD_Walk_P01.csv --method distance --plot
 ```
+
+See [scripts/README.md](../scripts/README.md) for detailed usage.
+
+## UDP Sync with Unity
+
+Synchronize recording start/stop between this application and Unity via UDP commands.
+
+### How It Works
+
+```
+Unity (R key) ──UDP:9000──► multi_device_body_viewer
+                           ↓ (toggle recording)
+Unity ◄──UDP:9001────────── (confirmation)
+```
+
+### Usage
+
+```bash
+# With UDP sync enabled (default)
+multi_device_body_viewer.exe --primary CL3FC3100HN
+
+# With custom port
+multi_device_body_viewer.exe --primary CL3FC3100HN --udp-port 9000
+
+# Disable UDP sync
+multi_device_body_viewer.exe --primary CL3FC3100HN --no-udp
+```
+
+### Unity Setup
+
+1. Add `RecordingSyncController.cs` to a GameObject
+2. Configure ports in Inspector:
+   - Send Port: 9000 (must match `--udp-port`)
+   - Receive Port: 9001
+3. Press R in Unity to toggle recording in both applications
+
+### Protocol
+
+| Command | Description |
+|---------|-------------|
+| `TOGGLE_RECORD` | Toggle recording on/off |
+| `START_RECORD` | Start recording |
+| `STOP_RECORD` | Stop recording |
+| `CYCLE_CAMERA` | Cycle camera view |
 
 ## Sync Hub Configuration
 

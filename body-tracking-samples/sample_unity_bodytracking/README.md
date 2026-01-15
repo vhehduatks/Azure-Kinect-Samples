@@ -126,7 +126,37 @@ In Unity Inspector on the `main` GameObject:
 - Check camera sync hub configuration
 - Try switching fusion modes
 
+## HMD Data Recording & Synchronization
+
+This sample includes HMD and controller recording via `DataRecorder.cs`.
+
+### Recording
+
+1. Attach `DataRecorder` component to a GameObject
+2. Configure participant ID and session name in Inspector
+3. Press `R` to start/stop recording
+4. CSV files are saved to `Assets/HMD_CSV/` and `Assets/JointCSV/`
+
+### Synchronization with External Skeleton Data
+
+When using skeleton data from `multi_device_body_viewer` (C++ app), use the sync script:
+
+```bash
+cd ../scripts
+
+# Recommended: Inter-point distance method (coordinate-invariant)
+python sync_skeleton_hmd.py --skeleton skeleton_data.csv --hmd HMD_Walk_P01.csv --method distance
+
+# With visualization
+python sync_skeleton_hmd.py --skeleton skeleton_data.csv --hmd HMD_Walk_P01.csv --method distance --plot
+```
+
+The script uses **inter-point distances** (head-hand, hand-hand) for cross-correlation, which works even though Orbbec and Quest use different coordinate systems.
+
+See [scripts/README.md](../scripts/README.md) for detailed usage.
+
 ## See Also
 
 - [multi_device_calibration](../multi_device_calibration/) - Calibration tool
 - [multi_device_body_viewer](../multi_device_body_viewer/) - C++ fusion viewer
+- [scripts](../scripts/) - Python synchronization scripts

@@ -1,0 +1,2110 @@
+{
+  "version": "1.0",
+  "sceneName": "SampleScene",
+  "exportTimestamp": "2026-01-14 17:14:43",
+  "gameObjects": [
+    {
+      "name": "Main Camera",
+      "path": "Main Camera",
+      "active": true,
+      "position": [0.000, 1.000, -10.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "Directional Light",
+      "path": "Directional Light",
+      "active": true,
+      "position": [0.000, 3.000, 0.000],
+      "rotation": [50.000, 330.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "[BuildingBlock] Camera Rig",
+      "path": "[BuildingBlock] Camera Rig",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000],
+      "scripts": [
+        "BuildingBlock",
+        "OVRCameraRig",
+        "OVRManager",
+        "OVRHeadsetEmulator"
+      ]    },
+    {
+      "name": "TrackingSpace",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "LeftEyeAnchor",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftEyeAnchor",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "CenterEyeAnchor",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/CenterEyeAnchor",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "RightEyeAnchor",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightEyeAnchor",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "TrackerAnchor",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/TrackerAnchor",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "LeftHandAnchor",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "LeftControllerAnchor",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "[BuildingBlock] Controller Tracking Left",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000],
+      "scripts": [
+        "BuildingBlock",
+        "OVRControllerHelper"
+      ]    },
+    {
+      "name": "OculusTouchForQuestAndRiftS_Left",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/OculusTouchForQuestAndRiftS_Left",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "l_controller_ply",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/OculusTouchForQuestAndRiftS_Left/l_controller_ply",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "left_monterey_controller_world",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/OculusTouchForQuestAndRiftS_Left/left_monterey_controller_world",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [270.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_button_oculus",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/OculusTouchForQuestAndRiftS_Left/left_monterey_controller_world/b_button_oculus",
+      "active": true,
+      "position": [-0.010, 0.023, -0.006],
+      "rotation": [281.000, 180.000, 270.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_button_x",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/OculusTouchForQuestAndRiftS_Left/left_monterey_controller_world/b_button_x",
+      "active": true,
+      "position": [-0.001, 0.005, -0.001],
+      "rotation": [281.000, 180.000, 270.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_button_y",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/OculusTouchForQuestAndRiftS_Left/left_monterey_controller_world/b_button_y",
+      "active": true,
+      "position": [0.003, -0.009, 0.001],
+      "rotation": [281.000, 180.000, 270.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_thumbstick",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/OculusTouchForQuestAndRiftS_Left/left_monterey_controller_world/b_thumbstick",
+      "active": true,
+      "position": [-0.018, -0.010, -0.004],
+      "rotation": [0.000, 90.000, 349.500],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_trigger_front",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/OculusTouchForQuestAndRiftS_Left/left_monterey_controller_world/b_trigger_front",
+      "active": true,
+      "position": [-0.010, -0.024, -0.009],
+      "rotation": [349.000, 0.000, 180.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_trigger_grip",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/OculusTouchForQuestAndRiftS_Left/left_monterey_controller_world/b_trigger_grip",
+      "active": true,
+      "position": [-0.003, -0.001, -0.018],
+      "rotation": [79.500, 359.994, 89.994],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "prp00002questController_animrig:left_monterey_controller_rig",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/OculusTouchForQuestAndRiftS_Left/prp00002questController_animrig:left_monterey_controller_rig",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "prp00002questController_animrig:RIG_left_monterey_controller_world",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/OculusTouchForQuestAndRiftS_Left/prp00002questController_animrig:left_monterey_controller_rig/prp00002questController_animrig:RIG_left_monterey_controller_world",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [270.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "prp00002questController_animrig:f_world",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/OculusTouchForQuestAndRiftS_Left/prp00002questController_animrig:left_monterey_controller_rig/prp00002questController_animrig:RIG_left_monterey_controller_world/prp00002questController_animrig:f_world",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "OculusTouchForQuestAndRiftS_Right",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/OculusTouchForQuestAndRiftS_Right",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "prp00002questController_animrig:right_monterey_controller_rig",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/OculusTouchForQuestAndRiftS_Right/prp00002questController_animrig:right_monterey_controller_rig",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "prp00002questController_animrig:RIG_right_monterey_controller_world",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/OculusTouchForQuestAndRiftS_Right/prp00002questController_animrig:right_monterey_controller_rig/prp00002questController_animrig:RIG_right_monterey_controller_world",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [270.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "prp00002questController_animrig:f_world",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/OculusTouchForQuestAndRiftS_Right/prp00002questController_animrig:right_monterey_controller_rig/prp00002questController_animrig:RIG_right_monterey_controller_world/prp00002questController_animrig:f_world",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "r_controller_ply",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/OculusTouchForQuestAndRiftS_Right/r_controller_ply",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "right_monterey_controller_world",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/OculusTouchForQuestAndRiftS_Right/right_monterey_controller_world",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [270.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_button_a",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/OculusTouchForQuestAndRiftS_Right/right_monterey_controller_world/b_button_a",
+      "active": true,
+      "position": [0.001, 0.005, -0.001],
+      "rotation": [79.000, 0.000, 90.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_button_b",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/OculusTouchForQuestAndRiftS_Right/right_monterey_controller_world/b_button_b",
+      "active": true,
+      "position": [-0.003, -0.009, 0.001],
+      "rotation": [79.000, 0.000, 90.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_button_oculus",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/OculusTouchForQuestAndRiftS_Right/right_monterey_controller_world/b_button_oculus",
+      "active": true,
+      "position": [0.009, 0.023, -0.006],
+      "rotation": [79.000, 0.000, 90.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_thumbstick",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/OculusTouchForQuestAndRiftS_Right/right_monterey_controller_world/b_thumbstick",
+      "active": true,
+      "position": [0.018, -0.010, -0.004],
+      "rotation": [0.000, 90.000, 169.500],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_trigger_front",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/OculusTouchForQuestAndRiftS_Right/right_monterey_controller_world/b_trigger_front",
+      "active": true,
+      "position": [0.010, -0.024, -0.009],
+      "rotation": [349.000, 0.000, 180.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_trigger_grip",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/OculusTouchForQuestAndRiftS_Right/right_monterey_controller_world/b_trigger_grip",
+      "active": true,
+      "position": [0.003, -0.001, -0.018],
+      "rotation": [280.500, 180.006, 269.994],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "OculusTouchForQuest2LeftModel",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/OculusTouchForQuest2LeftModel",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "l_rainier_mesh",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/OculusTouchForQuest2LeftModel/l_rainier_mesh",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "left_laser_begin",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/OculusTouchForQuest2LeftModel/left_laser_begin",
+      "active": true,
+      "position": [0.009, -0.003, 0.031],
+      "rotation": [359.210, 6.452, 6.955],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "pasted__laser_end_pointer",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/OculusTouchForQuest2LeftModel/left_laser_begin/pasted__laser_end_pointer",
+      "active": true,
+      "position": [0.000, 0.000, 0.289],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "left_oculus_controller_world",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/OculusTouchForQuest2LeftModel/left_oculus_controller_world",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_button_oculus",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/OculusTouchForQuest2LeftModel/left_oculus_controller_world/b_button_oculus",
+      "active": true,
+      "position": [-0.013, -0.001, -0.016],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_button_x",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/OculusTouchForQuest2LeftModel/left_oculus_controller_world/b_button_x",
+      "active": true,
+      "position": [0.005, 0.001, -0.013],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_button_y",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/OculusTouchForQuest2LeftModel/left_oculus_controller_world/b_button_y",
+      "active": true,
+      "position": [0.013, 0.001, 0.001],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_thumbstick",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/OculusTouchForQuest2LeftModel/left_oculus_controller_world/b_thumbstick",
+      "active": true,
+      "position": [-0.009, -0.005, 0.003],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_trigger_front",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/OculusTouchForQuest2LeftModel/left_oculus_controller_world/b_trigger_front",
+      "active": true,
+      "position": [0.005, -0.009, 0.027],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_trigger_grip",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/OculusTouchForQuest2LeftModel/left_oculus_controller_world/b_trigger_grip",
+      "active": true,
+      "position": [-0.005, -0.036, -0.013],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "OculusTouchForQuest2RightModel",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/OculusTouchForQuest2RightModel",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "r_rainier_mesh",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/OculusTouchForQuest2RightModel/r_rainier_mesh",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "right_laser_begin",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/OculusTouchForQuest2RightModel/right_laser_begin",
+      "active": true,
+      "position": [-0.009, -0.003, 0.031],
+      "rotation": [359.210, 353.548, 353.045],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "pasted__laser_end_pointer",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/OculusTouchForQuest2RightModel/right_laser_begin/pasted__laser_end_pointer",
+      "active": true,
+      "position": [0.000, 0.000, 0.289],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "right_oculus_controller_world",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/OculusTouchForQuest2RightModel/right_oculus_controller_world",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_button_a",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/OculusTouchForQuest2RightModel/right_oculus_controller_world/b_button_a",
+      "active": true,
+      "position": [-0.005, 0.001, -0.013],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_button_b",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/OculusTouchForQuest2RightModel/right_oculus_controller_world/b_button_b",
+      "active": true,
+      "position": [-0.013, 0.001, 0.001],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_button_oculus",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/OculusTouchForQuest2RightModel/right_oculus_controller_world/b_button_oculus",
+      "active": true,
+      "position": [0.013, -0.001, -0.016],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_thumbstick",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/OculusTouchForQuest2RightModel/right_oculus_controller_world/b_thumbstick",
+      "active": true,
+      "position": [0.009, -0.005, 0.003],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_trigger_front",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/OculusTouchForQuest2RightModel/right_oculus_controller_world/b_trigger_front",
+      "active": true,
+      "position": [-0.005, -0.009, 0.027],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_trigger_grip",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/OculusTouchForQuest2RightModel/right_oculus_controller_world/b_trigger_grip",
+      "active": true,
+      "position": [0.005, -0.036, -0.013],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "left_touch_controller_model_skel",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/left_touch_controller_model_skel",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "left_touch_controller_world",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/left_touch_controller_model_skel/left_touch_controller_world",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_button01",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/left_touch_controller_model_skel/left_touch_controller_world/b_button01",
+      "active": true,
+      "position": [0.002, -0.001, -0.007],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_button02",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/left_touch_controller_model_skel/left_touch_controller_world/b_button02",
+      "active": true,
+      "position": [0.009, 0.000, 0.005],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_button03",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/left_touch_controller_model_skel/left_touch_controller_world/b_button03",
+      "active": true,
+      "position": [-0.012, -0.001, -0.014],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_hold1",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/left_touch_controller_model_skel/left_touch_controller_world/b_hold1",
+      "active": true,
+      "position": [-0.012, -0.027, -0.026],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_stick",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/left_touch_controller_model_skel/left_touch_controller_world/b_stick",
+      "active": true,
+      "position": [-0.011, -0.009, 0.005],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_stick_IGNORE",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/left_touch_controller_model_skel/left_touch_controller_world/b_stick/b_stick_IGNORE",
+      "active": true,
+      "position": [0.000, 0.019, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_trigger",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/left_touch_controller_model_skel/left_touch_controller_world/b_trigger",
+      "active": true,
+      "position": [0.001, -0.005, 0.022],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "left_touch_mesh",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/left_touch_controller_model_skel/left_touch_mesh",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "right_touch_controller_model_skel",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/right_touch_controller_model_skel",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "right_touch_controller_world",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/right_touch_controller_model_skel/right_touch_controller_world",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_button01",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/right_touch_controller_model_skel/right_touch_controller_world/b_button01",
+      "active": true,
+      "position": [-0.002, -0.001, -0.007],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_button02",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/right_touch_controller_model_skel/right_touch_controller_world/b_button02",
+      "active": true,
+      "position": [-0.009, 0.000, 0.005],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_button03",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/right_touch_controller_model_skel/right_touch_controller_world/b_button03",
+      "active": true,
+      "position": [0.012, -0.001, -0.014],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_hold",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/right_touch_controller_model_skel/right_touch_controller_world/b_hold",
+      "active": true,
+      "position": [0.013, -0.027, -0.026],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_stick",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/right_touch_controller_model_skel/right_touch_controller_world/b_stick",
+      "active": true,
+      "position": [0.011, -0.009, 0.005],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_stick_IGNORE",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/right_touch_controller_model_skel/right_touch_controller_world/b_stick/b_stick_IGNORE",
+      "active": true,
+      "position": [0.000, 0.019, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_trigger",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/right_touch_controller_model_skel/right_touch_controller_world/b_trigger",
+      "active": true,
+      "position": [-0.001, -0.005, 0.022],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "right_touch_mesh",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/right_touch_controller_model_skel/right_touch_mesh",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "MetaQuestTouchPro_Left",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/MetaQuestTouchPro_Left",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "left_batteryIndicatorQuad",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/MetaQuestTouchPro_Left/left_batteryIndicatorQuad",
+      "active": false,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "left_nub",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/MetaQuestTouchPro_Left/left_nub",
+      "active": false,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "left_oculus_controller_mesh",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/MetaQuestTouchPro_Left/left_oculus_controller_mesh",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "left_oculus_controller_world",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/MetaQuestTouchPro_Left/left_oculus_controller_world",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_button_oculus",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/MetaQuestTouchPro_Left/left_oculus_controller_world/b_button_oculus",
+      "active": true,
+      "position": [-0.013, 0.002, -0.011],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_button_x",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/MetaQuestTouchPro_Left/left_oculus_controller_world/b_button_x",
+      "active": true,
+      "position": [0.003, 0.004, -0.010],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_button_y",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/MetaQuestTouchPro_Left/left_oculus_controller_world/b_button_y",
+      "active": true,
+      "position": [0.013, 0.006, 0.003],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_thumbstick",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/MetaQuestTouchPro_Left/left_oculus_controller_world/b_thumbstick",
+      "active": true,
+      "position": [-0.007, -0.002, 0.008],
+      "rotation": [7.324, 88.706, 263.020],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_trigger_front",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/MetaQuestTouchPro_Left/left_oculus_controller_world/b_trigger_front",
+      "active": true,
+      "position": [0.012, -0.004, 0.028],
+      "rotation": [281.526, 183.885, 1.347],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_trigger_grip",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/MetaQuestTouchPro_Left/left_oculus_controller_world/b_trigger_grip",
+      "active": true,
+      "position": [0.006, -0.026, -0.013],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "laser_begin",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/MetaQuestTouchPro_Left/left_oculus_controller_world/laser_begin",
+      "active": true,
+      "position": [-0.009, 0.000, 0.000],
+      "rotation": [0.000, 184.590, 0.000],
+      "scale": [0.010, 0.010, 0.010]
+    },
+    {
+      "name": "MetaQuestTouchPro_Right",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/MetaQuestTouchPro_Right",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "right_batteryIndicatorQuad",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/MetaQuestTouchPro_Right/right_batteryIndicatorQuad",
+      "active": false,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "right_nub",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/MetaQuestTouchPro_Right/right_nub",
+      "active": false,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "right_oculus_controller_mesh",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/MetaQuestTouchPro_Right/right_oculus_controller_mesh",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "right_oculus_controller_world",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/MetaQuestTouchPro_Right/right_oculus_controller_world",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_button_a",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/MetaQuestTouchPro_Right/right_oculus_controller_world/b_button_a",
+      "active": true,
+      "position": [-0.003, 0.004, -0.009],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_button_b",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/MetaQuestTouchPro_Right/right_oculus_controller_world/b_button_b",
+      "active": true,
+      "position": [-0.013, 0.006, 0.003],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_button_oculus",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/MetaQuestTouchPro_Right/right_oculus_controller_world/b_button_oculus",
+      "active": true,
+      "position": [0.013, 0.002, -0.011],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_thumbstick",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/MetaQuestTouchPro_Right/right_oculus_controller_world/b_thumbstick",
+      "active": true,
+      "position": [0.007, -0.002, 0.008],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_trigger_front",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/MetaQuestTouchPro_Right/right_oculus_controller_world/b_trigger_front",
+      "active": true,
+      "position": [-0.012, -0.004, 0.028],
+      "rotation": [0.256, 353.325, 358.824],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_trigger_grip",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/MetaQuestTouchPro_Right/right_oculus_controller_world/b_trigger_grip",
+      "active": true,
+      "position": [-0.006, -0.026, -0.013],
+      "rotation": [2.844, 357.283, 5.915],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "laser_begin",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/MetaQuestTouchPro_Right/right_oculus_controller_world/laser_begin",
+      "active": true,
+      "position": [0.009, 0.000, 0.000],
+      "rotation": [0.000, 175.410, 0.000],
+      "scale": [0.010, 0.010, 0.010]
+    },
+    {
+      "name": "MetaQuestTouchPlus_Left",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/MetaQuestTouchPlus_Left",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [0.010, 0.010, 0.010]
+    },
+    {
+      "name": "left_batteryIndicatorQuad_MeshX",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/MetaQuestTouchPlus_Left/left_batteryIndicatorQuad_MeshX",
+      "active": false,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "left_oculus_controller_world",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/MetaQuestTouchPlus_Left/left_oculus_controller_world",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_button_x",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/MetaQuestTouchPlus_Left/left_oculus_controller_world/b_button_x",
+      "active": true,
+      "position": [0.537, 0.426, -0.963],
+      "rotation": [350.848, 359.309, 358.815],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_button_y",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/MetaQuestTouchPlus_Left/left_oculus_controller_world/b_button_y",
+      "active": true,
+      "position": [1.561, 0.597, 0.321],
+      "rotation": [351.540, 359.295, 358.817],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "left_b_button_oculus",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/MetaQuestTouchPlus_Left/left_oculus_controller_world/left_b_button_oculus",
+      "active": true,
+      "position": [-1.047, 0.248, -1.125],
+      "rotation": [350.936, 358.988, 357.710],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "left_b_thumbstick",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/MetaQuestTouchPlus_Left/left_oculus_controller_world/left_b_thumbstick",
+      "active": true,
+      "position": [-0.629, -0.187, 0.868],
+      "rotation": [351.506, 346.273, 359.873],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "left_b_trigger_front",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/MetaQuestTouchPlus_Left/left_oculus_controller_world/left_b_trigger_front",
+      "active": true,
+      "position": [1.485, -0.199, 2.472],
+      "rotation": [4.715, 347.464, 0.478],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "left_b_trigger_grip",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/MetaQuestTouchPlus_Left/left_oculus_controller_world/left_b_trigger_grip",
+      "active": true,
+      "position": [1.032, -2.178, 1.290],
+      "rotation": [10.745, 349.245, 344.618],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "left_laser_begin",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/MetaQuestTouchPlus_Left/left_oculus_controller_world/left_laser_begin",
+      "active": true,
+      "position": [-0.776, 0.011, 0.200],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "oculus_controller_l_MeshX",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/MetaQuestTouchPlus_Left/oculus_controller_l_MeshX",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "MetaQuestTouchPlus_Right",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/MetaQuestTouchPlus_Right",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [0.010, 0.010, 0.010]
+    },
+    {
+      "name": "oculus_controller_r_MeshX",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/MetaQuestTouchPlus_Right/oculus_controller_r_MeshX",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "right_batteryIndicatorQuad_MeshX",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/MetaQuestTouchPlus_Right/right_batteryIndicatorQuad_MeshX",
+      "active": false,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "right_oculus_controller_world",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/MetaQuestTouchPlus_Right/right_oculus_controller_world",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_button_a",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/MetaQuestTouchPlus_Right/right_oculus_controller_world/b_button_a",
+      "active": true,
+      "position": [-0.487, 0.438, -0.973],
+      "rotation": [350.848, 359.309, 358.815],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_button_b",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/MetaQuestTouchPlus_Right/right_oculus_controller_world/b_button_b",
+      "active": true,
+      "position": [-1.542, 0.652, 0.279],
+      "rotation": [351.540, 359.295, 358.817],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "right_b_button_oculus",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/MetaQuestTouchPlus_Right/right_oculus_controller_world/right_b_button_oculus",
+      "active": true,
+      "position": [1.141, 0.195, -1.085],
+      "rotation": [350.936, 358.988, 357.710],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "right_b_thumbstick",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/MetaQuestTouchPlus_Right/right_oculus_controller_world/right_b_thumbstick",
+      "active": true,
+      "position": [0.596, -0.220, 0.894],
+      "rotation": [351.506, 346.273, 359.873],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "right_b_trigger_front",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/MetaQuestTouchPlus_Right/right_oculus_controller_world/right_b_trigger_front",
+      "active": true,
+      "position": [-1.565, -0.145, 2.432],
+      "rotation": [4.715, 347.464, 0.478],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "right_b_trigger_grip",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/MetaQuestTouchPlus_Right/right_oculus_controller_world/right_b_trigger_grip",
+      "active": true,
+      "position": [-1.157, -2.142, 1.263],
+      "rotation": [11.205, 8.774, 13.101],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "right_laser_begin",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerAnchor/[BuildingBlock] Controller Tracking Left/MetaQuestTouchPlus_Right/right_oculus_controller_world/right_laser_begin",
+      "active": true,
+      "position": [0.772, -0.029, 0.231],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "LeftControllerInHandAnchor",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerInHandAnchor",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "LeftHandOnControllerAnchor",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchor/LeftControllerInHandAnchor/LeftHandOnControllerAnchor",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "RightHandAnchor",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "RightControllerAnchor",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "[BuildingBlock] Controller Tracking Right",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000],
+      "scripts": [
+        "BuildingBlock",
+        "OVRControllerHelper"
+      ]    },
+    {
+      "name": "OculusTouchForQuestAndRiftS_Left",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/OculusTouchForQuestAndRiftS_Left",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "l_controller_ply",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/OculusTouchForQuestAndRiftS_Left/l_controller_ply",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "left_monterey_controller_world",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/OculusTouchForQuestAndRiftS_Left/left_monterey_controller_world",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [270.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_button_oculus",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/OculusTouchForQuestAndRiftS_Left/left_monterey_controller_world/b_button_oculus",
+      "active": true,
+      "position": [-0.010, 0.023, -0.006],
+      "rotation": [281.000, 180.000, 270.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_button_x",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/OculusTouchForQuestAndRiftS_Left/left_monterey_controller_world/b_button_x",
+      "active": true,
+      "position": [-0.001, 0.005, -0.001],
+      "rotation": [281.000, 180.000, 270.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_button_y",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/OculusTouchForQuestAndRiftS_Left/left_monterey_controller_world/b_button_y",
+      "active": true,
+      "position": [0.003, -0.009, 0.001],
+      "rotation": [281.000, 180.000, 270.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_thumbstick",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/OculusTouchForQuestAndRiftS_Left/left_monterey_controller_world/b_thumbstick",
+      "active": true,
+      "position": [-0.018, -0.010, -0.004],
+      "rotation": [0.000, 90.000, 349.500],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_trigger_front",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/OculusTouchForQuestAndRiftS_Left/left_monterey_controller_world/b_trigger_front",
+      "active": true,
+      "position": [-0.010, -0.024, -0.009],
+      "rotation": [349.000, 0.000, 180.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_trigger_grip",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/OculusTouchForQuestAndRiftS_Left/left_monterey_controller_world/b_trigger_grip",
+      "active": true,
+      "position": [-0.003, -0.001, -0.018],
+      "rotation": [79.500, 359.994, 89.994],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "prp00002questController_animrig:left_monterey_controller_rig",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/OculusTouchForQuestAndRiftS_Left/prp00002questController_animrig:left_monterey_controller_rig",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "prp00002questController_animrig:RIG_left_monterey_controller_world",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/OculusTouchForQuestAndRiftS_Left/prp00002questController_animrig:left_monterey_controller_rig/prp00002questController_animrig:RIG_left_monterey_controller_world",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [270.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "prp00002questController_animrig:f_world",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/OculusTouchForQuestAndRiftS_Left/prp00002questController_animrig:left_monterey_controller_rig/prp00002questController_animrig:RIG_left_monterey_controller_world/prp00002questController_animrig:f_world",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "OculusTouchForQuestAndRiftS_Right",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/OculusTouchForQuestAndRiftS_Right",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "prp00002questController_animrig:right_monterey_controller_rig",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/OculusTouchForQuestAndRiftS_Right/prp00002questController_animrig:right_monterey_controller_rig",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "prp00002questController_animrig:RIG_right_monterey_controller_world",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/OculusTouchForQuestAndRiftS_Right/prp00002questController_animrig:right_monterey_controller_rig/prp00002questController_animrig:RIG_right_monterey_controller_world",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [270.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "prp00002questController_animrig:f_world",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/OculusTouchForQuestAndRiftS_Right/prp00002questController_animrig:right_monterey_controller_rig/prp00002questController_animrig:RIG_right_monterey_controller_world/prp00002questController_animrig:f_world",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "r_controller_ply",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/OculusTouchForQuestAndRiftS_Right/r_controller_ply",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "right_monterey_controller_world",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/OculusTouchForQuestAndRiftS_Right/right_monterey_controller_world",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [270.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_button_a",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/OculusTouchForQuestAndRiftS_Right/right_monterey_controller_world/b_button_a",
+      "active": true,
+      "position": [0.001, 0.005, -0.001],
+      "rotation": [79.000, 0.000, 90.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_button_b",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/OculusTouchForQuestAndRiftS_Right/right_monterey_controller_world/b_button_b",
+      "active": true,
+      "position": [-0.003, -0.009, 0.001],
+      "rotation": [79.000, 0.000, 90.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_button_oculus",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/OculusTouchForQuestAndRiftS_Right/right_monterey_controller_world/b_button_oculus",
+      "active": true,
+      "position": [0.009, 0.023, -0.006],
+      "rotation": [79.000, 0.000, 90.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_thumbstick",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/OculusTouchForQuestAndRiftS_Right/right_monterey_controller_world/b_thumbstick",
+      "active": true,
+      "position": [0.018, -0.010, -0.004],
+      "rotation": [0.000, 90.000, 169.500],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_trigger_front",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/OculusTouchForQuestAndRiftS_Right/right_monterey_controller_world/b_trigger_front",
+      "active": true,
+      "position": [0.010, -0.024, -0.009],
+      "rotation": [349.000, 0.000, 180.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_trigger_grip",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/OculusTouchForQuestAndRiftS_Right/right_monterey_controller_world/b_trigger_grip",
+      "active": true,
+      "position": [0.003, -0.001, -0.018],
+      "rotation": [280.500, 180.006, 269.994],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "OculusTouchForQuest2LeftModel",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/OculusTouchForQuest2LeftModel",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "l_rainier_mesh",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/OculusTouchForQuest2LeftModel/l_rainier_mesh",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "left_laser_begin",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/OculusTouchForQuest2LeftModel/left_laser_begin",
+      "active": true,
+      "position": [0.009, -0.003, 0.031],
+      "rotation": [359.210, 6.452, 6.955],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "pasted__laser_end_pointer",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/OculusTouchForQuest2LeftModel/left_laser_begin/pasted__laser_end_pointer",
+      "active": true,
+      "position": [0.000, 0.000, 0.289],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "left_oculus_controller_world",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/OculusTouchForQuest2LeftModel/left_oculus_controller_world",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_button_oculus",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/OculusTouchForQuest2LeftModel/left_oculus_controller_world/b_button_oculus",
+      "active": true,
+      "position": [-0.013, -0.001, -0.016],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_button_x",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/OculusTouchForQuest2LeftModel/left_oculus_controller_world/b_button_x",
+      "active": true,
+      "position": [0.005, 0.001, -0.013],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_button_y",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/OculusTouchForQuest2LeftModel/left_oculus_controller_world/b_button_y",
+      "active": true,
+      "position": [0.013, 0.001, 0.001],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_thumbstick",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/OculusTouchForQuest2LeftModel/left_oculus_controller_world/b_thumbstick",
+      "active": true,
+      "position": [-0.009, -0.005, 0.003],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_trigger_front",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/OculusTouchForQuest2LeftModel/left_oculus_controller_world/b_trigger_front",
+      "active": true,
+      "position": [0.005, -0.009, 0.027],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_trigger_grip",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/OculusTouchForQuest2LeftModel/left_oculus_controller_world/b_trigger_grip",
+      "active": true,
+      "position": [-0.005, -0.036, -0.013],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "OculusTouchForQuest2RightModel",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/OculusTouchForQuest2RightModel",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "r_rainier_mesh",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/OculusTouchForQuest2RightModel/r_rainier_mesh",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "right_laser_begin",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/OculusTouchForQuest2RightModel/right_laser_begin",
+      "active": true,
+      "position": [-0.009, -0.003, 0.031],
+      "rotation": [359.210, 353.548, 353.045],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "pasted__laser_end_pointer",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/OculusTouchForQuest2RightModel/right_laser_begin/pasted__laser_end_pointer",
+      "active": true,
+      "position": [0.000, 0.000, 0.289],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "right_oculus_controller_world",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/OculusTouchForQuest2RightModel/right_oculus_controller_world",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_button_a",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/OculusTouchForQuest2RightModel/right_oculus_controller_world/b_button_a",
+      "active": true,
+      "position": [-0.005, 0.001, -0.013],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_button_b",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/OculusTouchForQuest2RightModel/right_oculus_controller_world/b_button_b",
+      "active": true,
+      "position": [-0.013, 0.001, 0.001],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_button_oculus",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/OculusTouchForQuest2RightModel/right_oculus_controller_world/b_button_oculus",
+      "active": true,
+      "position": [0.013, -0.001, -0.016],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_thumbstick",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/OculusTouchForQuest2RightModel/right_oculus_controller_world/b_thumbstick",
+      "active": true,
+      "position": [0.009, -0.005, 0.003],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_trigger_front",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/OculusTouchForQuest2RightModel/right_oculus_controller_world/b_trigger_front",
+      "active": true,
+      "position": [-0.005, -0.009, 0.027],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_trigger_grip",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/OculusTouchForQuest2RightModel/right_oculus_controller_world/b_trigger_grip",
+      "active": true,
+      "position": [0.005, -0.036, -0.013],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "left_touch_controller_model_skel",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/left_touch_controller_model_skel",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "left_touch_controller_world",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/left_touch_controller_model_skel/left_touch_controller_world",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_button01",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/left_touch_controller_model_skel/left_touch_controller_world/b_button01",
+      "active": true,
+      "position": [0.002, -0.001, -0.007],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_button02",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/left_touch_controller_model_skel/left_touch_controller_world/b_button02",
+      "active": true,
+      "position": [0.009, 0.000, 0.005],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_button03",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/left_touch_controller_model_skel/left_touch_controller_world/b_button03",
+      "active": true,
+      "position": [-0.012, -0.001, -0.014],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_hold1",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/left_touch_controller_model_skel/left_touch_controller_world/b_hold1",
+      "active": true,
+      "position": [-0.012, -0.027, -0.026],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_stick",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/left_touch_controller_model_skel/left_touch_controller_world/b_stick",
+      "active": true,
+      "position": [-0.011, -0.009, 0.005],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_stick_IGNORE",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/left_touch_controller_model_skel/left_touch_controller_world/b_stick/b_stick_IGNORE",
+      "active": true,
+      "position": [0.000, 0.019, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_trigger",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/left_touch_controller_model_skel/left_touch_controller_world/b_trigger",
+      "active": true,
+      "position": [0.001, -0.005, 0.022],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "left_touch_mesh",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/left_touch_controller_model_skel/left_touch_mesh",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "right_touch_controller_model_skel",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/right_touch_controller_model_skel",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "right_touch_controller_world",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/right_touch_controller_model_skel/right_touch_controller_world",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_button01",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/right_touch_controller_model_skel/right_touch_controller_world/b_button01",
+      "active": true,
+      "position": [-0.002, -0.001, -0.007],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_button02",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/right_touch_controller_model_skel/right_touch_controller_world/b_button02",
+      "active": true,
+      "position": [-0.009, 0.000, 0.005],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_button03",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/right_touch_controller_model_skel/right_touch_controller_world/b_button03",
+      "active": true,
+      "position": [0.012, -0.001, -0.014],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_hold",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/right_touch_controller_model_skel/right_touch_controller_world/b_hold",
+      "active": true,
+      "position": [0.013, -0.027, -0.026],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_stick",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/right_touch_controller_model_skel/right_touch_controller_world/b_stick",
+      "active": true,
+      "position": [0.011, -0.009, 0.005],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_stick_IGNORE",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/right_touch_controller_model_skel/right_touch_controller_world/b_stick/b_stick_IGNORE",
+      "active": true,
+      "position": [0.000, 0.019, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_trigger",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/right_touch_controller_model_skel/right_touch_controller_world/b_trigger",
+      "active": true,
+      "position": [-0.001, -0.005, 0.022],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "right_touch_mesh",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/right_touch_controller_model_skel/right_touch_mesh",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "MetaQuestTouchPro_Left",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/MetaQuestTouchPro_Left",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "left_batteryIndicatorQuad",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/MetaQuestTouchPro_Left/left_batteryIndicatorQuad",
+      "active": false,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "left_nub",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/MetaQuestTouchPro_Left/left_nub",
+      "active": false,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "left_oculus_controller_mesh",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/MetaQuestTouchPro_Left/left_oculus_controller_mesh",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "left_oculus_controller_world",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/MetaQuestTouchPro_Left/left_oculus_controller_world",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_button_oculus",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/MetaQuestTouchPro_Left/left_oculus_controller_world/b_button_oculus",
+      "active": true,
+      "position": [-0.013, 0.002, -0.011],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_button_x",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/MetaQuestTouchPro_Left/left_oculus_controller_world/b_button_x",
+      "active": true,
+      "position": [0.003, 0.004, -0.010],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_button_y",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/MetaQuestTouchPro_Left/left_oculus_controller_world/b_button_y",
+      "active": true,
+      "position": [0.013, 0.006, 0.003],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_thumbstick",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/MetaQuestTouchPro_Left/left_oculus_controller_world/b_thumbstick",
+      "active": true,
+      "position": [-0.007, -0.002, 0.008],
+      "rotation": [7.324, 88.706, 263.020],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_trigger_front",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/MetaQuestTouchPro_Left/left_oculus_controller_world/b_trigger_front",
+      "active": true,
+      "position": [0.012, -0.004, 0.028],
+      "rotation": [281.526, 183.885, 1.347],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_trigger_grip",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/MetaQuestTouchPro_Left/left_oculus_controller_world/b_trigger_grip",
+      "active": true,
+      "position": [0.006, -0.026, -0.013],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "laser_begin",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/MetaQuestTouchPro_Left/left_oculus_controller_world/laser_begin",
+      "active": true,
+      "position": [-0.009, 0.000, 0.000],
+      "rotation": [0.000, 184.590, 0.000],
+      "scale": [0.010, 0.010, 0.010]
+    },
+    {
+      "name": "MetaQuestTouchPro_Right",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/MetaQuestTouchPro_Right",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "right_batteryIndicatorQuad",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/MetaQuestTouchPro_Right/right_batteryIndicatorQuad",
+      "active": false,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "right_nub",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/MetaQuestTouchPro_Right/right_nub",
+      "active": false,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "right_oculus_controller_mesh",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/MetaQuestTouchPro_Right/right_oculus_controller_mesh",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "right_oculus_controller_world",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/MetaQuestTouchPro_Right/right_oculus_controller_world",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_button_a",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/MetaQuestTouchPro_Right/right_oculus_controller_world/b_button_a",
+      "active": true,
+      "position": [-0.003, 0.004, -0.009],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_button_b",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/MetaQuestTouchPro_Right/right_oculus_controller_world/b_button_b",
+      "active": true,
+      "position": [-0.013, 0.006, 0.003],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_button_oculus",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/MetaQuestTouchPro_Right/right_oculus_controller_world/b_button_oculus",
+      "active": true,
+      "position": [0.013, 0.002, -0.011],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_thumbstick",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/MetaQuestTouchPro_Right/right_oculus_controller_world/b_thumbstick",
+      "active": true,
+      "position": [0.007, -0.002, 0.008],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_trigger_front",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/MetaQuestTouchPro_Right/right_oculus_controller_world/b_trigger_front",
+      "active": true,
+      "position": [-0.012, -0.004, 0.028],
+      "rotation": [0.256, 353.325, 358.824],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_trigger_grip",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/MetaQuestTouchPro_Right/right_oculus_controller_world/b_trigger_grip",
+      "active": true,
+      "position": [-0.006, -0.026, -0.013],
+      "rotation": [2.844, 357.283, 5.915],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "laser_begin",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/MetaQuestTouchPro_Right/right_oculus_controller_world/laser_begin",
+      "active": true,
+      "position": [0.009, 0.000, 0.000],
+      "rotation": [0.000, 175.410, 0.000],
+      "scale": [0.010, 0.010, 0.010]
+    },
+    {
+      "name": "MetaQuestTouchPlus_Left",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/MetaQuestTouchPlus_Left",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [0.010, 0.010, 0.010]
+    },
+    {
+      "name": "left_batteryIndicatorQuad_MeshX",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/MetaQuestTouchPlus_Left/left_batteryIndicatorQuad_MeshX",
+      "active": false,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "left_oculus_controller_world",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/MetaQuestTouchPlus_Left/left_oculus_controller_world",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_button_x",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/MetaQuestTouchPlus_Left/left_oculus_controller_world/b_button_x",
+      "active": true,
+      "position": [0.537, 0.426, -0.963],
+      "rotation": [350.848, 359.309, 358.815],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_button_y",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/MetaQuestTouchPlus_Left/left_oculus_controller_world/b_button_y",
+      "active": true,
+      "position": [1.561, 0.597, 0.321],
+      "rotation": [351.540, 359.295, 358.817],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "left_b_button_oculus",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/MetaQuestTouchPlus_Left/left_oculus_controller_world/left_b_button_oculus",
+      "active": true,
+      "position": [-1.047, 0.248, -1.125],
+      "rotation": [350.936, 358.988, 357.710],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "left_b_thumbstick",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/MetaQuestTouchPlus_Left/left_oculus_controller_world/left_b_thumbstick",
+      "active": true,
+      "position": [-0.629, -0.187, 0.868],
+      "rotation": [351.506, 346.273, 359.873],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "left_b_trigger_front",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/MetaQuestTouchPlus_Left/left_oculus_controller_world/left_b_trigger_front",
+      "active": true,
+      "position": [1.485, -0.199, 2.472],
+      "rotation": [4.715, 347.464, 0.478],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "left_b_trigger_grip",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/MetaQuestTouchPlus_Left/left_oculus_controller_world/left_b_trigger_grip",
+      "active": true,
+      "position": [1.032, -2.178, 1.290],
+      "rotation": [10.745, 349.245, 344.618],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "left_laser_begin",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/MetaQuestTouchPlus_Left/left_oculus_controller_world/left_laser_begin",
+      "active": true,
+      "position": [-0.776, 0.011, 0.200],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "oculus_controller_l_MeshX",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/MetaQuestTouchPlus_Left/oculus_controller_l_MeshX",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "MetaQuestTouchPlus_Right",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/MetaQuestTouchPlus_Right",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [0.010, 0.010, 0.010]
+    },
+    {
+      "name": "oculus_controller_r_MeshX",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/MetaQuestTouchPlus_Right/oculus_controller_r_MeshX",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "right_batteryIndicatorQuad_MeshX",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/MetaQuestTouchPlus_Right/right_batteryIndicatorQuad_MeshX",
+      "active": false,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "right_oculus_controller_world",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/MetaQuestTouchPlus_Right/right_oculus_controller_world",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_button_a",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/MetaQuestTouchPlus_Right/right_oculus_controller_world/b_button_a",
+      "active": true,
+      "position": [-0.487, 0.438, -0.973],
+      "rotation": [350.848, 359.309, 358.815],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "b_button_b",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/MetaQuestTouchPlus_Right/right_oculus_controller_world/b_button_b",
+      "active": true,
+      "position": [-1.542, 0.652, 0.279],
+      "rotation": [351.540, 359.295, 358.817],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "right_b_button_oculus",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/MetaQuestTouchPlus_Right/right_oculus_controller_world/right_b_button_oculus",
+      "active": true,
+      "position": [1.141, 0.195, -1.085],
+      "rotation": [350.936, 358.988, 357.710],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "right_b_thumbstick",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/MetaQuestTouchPlus_Right/right_oculus_controller_world/right_b_thumbstick",
+      "active": true,
+      "position": [0.596, -0.220, 0.894],
+      "rotation": [351.506, 346.273, 359.873],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "right_b_trigger_front",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/MetaQuestTouchPlus_Right/right_oculus_controller_world/right_b_trigger_front",
+      "active": true,
+      "position": [-1.565, -0.145, 2.432],
+      "rotation": [4.715, 347.464, 0.478],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "right_b_trigger_grip",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/MetaQuestTouchPlus_Right/right_oculus_controller_world/right_b_trigger_grip",
+      "active": true,
+      "position": [-1.157, -2.142, 1.263],
+      "rotation": [11.205, 8.774, 13.101],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "right_laser_begin",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerAnchor/[BuildingBlock] Controller Tracking Right/MetaQuestTouchPlus_Right/right_oculus_controller_world/right_laser_begin",
+      "active": true,
+      "position": [0.772, -0.029, 0.231],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "RightControllerInHandAnchor",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerInHandAnchor",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "RightHandOnControllerAnchor",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchor/RightControllerInHandAnchor/RightHandOnControllerAnchor",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "LeftHandAnchorDetached",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/LeftHandAnchorDetached",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "RightHandAnchorDetached",
+      "path": "[BuildingBlock] Camera Rig/TrackingSpace/RightHandAnchorDetached",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "[BuildingBlock] Passthrough",
+      "path": "[BuildingBlock] Passthrough",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000],
+      "scripts": [
+        "BuildingBlock",
+        "OVRPassthroughLayer"
+      ]    },
+    {
+      "name": "hmddatamanager",
+      "path": "hmddatamanager",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000],
+      "scripts": [
+        "HMDDataRecorder"
+      ]    },
+    {
+      "name": "RecordingUI",
+      "path": "RecordingUI",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000],
+      "scripts": [
+        "RecordingStatusUI"
+      ]    },
+    {
+      "name": "RecordingStatusCanvas",
+      "path": "RecordingStatusCanvas",
+      "active": true,
+      "position": [0.000, 0.000, 0.500],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000],
+      "scripts": [
+        "CanvasScaler",
+        "GraphicRaycaster"
+      ]    },
+    {
+      "name": "StatusPanel",
+      "path": "RecordingStatusCanvas/StatusPanel",
+      "active": true,
+      "position": [6.384, 4.704, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000],
+      "scripts": [
+        "Image"
+      ]    },
+    {
+      "name": "RecordingIndicator",
+      "path": "RecordingStatusCanvas/StatusPanel/RecordingIndicator",
+      "active": true,
+      "position": [2.000, 142.704, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000],
+      "text": "IDLE",
+      "scripts": [
+        "TextMeshProUGUI"
+      ]    },
+    {
+      "name": "FrameCountText",
+      "path": "RecordingStatusCanvas/StatusPanel/FrameCountText",
+      "active": true,
+      "position": [54.192, 102.704, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000],
+      "text": "Frame: 0",
+      "scripts": [
+        "TextMeshProUGUI"
+      ]    },
+    {
+      "name": "HMDPositionText",
+      "path": "RecordingStatusCanvas/StatusPanel/HMDPositionText",
+      "active": true,
+      "position": [-182.384, 62.704, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000],
+      "text": "HMD Pos: (0.00, 0.00, 0.00)",
+      "scripts": [
+        "TextMeshProUGUI"
+      ]    },
+    {
+      "name": "HMDRotationText",
+      "path": "RecordingStatusCanvas/StatusPanel/HMDRotationText",
+      "active": true,
+      "position": [-182.384, 37.704, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000],
+      "text": "HMD Rot: (0.00, 0.00, 0.00)",
+      "scripts": [
+        "TextMeshProUGUI"
+      ]    },
+    {
+      "name": "LeftControllerText",
+      "path": "RecordingStatusCanvas/StatusPanel/LeftControllerText",
+      "active": true,
+      "position": [-182.384, 7.704, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000],
+      "text": "L Ctrl: (0.00, 0.00, 0.00)",
+      "scripts": [
+        "TextMeshProUGUI"
+      ]    },
+    {
+      "name": "RightControllerText",
+      "path": "RecordingStatusCanvas/StatusPanel/RightControllerText",
+      "active": true,
+      "position": [-182.384, -22.296, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000],
+      "text": "R Ctrl: (0.00, 0.00, 0.00)",
+      "scripts": [
+        "TextMeshProUGUI"
+      ]    },
+    {
+      "name": "InstructionText",
+      "path": "RecordingStatusCanvas/StatusPanel/InstructionText",
+      "active": true,
+      "position": [0.000, -137.704, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000],
+      "text": "Press [R] to Start/Stop Recording",
+      "scripts": [
+        "TextMeshProUGUI"
+      ]    },
+    {
+      "name": "EventSystem",
+      "path": "EventSystem",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000],
+      "scripts": [
+        "EventSystem",
+        "StandaloneInputModule"
+      ]    }
+  ]
+}

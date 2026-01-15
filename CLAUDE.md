@@ -45,6 +45,7 @@ Output binaries go to `build/bin/`.
 | `multi_device_calibration` | Multi-camera extrinsic calibration tool |
 | `multi_device_recorder` | Multi-camera MKV recording (no body tracking) |
 | `multi_device_offline_processor` | Offline body tracking with multi-camera fusion |
+| `egocentric_dataset_generator` | ML dataset generator from helmet + fixed cameras |
 
 ### Other Samples
 - `opencv-kinfu-samples/` - OpenCV KinectFusion 3D reconstruction
@@ -170,6 +171,7 @@ For detailed usage, see the README files in each project:
 | `multi_device_calibration` | [README.md](body-tracking-samples/multi_device_calibration/README.md) | Multi-camera extrinsic calibration using checkerboard |
 | `multi_device_recorder` | [README.md](body-tracking-samples/multi_device_recorder/README.md) | Zero-latency MKV recording for offline processing |
 | `multi_device_offline_processor` | [README.md](body-tracking-samples/multi_device_offline_processor/README.md) | Offline body tracking with multi-camera fusion from MKV files |
+| `egocentric_dataset_generator` | [README.md](body-tracking-samples/egocentric_dataset_generator/README.md) | ML dataset generator with 3D/2D skeleton annotations |
 | `sample_unity_bodytracking` | [README.md](body-tracking-samples/sample_unity_bodytracking/README.md) | Unity integration with multi-camera fusion and HMD recording |
 | `sample_unity_hmd_recorder` | [README.md](body-tracking-samples/sample_unity_hmd_recorder/README.md) | Unity HMD/controller 6DOF recording with UDP sync |
 | `scripts` | [README.md](body-tracking-samples/scripts/README.md) | Python synchronization scripts for skeleton/HMD data alignment |

@@ -45,13 +45,21 @@ Options:
   --square N       Square size in mm, default: 25.0
   --output FILE    Output filename prefix, default: calibration
   --primary SERIAL Serial number of PRIMARY camera (sync hub master port)
+  --exclude SERIAL Exclude camera by serial number (can be used multiple times)
   --help           Show help
 ```
 
-### Example
+### Examples
 
 ```cmd
+# Basic usage with primary camera specified
 multi_device_calibration.exe --primary CL8T75400DC --rows 4 --cols 5 --square 50
+
+# Exclude a helmet-mounted camera from calibration
+multi_device_calibration.exe --primary CL8T75400DC --exclude CL8T75400GD
+
+# Exclude multiple cameras
+multi_device_calibration.exe --primary CL8T75400DC --exclude CAM1 --exclude CAM2
 ```
 
 ## Controls

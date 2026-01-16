@@ -555,13 +555,16 @@ void PrintUsage()
               << "  --square N       Square size in mm, default: " << SQUARE_SIZE_MM << "\n"
               << "  --output FILE    Output filename prefix, default: calibration\n"
               << "  --primary SERIAL Serial number of PRIMARY camera (sync hub master port)\n"
+              << "  --exclude SERIAL Exclude camera by serial number (can be used multiple times)\n"
               << "\nInstructions:\n"
               << "  1. Place checkerboard visible to ALL cameras\n"
               << "  2. Press SPACE to capture and calibrate\n"
               << "  3. Press 'S' to save calibration\n"
               << "  4. Press ESC to quit\n"
-              << "\nExample:\n"
+              << "\nExamples:\n"
               << "  multi_device_calibration.exe --primary CL8T75400DC --rows 4 --cols 5\n"
+              << "  multi_device_calibration.exe --primary CL8T75400DC --exclude CL8T75400GD\n"
+              << "  multi_device_calibration.exe --exclude CAM1 --exclude CAM2\n"
               << std::endl;
 }
 
@@ -581,6 +584,7 @@ int main(int argc, char** argv)
     float squareSize = SQUARE_SIZE_MM;
     std::string outputPrefix = "calibration";
     std::string primarySerial = "";  // Serial number of PRIMARY camera (sync hub master port)
+    std::vector<std::string> excludeSerials;  // Serial numbers to exclude from calibration
 
     for (int i = 1; i < argc; i++)
     {
@@ -590,6 +594,7 @@ int main(int argc, char** argv)
         else if (arg == "--square" && i + 1 < argc) squareSize = std::atof(argv[++i]);
         else if (arg == "--output" && i + 1 < argc) outputPrefix = argv[++i];
         else if (arg == "--primary" && i + 1 < argc) primarySerial = argv[++i];
+        else if (arg == "--exclude" && i + 1 < argc) excludeSerials.push_back(argv[++i]);
         else if (arg == "--help" || arg == "-h") {
             PrintUsage();
             return 0;
@@ -600,35 +605,75 @@ int main(int argc, char** argv)
     std::cout << "Checkerboard: " << checkerboardCols << "x" << checkerboardRows
               << " inner corners, " << squareSize << "mm squares" << std::endl;
 
-    // Get device count
-    uint32_t deviceCount = k4a_device_get_installed_count();
-    std::cout << "Found " << deviceCount << " device(s)" << std::endl;
+    // Print excluded cameras if any
+    if (!excludeSerials.empty())
+    {
+        std::cout << "Excluding cameras: ";
+        for (size_t i = 0; i < excludeSerials.size(); i++)
+        {
+            std::cout << excludeSerials[i];
+            if (i < excludeSerials.size() - 1) std::cout << ", ";
+        }
+        std::cout << std::endl;
+    }
 
-    if (deviceCount == 0)
+    // Get device count
+    uint32_t installedDeviceCount = k4a_device_get_installed_count();
+    std::cout << "Found " << installedDeviceCount << " device(s)" << std::endl;
+
+    if (installedDeviceCount == 0)
     {
         std::cerr << "No devices found!" << std::endl;
         return -1;
     }
 
-    if (deviceCount < 2)
+    // Helper lambda to check if a serial number should be excluded
+    auto isExcluded = [&excludeSerials](const std::string& serial) -> bool {
+        return std::find(excludeSerials.begin(), excludeSerials.end(), serial) != excludeSerials.end();
+    };
+
+    // Open all devices, filtering out excluded ones
+    std::vector<DeviceInfo> devices;
+    devices.reserve(installedDeviceCount);
+
+    for (uint32_t i = 0; i < installedDeviceCount; i++)
     {
-        std::cout << "Warning: Only 1 device found. Multi-device calibration requires 2+ cameras." << std::endl;
-    }
+        k4a_device_t tempDevice = nullptr;
 
-    // Open all devices
-    std::vector<DeviceInfo> devices(deviceCount);
-
-    for (uint32_t i = 0; i < deviceCount; i++)
-    {
-        devices[i].index = i;
-
-        if (k4a_device_open(i, &devices[i].device) != K4A_RESULT_SUCCEEDED)
+        if (k4a_device_open(i, &tempDevice) != K4A_RESULT_SUCCEEDED)
         {
             std::cerr << "Failed to open device " << i << std::endl;
             return -1;
         }
 
-        devices[i].serialNumber = GetDeviceSerialNumber(devices[i].device);
+        std::string serial = GetDeviceSerialNumber(tempDevice);
+
+        if (isExcluded(serial))
+        {
+            std::cout << "Device " << i << " (SN=" << serial << "): EXCLUDED" << std::endl;
+            k4a_device_close(tempDevice);
+            continue;
+        }
+
+        DeviceInfo info;
+        info.device = tempDevice;
+        info.serialNumber = serial;
+        info.index = static_cast<int>(devices.size());  // New index after filtering
+        devices.push_back(info);
+    }
+
+    uint32_t deviceCount = static_cast<uint32_t>(devices.size());
+    std::cout << "Using " << deviceCount << " device(s) for calibration" << std::endl;
+
+    if (deviceCount == 0)
+    {
+        std::cerr << "No devices available after exclusion!" << std::endl;
+        return -1;
+    }
+
+    if (deviceCount < 2)
+    {
+        std::cout << "Warning: Only 1 device available. Multi-device calibration requires 2+ cameras." << std::endl;
     }
 
     // Determine PRIMARY camera based on serial number

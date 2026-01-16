@@ -209,22 +209,27 @@ class DualViewVisualizer:
             self.hmd_range = 1.0
 
     def _setup_skeleton_axes(self, ax):
-        """Setup skeleton 3D axes."""
+        """Setup skeleton 3D axes.
+
+        Kinect coordinate: X=right, Y=up, Z=forward (into scene)
+        Matplotlib 3D: X=right, Y=depth, Z=up
+        We swap Y<->Z so that XZ plane (floor) is at the bottom.
+        """
         ax.set_xlabel('X (mm)')
-        ax.set_ylabel('Y (mm)')
-        ax.set_zlabel('Z (mm)')
+        ax.set_ylabel('Z (mm)')  # Kinect Z -> matplotlib Y
+        ax.set_zlabel('Y (mm)')  # Kinect Y -> matplotlib Z (vertical)
         ax.set_title('Skeleton (Kinect Coordinate)', fontsize=12, fontweight='bold')
 
-        # Set consistent limits
+        # Set consistent limits (swap Y and Z, negate Y)
         ax.set_xlim(self.skel_center[0] - self.skel_range,
                     self.skel_center[0] + self.skel_range)
-        ax.set_ylim(self.skel_center[1] - self.skel_range,
-                    self.skel_center[1] + self.skel_range)
-        ax.set_zlim(self.skel_center[2] - self.skel_range,
+        ax.set_ylim(self.skel_center[2] - self.skel_range,  # Z -> Y axis
                     self.skel_center[2] + self.skel_range)
+        ax.set_zlim(-self.skel_center[1] - self.skel_range,  # -Y -> Z axis
+                    -self.skel_center[1] + self.skel_range)
 
-        # View angle (front view: looking at -Z)
-        ax.view_init(elev=10, azim=-90)
+        # View angle (front view: looking at -Y in matplotlib, which is -Z in Kinect)
+        ax.view_init(elev=20, azim=-90)
 
     def _setup_hmd_axes(self, ax):
         """Setup HMD 3D axes."""
@@ -245,7 +250,12 @@ class DualViewVisualizer:
         ax.view_init(elev=20, azim=-60)
 
     def _draw_skeleton(self, ax, joints: np.ndarray):
-        """Draw skeleton with joints and bones."""
+        """Draw skeleton with joints and bones.
+
+        Swaps Y and Z for proper floor plane visualization.
+        Kinect: (X, Y, Z) -> Matplotlib: (X, Z, -Y)
+        Y is negated because Kinect Y points down from camera.
+        """
         # Draw bones
         for parent, child in BONE_CONNECTIONS:
             if parent < len(joints) and child < len(joints):
@@ -253,7 +263,8 @@ class DualViewVisualizer:
                 # Skip if either joint is at origin (invalid)
                 if np.allclose(p1, 0) or np.allclose(p2, 0):
                     continue
-                ax.plot([p1[0], p2[0]], [p1[1], p2[1]], [p1[2], p2[2]],
+                # Swap Y and Z, negate Y: plot (X, Z, -Y)
+                ax.plot([p1[0], p2[0]], [p1[2], p2[2]], [-p1[1], -p2[1]],
                        color='#34495e', linewidth=2, alpha=0.7)
 
         # Draw joints
@@ -261,7 +272,8 @@ class DualViewVisualizer:
             if np.allclose(pos, 0):
                 continue
             color = get_joint_color(j)
-            ax.scatter(pos[0], pos[1], pos[2], c=color, s=50, alpha=0.9)
+            # Swap Y and Z, negate Y: plot (X, Z, -Y)
+            ax.scatter(pos[0], pos[2], -pos[1], c=color, s=50, alpha=0.9)
 
     def _draw_hmd(self, ax, hmd_data: dict):
         """Draw HMD and controller points with labels."""

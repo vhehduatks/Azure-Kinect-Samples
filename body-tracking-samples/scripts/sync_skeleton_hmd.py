@@ -124,7 +124,13 @@ def extract_skeleton_points(df: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray, n
         left_hand = get_joint(JOINT_IDS['LEFT_WRIST'])  # WRIST is more stable than HAND
         right_hand = get_joint(JOINT_IDS['RIGHT_WRIST'])
 
-        timestamps = df['timestamp_ms'].values
+        # Handle both timestamp_ms and timestamp_usec formats
+        if 'timestamp_ms' in df.columns:
+            timestamps = df['timestamp_ms'].values
+        elif 'timestamp_usec' in df.columns:
+            timestamps = df['timestamp_usec'].values / 1000.0  # Convert usec to ms
+        else:
+            raise KeyError("No timestamp column found (expected 'timestamp_ms' or 'timestamp_usec')")
         return timestamps, head, left_hand, right_hand
 
     # Unity wide format: P{joint_id}_posX, P{joint_id}_posY, P{joint_id}_posZ

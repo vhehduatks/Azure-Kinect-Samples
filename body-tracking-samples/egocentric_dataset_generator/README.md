@@ -1,8 +1,8 @@
 # Egocentric Body Tracking Dataset Generator
 
-헬멧에 장착된 카메라(A)의 1인칭 시점 영상과 고정 카메라(B,C)에서 추정한 스켈레톤을 결합하여 ML 학습용 데이터셋을 생성합니다.
+Generates ML training datasets by combining first-person view footage from a helmet-mounted camera (A) with skeletons estimated from fixed cameras (B, C).
 
-## 개요
+## Overview
 
 ```
 ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
@@ -33,18 +33,18 @@
                                      └─────────────┘
 ```
 
-## 입력 파일
+## Input Files
 
-| 파일 | 설명 |
-|------|------|
-| `camera_a.mkv` | 헬멧 카메라 영상 (color + depth + IR) |
-| `camera_b.mkv` | 고정 카메라 B 영상 (체커보드 검출용) |
-| `camera_c.mkv` | 고정 카메라 C 영상 (옵션, 체커보드 검출용) |
-| `skeleton.csv` | multi_device_offline_processor 출력 (world 좌표) |
-| `calibration.json` | B,C 카메라 extrinsics (multi_device_calibration 출력) |
-| `t_checker_to_a.json` | 체커보드→카메라A 고정 변환 (사전 측정) |
+| File | Description |
+|------|-------------|
+| `camera_a.mkv` | Helmet camera footage (color + depth + IR) |
+| `camera_b.mkv` | Fixed camera B footage (for checkerboard detection) |
+| `camera_c.mkv` | Fixed camera C footage (optional, for checkerboard detection) |
+| `skeleton.csv` | multi_device_offline_processor output (world coordinates) |
+| `calibration.json` | B, C camera extrinsics (multi_device_calibration output) |
+| `t_checker_to_a.json` | Checkerboard-to-Camera A fixed transform (pre-measured) |
 
-## 출력 구조
+## Output Structure
 
 ```
 output/
@@ -59,7 +59,7 @@ output/
 └── metadata.json
 ```
 
-### Annotation JSON 형식
+### Annotation JSON Format
 
 ```json
 {
@@ -83,14 +83,14 @@ output/
 }
 ```
 
-## 빌드
+## Build
 
-1. Visual Studio에서 `egocentric_dataset_generator.vcxproj` 열기
-2. NuGet 패키지 복원 (솔루션 우클릭 → Restore NuGet Packages)
-3. Release x64로 빌드
-4. `copy_orbbec_dlls.bat` 실행하여 Orbbec DLL 및 OpenCV DLL 복사
+1. Open `egocentric_dataset_generator.vcxproj` in Visual Studio
+2. Restore NuGet packages (right-click solution → Restore NuGet Packages)
+3. Build as Release x64
+4. Run `copy_orbbec_dlls.bat` to copy Orbbec DLLs and OpenCV DLLs
 
-## 사용법
+## Usage
 
 ```bash
 egocentric_dataset_generator.exe ^
@@ -105,30 +105,30 @@ egocentric_dataset_generator.exe ^
   --checkerboard-cols 9
 ```
 
-### 명령줄 옵션
+### Command-Line Options
 
-| 옵션 | 필수 | 설명 |
-|------|------|------|
-| `--camera-a FILE` | O | 헬멧 카메라 MKV 파일 |
-| `--camera-b FILE` | O | 고정 카메라 B MKV 파일 |
-| `--camera-c FILE` | - | 고정 카메라 C MKV 파일 (옵션) |
-| `--skeleton FILE` | O | 스켈레톤 CSV 파일 |
-| `--calibration FILE` | O | 캘리브레이션 JSON 파일 |
-| `--t-checker-to-a FILE` | O | 체커보드→카메라A 변환 JSON |
-| `--output DIR` | O | 출력 디렉토리 |
-| `--checkerboard-rows N` | - | 체커보드 내부 코너 행 수 (기본: 6) |
-| `--checkerboard-cols N` | - | 체커보드 내부 코너 열 수 (기본: 9) |
-| `--max-frames N` | - | 최대 처리 프레임 수 (기본: 전체) |
-| `--skip-no-detection` | - | 체커보드 미검출 프레임 건너뛰기 |
+| Option | Required | Description |
+|--------|----------|-------------|
+| `--camera-a FILE` | Y | Helmet camera MKV file |
+| `--camera-b FILE` | Y | Fixed camera B MKV file |
+| `--camera-c FILE` | - | Fixed camera C MKV file (optional) |
+| `--skeleton FILE` | Y | Skeleton CSV file |
+| `--calibration FILE` | Y | Calibration JSON file |
+| `--t-checker-to-a FILE` | Y | Checkerboard-to-Camera A transform JSON |
+| `--output DIR` | Y | Output directory |
+| `--checkerboard-rows N` | - | Number of checkerboard inner corner rows (default: 6) |
+| `--checkerboard-cols N` | - | Number of checkerboard inner corner columns (default: 9) |
+| `--max-frames N` | - | Maximum number of frames to process (default: all) |
+| `--skip-no-detection` | - | Skip frames where checkerboard is not detected |
 
-## T_checker_to_A 측정 방법
+## How to Measure T_checker_to_A
 
-체커보드와 헬멧 카메라 A 사이의 고정 변환을 사전에 측정해야 합니다.
+The fixed transform between the checkerboard and helmet camera A must be measured in advance.
 
-### 방법 1: 직접 측정
-1. 체커보드 중심과 카메라 A 렌즈 사이의 거리를 자로 측정
-2. 체커보드 평면과 카메라 광축 사이의 각도 측정
-3. JSON 파일로 저장:
+### Method 1: Direct Measurement
+1. Measure the distance between the checkerboard center and camera A lens with a ruler
+2. Measure the angle between the checkerboard plane and the camera optical axis
+3. Save as a JSON file:
 
 ```json
 {
@@ -137,58 +137,58 @@ egocentric_dataset_generator.exe ^
 }
 ```
 
-### 방법 2: 캘리브레이션 (권장)
-1. 체커보드가 카메라 A에 보이는 상태에서 촬영
-2. OpenCV로 체커보드 검출 및 solvePnP 실행
-3. 결과 R, t를 JSON으로 저장
+### Method 2: Calibration (Recommended)
+1. Capture footage with the checkerboard visible to camera A
+2. Detect the checkerboard with OpenCV and run solvePnP
+3. Save the resulting R, t as JSON
 
-## 핵심 알고리즘
+## Core Algorithm
 
-### 1. 프레임 동기화
-Camera A의 타임스탬프를 기준으로 B, C, skeleton 매칭:
-- 임계값: 10ms (Sync Hub 사용 시)
-- Skeleton 데이터는 선형 보간 적용
+### 1. Frame Synchronization
+Matches B, C, and skeleton data based on Camera A timestamps:
+- Threshold: 10ms (when using Sync Hub)
+- Linear interpolation is applied to skeleton data
 
-### 2. 헬멧 포즈 추정
-매 프레임마다 다음 과정 수행:
-1. B/C 카메라에서 체커보드 코너 검출 (OpenCV)
-2. 2D 코너 → 3D 변환 (depth 사용)
-3. 3D 포인트 → World 좌표 변환 (calibration.json 적용)
-4. 체커보드 pose 계산 (centroid + SVD)
+### 2. Helmet Pose Estimation
+The following process is performed for each frame:
+1. Detect checkerboard corners in B/C cameras (OpenCV)
+2. Convert 2D corners to 3D (using depth)
+3. Transform 3D points to world coordinates (applying calibration.json)
+4. Compute checkerboard pose (centroid + SVD)
 5. Camera A pose = T_checker_world × T_checker_to_A
 
-### 3. 스켈레톤 좌표 변환
-World 좌표계의 스켈레톤을 Camera A 좌표계로 변환:
+### 3. Skeleton Coordinate Transformation
+Transforms skeletons from world coordinates to Camera A coordinates:
 ```
 P_A = R_A^T × (P_world - t_A)
 ```
 
-### 4. 2D 투영
-K4A calibration API를 사용한 왜곡 적용 투영:
+### 4. 2D Projection
+Distortion-aware projection using the K4A calibration API:
 ```cpp
 k4a_calibration_3d_to_2d(&calibration, &point3d,
     K4A_CALIBRATION_TYPE_COLOR, K4A_CALIBRATION_TYPE_COLOR,
     &point2d, &valid);
 ```
 
-## 워크플로우
+## Workflow
 
-전체 데이터 수집 및 처리 워크플로우:
+Full data collection and processing workflow:
 
 ```bash
-# 1. 카메라 캘리브레이션 (최초 1회)
+# 1. Camera calibration (one-time setup)
 multi_device_calibration.exe --rows 6 --cols 9 --output calibration
 
-# 2. 녹화 (헬멧 + 고정 카메라)
+# 2. Record (helmet + fixed cameras)
 multi_device_recorder.exe --output ./recordings --session exp01
 
-# 3. 오프라인 스켈레톤 추정
+# 3. Offline skeleton estimation
 multi_device_offline_processor.exe ^
     --calibration calibration.json ^
     --output skeleton_exp01.csv ^
     recordings/recording_cam*.mkv
 
-# 4. 데이터셋 생성
+# 4. Dataset generation
 egocentric_dataset_generator.exe ^
     --camera-a recordings/helmet_exp01.mkv ^
     --camera-b recordings/fixed_b_exp01.mkv ^
@@ -198,9 +198,9 @@ egocentric_dataset_generator.exe ^
     --output ./dataset_exp01
 ```
 
-## 출력 검증
+## Output Verification
 
-생성된 데이터셋 검증:
+Verify the generated dataset:
 
 ```python
 import json
@@ -209,7 +209,7 @@ import os
 
 dataset_dir = "./dataset_exp01"
 
-# 첫 번째 프레임 검증
+# Verify the first frame
 with open(os.path.join(dataset_dir, "annotations/frame_000000.json")) as f:
     ann = json.load(f)
 
@@ -224,32 +224,32 @@ cv2.imshow("Verification", img)
 cv2.waitKey(0)
 ```
 
-## 요구사항
+## Requirements
 
-| 컴포넌트 | 버전 |
-|----------|------|
+| Component | Version |
+|-----------|---------|
 | OrbbecSDK K4A Wrapper | v1.10.5 |
 | OpenCV | 4.12.0 |
 | Azure Kinect Body Tracking SDK | 1.1.2 |
 | ONNX Runtime | 1.10.0 |
 
-## 제한사항
+## Limitations
 
-- 체커보드가 항상 최소 1개 고정 카메라에서 보여야 함
-- 체커보드 미검출 시 해당 프레임 건너뛰기 또는 이전 포즈 사용
-- skeleton.csv는 `multi_device_offline_processor` 출력 형식이어야 함
+- The checkerboard must always be visible in at least one fixed camera
+- When the checkerboard is not detected, the frame is skipped or the previous pose is used
+- skeleton.csv must be in the `multi_device_offline_processor` output format
 
-## 트러블슈팅
+## Troubleshooting
 
-### 체커보드 검출 실패
-- 조명 조건 확인 (반사광, 그림자 방지)
-- 체커보드 크기/해상도 확인
-- `--checkerboard-rows`, `--checkerboard-cols` 값 확인
+### Checkerboard Detection Failure
+- Check lighting conditions (avoid reflections and shadows)
+- Check checkerboard size/resolution
+- Verify `--checkerboard-rows` and `--checkerboard-cols` values
 
-### 타임스탬프 동기화 오류
-- 모든 카메라가 Sync Hub로 동기화되었는지 확인
-- MKV 파일이 동시에 녹화되었는지 확인
+### Timestamp Synchronization Errors
+- Verify all cameras are synchronized via Sync Hub
+- Verify MKV files were recorded simultaneously
 
-### 2D 투영이 이미지 밖으로 나감
-- Camera A calibration 확인
-- T_checker_to_A 측정값 검증
+### 2D Projection Falls Outside Image
+- Check Camera A calibration
+- Verify T_checker_to_A measurement values

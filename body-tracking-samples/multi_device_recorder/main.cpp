@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 // Multi-device MKV recorder for Orbbec Femto Bolt cameras
 // Records raw depth/IR/color without body tracking for offline processing
+// RGB recording enabled by default (use --no-color to disable)
 
 #include <array>
 #include <iostream>
@@ -33,6 +34,7 @@ std::atomic<bool> s_isRunning{true};
 std::atomic<bool> g_isRecording{false};
 std::string g_outputDir = ".";
 std::string g_sessionName = "";
+bool g_enableColor = true;  // RGB recording enabled by default
 
 // Recording handles (one per device)
 std::vector<k4a_record_t> g_recordings;
@@ -241,8 +243,16 @@ void StartRecording()
 
         k4a_device_configuration_t config = K4A_DEVICE_CONFIG_INIT_DISABLE_ALL;
         config.depth_mode = K4A_DEPTH_MODE_NFOV_UNBINNED;
-        config.color_resolution = K4A_COLOR_RESOLUTION_OFF;
         config.camera_fps = K4A_FRAMES_PER_SECOND_30;
+
+        // RGB configuration
+        if (g_enableColor) {
+            config.color_format = K4A_IMAGE_FORMAT_COLOR_MJPG;
+            config.color_resolution = K4A_COLOR_RESOLUTION_1080P;
+            config.synchronized_images_only = true;  // Sync color and depth
+        } else {
+            config.color_resolution = K4A_COLOR_RESOLUTION_OFF;
+        }
 
         if (g_devices.size() > 1) {
             config.wired_sync_mode = g_devices[i].isPrimary
@@ -407,14 +417,15 @@ void CaptureThread(int deviceIndex)
 void PrintUsage()
 {
     std::cout << "\n=== Multi-Device MKV Recorder ===\n"
-              << "Records raw depth data from multiple Orbbec cameras for offline processing.\n\n"
+              << "Records depth and RGB from multiple Orbbec cameras for offline processing.\n\n"
               << "USAGE: multi_device_recorder.exe [OPTIONS]\n\n"
               << "Options:\n"
               << "  --output DIR         - Output directory for MKV files (default: current)\n"
               << "  --session NAME       - Session name prefix for recordings\n"
               << "  --primary SERIAL     - Serial number of PRIMARY camera\n"
               << "  --udp-port PORT      - UDP listen port (default: 9000)\n"
-              << "  --no-udp             - Disable UDP listener\n\n"
+              << "  --no-udp             - Disable UDP listener\n"
+              << "  --no-color           - Disable RGB recording (depth only)\n\n"
               << "Runtime Controls:\n"
               << "  R         - Start/stop recording\n"
               << "  Q or ESC  - Quit\n\n"
@@ -456,6 +467,9 @@ int main(int argc, char** argv)
         }
         else if (arg == "--no-udp") {
             enableUdp = false;
+        }
+        else if (arg == "--no-color") {
+            g_enableColor = false;
         }
         else if (arg == "--help" || arg == "-h") {
             PrintUsage();
@@ -527,8 +541,16 @@ int main(int argc, char** argv)
     {
         k4a_device_configuration_t config = K4A_DEVICE_CONFIG_INIT_DISABLE_ALL;
         config.depth_mode = K4A_DEPTH_MODE_NFOV_UNBINNED;
-        config.color_resolution = K4A_COLOR_RESOLUTION_OFF;
         config.camera_fps = K4A_FRAMES_PER_SECOND_30;
+
+        // RGB configuration
+        if (g_enableColor) {
+            config.color_format = K4A_IMAGE_FORMAT_COLOR_MJPG;
+            config.color_resolution = K4A_COLOR_RESOLUTION_1080P;
+            config.synchronized_images_only = true;  // Sync color and depth
+        } else {
+            config.color_resolution = K4A_COLOR_RESOLUTION_OFF;
+        }
 
         if (deviceCount > 1) {
             if (g_devices[i].isPrimary) {
@@ -560,6 +582,7 @@ int main(int argc, char** argv)
     }
 
     std::cout << "\nAll devices started!" << std::endl;
+    std::cout << "RGB recording: " << (g_enableColor ? "ENABLED (1080P MJPG)" : "DISABLED") << std::endl;
 
     // Initialize UDP listener
 #ifdef _WIN32

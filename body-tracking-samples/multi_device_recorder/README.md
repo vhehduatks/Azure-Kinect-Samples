@@ -1,6 +1,6 @@
 # Multi-Device MKV Recorder
 
-Records raw depth data from multiple Orbbec Femto Bolt cameras to MKV files **without body tracking**. This allows for:
+Records **depth and RGB** from multiple Orbbec Femto Bolt cameras to MKV files **without body tracking**. This allows for:
 
 1. **Zero-latency recording** - No body tracking processing delay during capture
 2. **Offline processing** - Body tracking is done later using `multi_device_offline_processor`
@@ -29,7 +29,7 @@ multi_device_recorder.exe
 multi_device_recorder.exe --output ./recordings --session experiment01
 
 # Specify primary camera (sync hub master)
-multi_device_recorder.exe --primary CL2K1234567
+multi_device_recorder.exe --primary CL8T75400DC
 
 # Disable UDP listener
 multi_device_recorder.exe --no-udp
@@ -44,6 +44,7 @@ multi_device_recorder.exe --no-udp
 | `--primary SERIAL` | Serial number of PRIMARY camera |
 | `--udp-port PORT` | UDP listen port (default: 9000) |
 | `--no-udp` | Disable UDP listener |
+| `--no-color` | Disable RGB recording (depth/IR only) |
 
 ### Runtime Controls
 
@@ -73,6 +74,15 @@ Example:
 recording_cam0_CL2K1234567_experiment01_20240115_143022.mkv
 recording_cam1_CL2K7654321_experiment01_20240115_143022.mkv
 ```
+
+### MKV Contents
+
+By default, each MKV file contains:
+- **Depth** (NFOV Unbinned, 640x576)
+- **IR** (Infrared)
+- **RGB** (1080P MJPG, 1920x1080)
+
+Use `--no-color` to record depth/IR only (smaller file size).
 
 ## Workflow
 

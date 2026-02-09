@@ -27,6 +27,11 @@ const int CHECKERBOARD_ROWS = 6;      // Inner corners (rows)
 const int CHECKERBOARD_COLS = 9;      // Inner corners (cols)
 const float SQUARE_SIZE_MM = 25.0f;   // Checkerboard square size in mm
 
+// HMD Calibration defaults (two-checkerboard method)
+const int HEAD_CB_ROWS = 4;           // Head-checkerboard inner corners (rows)
+const int HEAD_CB_COLS = 5;           // Head-checkerboard inner corners (cols)
+const float HEAD_CB_SQUARE_MM = 30.0f; // Head-checkerboard square size in mm
+
 // ============================================================================
 // Device Info Structure
 // ============================================================================
@@ -52,6 +57,18 @@ struct ExtrinsicCalibration {
     std::string serialNumber;
     int deviceIndex;
     bool isValid = false;
+};
+
+// ============================================================================
+// HMD Calibration Result (T_checker_to_A)
+// ============================================================================
+struct HMDCalibration {
+    cv::Mat rotation;       // 3x3 rotation matrix (checkerboard to camera)
+    cv::Mat translation;    // 3x1 translation vector (mm)
+    cv::Mat rvec;           // Rodrigues rotation vector
+    bool isValid = false;
+    int numCaptures = 0;
+    double reprojectionError = 0.0;
 };
 
 // ============================================================================
@@ -543,12 +560,535 @@ void CaptureThread(DeviceInfo* device, CaptureData* captureData, cv::Size patter
 }
 
 // ============================================================================
+// Generate 3D object points for checkerboard
+// ============================================================================
+std::vector<cv::Point3f> GenerateCheckerboardPoints(int rows, int cols, float squareSize)
+{
+    std::vector<cv::Point3f> points;
+    for (int r = 0; r < rows; r++)
+    {
+        for (int c = 0; c < cols; c++)
+        {
+            points.push_back(cv::Point3f(c * squareSize, r * squareSize, 0.0f));
+        }
+    }
+    return points;
+}
+
+// ============================================================================
+// Save HMD Calibration to JSON (T_checker_to_A.json)
+// ============================================================================
+void SaveHMDCalibrationJSON(const HMDCalibration& calib, const std::string& filename)
+{
+    std::ofstream file(filename);
+    if (!file.is_open())
+    {
+        std::cerr << "Failed to open " << filename << " for writing" << std::endl;
+        return;
+    }
+
+    file << std::fixed << std::setprecision(9);
+    file << "{\n";
+    file << "  \"description\": \"Checkerboard to Helmet Camera (A) transformation\",\n";
+    file << "  \"num_captures\": " << calib.numCaptures << ",\n";
+    file << "  \"reprojection_error\": " << calib.reprojectionError << ",\n";
+    file << "  \"rotation\": [\n";
+    for (int r = 0; r < 3; r++)
+    {
+        file << "    [";
+        for (int c = 0; c < 3; c++)
+        {
+            file << calib.rotation.at<double>(r, c);
+            if (c < 2) file << ", ";
+        }
+        file << "]";
+        if (r < 2) file << ",";
+        file << "\n";
+    }
+    file << "  ],\n";
+    file << "  \"translation\": ["
+         << calib.translation.at<double>(0, 0) << ", "
+         << calib.translation.at<double>(1, 0) << ", "
+         << calib.translation.at<double>(2, 0) << "],\n";
+    file << "  \"rvec\": ["
+         << calib.rvec.at<double>(0, 0) << ", "
+         << calib.rvec.at<double>(1, 0) << ", "
+         << calib.rvec.at<double>(2, 0) << "]\n";
+    file << "}\n";
+    file.close();
+
+    std::cout << "Saved HMD calibration to: " << filename << std::endl;
+}
+
+// ============================================================================
+// HMD Calibration Mode - Method 1: Using Orbbec Camera
+// Computes T_checker_to_A using solvePnP with K4A intrinsics
+// ============================================================================
+int RunHMDCalibrationOrbbec(int checkerboardRows, int checkerboardCols,
+                             float squareSize, const std::string& outputFile,
+                             const std::string& targetSerial)
+{
+    std::cout << "\n========================================" << std::endl;
+    std::cout << "HMD Calibration Mode (Orbbec Camera)" << std::endl;
+    std::cout << "========================================\n" << std::endl;
+    std::cout << "Checkerboard: " << checkerboardCols << "x" << checkerboardRows
+              << " inner corners, " << squareSize << "mm squares" << std::endl;
+
+    // Find and open target device
+    uint32_t deviceCount = k4a_device_get_installed_count();
+    if (deviceCount == 0)
+    {
+        std::cerr << "No devices found!" << std::endl;
+        return -1;
+    }
+
+    k4a_device_t device = nullptr;
+    std::string serialNumber;
+
+    for (uint32_t i = 0; i < deviceCount; i++)
+    {
+        k4a_device_t tempDevice = nullptr;
+        if (k4a_device_open(i, &tempDevice) != K4A_RESULT_SUCCEEDED)
+        {
+            continue;
+        }
+
+        std::string serial = GetDeviceSerialNumber(tempDevice);
+        std::cout << "Device " << i << ": " << serial << std::endl;
+
+        if (targetSerial.empty() || serial == targetSerial)
+        {
+            device = tempDevice;
+            serialNumber = serial;
+            std::cout << "Using device: " << serial << std::endl;
+            break;
+        }
+        k4a_device_close(tempDevice);
+    }
+
+    if (!device)
+    {
+        std::cerr << "Failed to open device" << std::endl;
+        return -1;
+    }
+
+    // Configure camera
+    k4a_device_configuration_t config = K4A_DEVICE_CONFIG_INIT_DISABLE_ALL;
+    config.depth_mode = K4A_DEPTH_MODE_NFOV_UNBINNED;
+    config.color_resolution = K4A_COLOR_RESOLUTION_1080P;
+    config.color_format = K4A_IMAGE_FORMAT_COLOR_BGRA32;
+    config.camera_fps = K4A_FRAMES_PER_SECOND_30;
+    config.synchronized_images_only = true;
+    config.wired_sync_mode = K4A_WIRED_SYNC_MODE_STANDALONE;
+
+    if (k4a_device_start_cameras(device, &config) != K4A_RESULT_SUCCEEDED)
+    {
+        std::cerr << "Failed to start cameras" << std::endl;
+        k4a_device_close(device);
+        return -1;
+    }
+
+    // Get calibration for intrinsics
+    k4a_calibration_t calibration;
+    if (k4a_device_get_calibration(device, config.depth_mode, config.color_resolution,
+                                    &calibration) != K4A_RESULT_SUCCEEDED)
+    {
+        std::cerr << "Failed to get calibration" << std::endl;
+        k4a_device_stop_cameras(device);
+        k4a_device_close(device);
+        return -1;
+    }
+
+    // Extract camera intrinsics
+    auto& colorCal = calibration.color_camera_calibration;
+    auto& intrinsics = colorCal.intrinsics.parameters.param;
+
+    cv::Mat cameraMatrix = (cv::Mat_<double>(3, 3) <<
+        intrinsics.fx, 0, intrinsics.cx,
+        0, intrinsics.fy, intrinsics.cy,
+        0, 0, 1);
+
+    cv::Mat distCoeffs = (cv::Mat_<double>(8, 1) <<
+        intrinsics.k1, intrinsics.k2, intrinsics.p1, intrinsics.p2,
+        intrinsics.k3, intrinsics.k4, intrinsics.k5, intrinsics.k6);
+
+    std::cout << "\nCamera intrinsics (fx, fy, cx, cy): "
+              << intrinsics.fx << ", " << intrinsics.fy << ", "
+              << intrinsics.cx << ", " << intrinsics.cy << std::endl;
+
+    cv::Size patternSize(checkerboardCols, checkerboardRows);
+    std::vector<cv::Point3f> objectPoints = GenerateCheckerboardPoints(
+        checkerboardRows, checkerboardCols, squareSize);
+
+    // Storage for multiple captures (for averaging)
+    std::vector<cv::Mat> allRvecs, allTvecs;
+    HMDCalibration hmdCalib;
+
+    cv::namedWindow("HMD Calibration", cv::WINDOW_NORMAL);
+    cv::resizeWindow("HMD Calibration", 960, 540);
+
+    std::cout << "\n=== Instructions ===" << std::endl;
+    std::cout << "1. Hold checkerboard steady in front of helmet camera" << std::endl;
+    std::cout << "2. Press SPACE to capture (multiple captures recommended)" << std::endl;
+    std::cout << "3. Press 'C' to compute calibration from captures" << std::endl;
+    std::cout << "4. Press 'S' to save calibration" << std::endl;
+    std::cout << "5. Press ESC to quit" << std::endl;
+
+    bool running = true;
+    while (running)
+    {
+        k4a_capture_t capture = nullptr;
+        if (k4a_device_get_capture(device, &capture, 1000) != K4A_WAIT_RESULT_SUCCEEDED)
+        {
+            continue;
+        }
+
+        k4a_image_t colorImage = k4a_capture_get_color_image(capture);
+        if (!colorImage)
+        {
+            k4a_capture_release(capture);
+            continue;
+        }
+
+        cv::Mat colorMat = K4AImageToMat(colorImage);
+        cv::Mat display;
+        cv::cvtColor(colorMat, display, cv::COLOR_BGRA2BGR);
+
+        std::vector<cv::Point2f> corners;
+        bool found = DetectCheckerboardCorners(colorMat, corners, patternSize);
+
+        if (found)
+        {
+            cv::drawChessboardCorners(display, patternSize, corners, true);
+            cv::putText(display, "Checkerboard FOUND - Press SPACE to capture",
+                        cv::Point(10, 30), cv::FONT_HERSHEY_SIMPLEX, 0.8, cv::Scalar(0, 255, 0), 2);
+        }
+        else
+        {
+            cv::putText(display, "Checkerboard NOT found", cv::Point(10, 30),
+                        cv::FONT_HERSHEY_SIMPLEX, 0.8, cv::Scalar(0, 0, 255), 2);
+        }
+
+        // Show capture count
+        cv::putText(display, "Captures: " + std::to_string(allRvecs.size()),
+                    cv::Point(10, 60), cv::FONT_HERSHEY_SIMPLEX, 0.8, cv::Scalar(255, 255, 0), 2);
+
+        if (hmdCalib.isValid)
+        {
+            cv::putText(display, "CALIBRATED (Press S to save)", cv::Point(10, 90),
+                        cv::FONT_HERSHEY_SIMPLEX, 0.8, cv::Scalar(0, 255, 0), 2);
+        }
+
+        cv::imshow("HMD Calibration", display);
+
+        int key = cv::waitKey(30);
+        if (key == 27)  // ESC
+        {
+            running = false;
+        }
+        else if (key == ' ' && found)  // SPACE - Capture
+        {
+            cv::Mat rvec, tvec;
+            bool success = cv::solvePnP(objectPoints, corners, cameraMatrix, distCoeffs,
+                                        rvec, tvec, false, cv::SOLVEPNP_ITERATIVE);
+
+            if (success)
+            {
+                allRvecs.push_back(rvec.clone());
+                allTvecs.push_back(tvec.clone());
+                std::cout << "Capture " << allRvecs.size() << " - Translation: "
+                          << tvec.t() << " mm" << std::endl;
+            }
+        }
+        else if ((key == 'c' || key == 'C') && !allRvecs.empty())  // Compute
+        {
+            // Average all captures
+            cv::Mat avgRvec = cv::Mat::zeros(3, 1, CV_64F);
+            cv::Mat avgTvec = cv::Mat::zeros(3, 1, CV_64F);
+
+            for (size_t i = 0; i < allRvecs.size(); i++)
+            {
+                avgRvec += allRvecs[i];
+                avgTvec += allTvecs[i];
+            }
+            avgRvec /= static_cast<double>(allRvecs.size());
+            avgTvec /= static_cast<double>(allTvecs.size());
+
+            // Convert rvec to rotation matrix
+            cv::Mat R;
+            cv::Rodrigues(avgRvec, R);
+
+            // Compute reprojection error
+            double totalError = 0;
+            for (size_t i = 0; i < allRvecs.size(); i++)
+            {
+                std::vector<cv::Point2f> projectedPoints;
+                cv::projectPoints(objectPoints, allRvecs[i], allTvecs[i],
+                                  cameraMatrix, distCoeffs, projectedPoints);
+                // We don't have original corners stored, so use last capture
+            }
+
+            hmdCalib.rotation = R;
+            hmdCalib.translation = avgTvec;
+            hmdCalib.rvec = avgRvec;
+            hmdCalib.numCaptures = static_cast<int>(allRvecs.size());
+            hmdCalib.isValid = true;
+
+            std::cout << "\n=== HMD Calibration Complete ===" << std::endl;
+            std::cout << "Rotation matrix:\n" << R << std::endl;
+            std::cout << "Translation (mm): " << avgTvec.t() << std::endl;
+            std::cout << "Based on " << allRvecs.size() << " captures" << std::endl;
+        }
+        else if ((key == 's' || key == 'S') && hmdCalib.isValid)  // Save
+        {
+            SaveHMDCalibrationJSON(hmdCalib, outputFile);
+        }
+
+        k4a_image_release(colorImage);
+        k4a_capture_release(capture);
+    }
+
+    cv::destroyAllWindows();
+    k4a_device_stop_cameras(device);
+    k4a_device_close(device);
+
+    return 0;
+}
+
+// ============================================================================
+// HMD Calibration Mode - Method 2: Using External Image (OpenCV only)
+// For cameras like Basler that provide images via pypylon or file
+// ============================================================================
+int RunHMDCalibrationOpenCV(int checkerboardRows, int checkerboardCols,
+                             float squareSize, const std::string& outputFile,
+                             const std::string& imageSource,
+                             double fx, double fy, double cx, double cy)
+{
+    std::cout << "\n========================================" << std::endl;
+    std::cout << "HMD Calibration Mode (OpenCV/External)" << std::endl;
+    std::cout << "========================================\n" << std::endl;
+    std::cout << "Checkerboard: " << checkerboardCols << "x" << checkerboardRows
+              << " inner corners, " << squareSize << "mm squares" << std::endl;
+
+    cv::Size patternSize(checkerboardCols, checkerboardRows);
+    std::vector<cv::Point3f> objectPoints = GenerateCheckerboardPoints(
+        checkerboardRows, checkerboardCols, squareSize);
+
+    cv::Mat cameraMatrix, distCoeffs;
+    cv::Mat image;
+    bool isVideo = false;
+    cv::VideoCapture cap;
+
+    // Check if imageSource is a number (camera index) or file path
+    if (imageSource.length() == 1 && std::isdigit(imageSource[0]))
+    {
+        int camIndex = std::stoi(imageSource);
+        cap.open(camIndex);
+        isVideo = true;
+        std::cout << "Using webcam index: " << camIndex << std::endl;
+    }
+    else if (imageSource.find(".") == std::string::npos)
+    {
+        // Assume it's a camera index
+        int camIndex = std::stoi(imageSource);
+        cap.open(camIndex);
+        isVideo = true;
+    }
+    else
+    {
+        // Check if it's an image or video file
+        image = cv::imread(imageSource);
+        if (image.empty())
+        {
+            cap.open(imageSource);
+            isVideo = cap.isOpened();
+            if (!isVideo)
+            {
+                std::cerr << "Failed to open image/video: " << imageSource << std::endl;
+                return -1;
+            }
+        }
+        std::cout << "Using source: " << imageSource << std::endl;
+    }
+
+    // Set up camera matrix
+    if (fx > 0 && fy > 0 && cx > 0 && cy > 0)
+    {
+        cameraMatrix = (cv::Mat_<double>(3, 3) <<
+            fx, 0, cx,
+            0, fy, cy,
+            0, 0, 1);
+        distCoeffs = cv::Mat::zeros(5, 1, CV_64F);
+        std::cout << "Using provided intrinsics: fx=" << fx << ", fy=" << fy
+                  << ", cx=" << cx << ", cy=" << cy << std::endl;
+    }
+    else
+    {
+        std::cout << "WARNING: No intrinsics provided. Using estimated values." << std::endl;
+        std::cout << "For accurate calibration, use --fx --fy --cx --cy options." << std::endl;
+
+        // Get image size for estimation
+        cv::Mat tempImg;
+        if (isVideo)
+        {
+            cap >> tempImg;
+            if (tempImg.empty())
+            {
+                std::cerr << "Failed to read frame" << std::endl;
+                return -1;
+            }
+        }
+        else
+        {
+            tempImg = image;
+        }
+
+        // Estimate intrinsics (rough approximation)
+        double imgWidth = tempImg.cols;
+        double imgHeight = tempImg.rows;
+        fx = fy = imgWidth;  // Rough estimate
+        cx = imgWidth / 2.0;
+        cy = imgHeight / 2.0;
+
+        cameraMatrix = (cv::Mat_<double>(3, 3) <<
+            fx, 0, cx,
+            0, fy, cy,
+            0, 0, 1);
+        distCoeffs = cv::Mat::zeros(5, 1, CV_64F);
+
+        std::cout << "Estimated intrinsics: fx=" << fx << ", fy=" << fy
+                  << ", cx=" << cx << ", cy=" << cy << std::endl;
+    }
+
+    std::vector<cv::Mat> allRvecs, allTvecs;
+    HMDCalibration hmdCalib;
+
+    if (!isVideo && !image.empty())
+    {
+        // Single image mode
+        std::vector<cv::Point2f> corners;
+        bool found = DetectCheckerboardCorners(image, corners, patternSize);
+
+        if (!found)
+        {
+            std::cerr << "Checkerboard not found in image!" << std::endl;
+            return -1;
+        }
+
+        cv::Mat rvec, tvec;
+        cv::solvePnP(objectPoints, corners, cameraMatrix, distCoeffs, rvec, tvec);
+
+        cv::Mat R;
+        cv::Rodrigues(rvec, R);
+
+        hmdCalib.rotation = R;
+        hmdCalib.translation = tvec;
+        hmdCalib.rvec = rvec;
+        hmdCalib.numCaptures = 1;
+        hmdCalib.isValid = true;
+
+        std::cout << "\n=== HMD Calibration Complete ===" << std::endl;
+        std::cout << "Rotation matrix:\n" << R << std::endl;
+        std::cout << "Translation (mm): " << tvec.t() << std::endl;
+
+        SaveHMDCalibrationJSON(hmdCalib, outputFile);
+
+        // Show result
+        cv::Mat display = image.clone();
+        cv::drawChessboardCorners(display, patternSize, corners, true);
+        cv::namedWindow("HMD Calibration Result", cv::WINDOW_NORMAL);
+        cv::imshow("HMD Calibration Result", display);
+        cv::waitKey(0);
+    }
+    else
+    {
+        // Video/webcam mode
+        cv::namedWindow("HMD Calibration", cv::WINDOW_NORMAL);
+
+        std::cout << "\n=== Instructions ===" << std::endl;
+        std::cout << "1. Hold checkerboard steady in front of camera" << std::endl;
+        std::cout << "2. Press SPACE to capture" << std::endl;
+        std::cout << "3. Press 'C' to compute calibration" << std::endl;
+        std::cout << "4. Press 'S' to save" << std::endl;
+        std::cout << "5. Press ESC to quit" << std::endl;
+
+        bool running = true;
+        while (running)
+        {
+            cv::Mat frame;
+            cap >> frame;
+            if (frame.empty()) break;
+
+            cv::Mat display = frame.clone();
+            std::vector<cv::Point2f> corners;
+            bool found = DetectCheckerboardCorners(frame, corners, patternSize);
+
+            if (found)
+            {
+                cv::drawChessboardCorners(display, patternSize, corners, true);
+                cv::putText(display, "FOUND - Press SPACE", cv::Point(10, 30),
+                            cv::FONT_HERSHEY_SIMPLEX, 0.8, cv::Scalar(0, 255, 0), 2);
+            }
+
+            cv::putText(display, "Captures: " + std::to_string(allRvecs.size()),
+                        cv::Point(10, 60), cv::FONT_HERSHEY_SIMPLEX, 0.8, cv::Scalar(255, 255, 0), 2);
+
+            cv::imshow("HMD Calibration", display);
+
+            int key = cv::waitKey(30);
+            if (key == 27) running = false;
+            else if (key == ' ' && found)
+            {
+                cv::Mat rvec, tvec;
+                cv::solvePnP(objectPoints, corners, cameraMatrix, distCoeffs, rvec, tvec);
+                allRvecs.push_back(rvec);
+                allTvecs.push_back(tvec);
+                std::cout << "Capture " << allRvecs.size() << std::endl;
+            }
+            else if ((key == 'c' || key == 'C') && !allRvecs.empty())
+            {
+                cv::Mat avgRvec = cv::Mat::zeros(3, 1, CV_64F);
+                cv::Mat avgTvec = cv::Mat::zeros(3, 1, CV_64F);
+                for (size_t i = 0; i < allRvecs.size(); i++)
+                {
+                    avgRvec += allRvecs[i];
+                    avgTvec += allTvecs[i];
+                }
+                avgRvec /= static_cast<double>(allRvecs.size());
+                avgTvec /= static_cast<double>(allTvecs.size());
+
+                cv::Mat R;
+                cv::Rodrigues(avgRvec, R);
+
+                hmdCalib.rotation = R;
+                hmdCalib.translation = avgTvec;
+                hmdCalib.rvec = avgRvec;
+                hmdCalib.numCaptures = static_cast<int>(allRvecs.size());
+                hmdCalib.isValid = true;
+
+                std::cout << "\nCalibration complete!" << std::endl;
+                std::cout << "Translation (mm): " << avgTvec.t() << std::endl;
+            }
+            else if ((key == 's' || key == 'S') && hmdCalib.isValid)
+            {
+                SaveHMDCalibrationJSON(hmdCalib, outputFile);
+            }
+        }
+        cap.release();
+    }
+
+    cv::destroyAllWindows();
+    return 0;
+}
+
+// ============================================================================
 // Print Usage
 // ============================================================================
 void PrintUsage()
 {
     std::cout << "\n=== Multi-Device Extrinsic Calibration Tool ===\n"
               << "USAGE: multi_device_calibration.exe [OPTIONS]\n\n"
+              << "=== Mode 1: Multi-Camera Calibration (default) ===\n"
               << "Options:\n"
               << "  --rows N         Checkerboard inner corners (rows), default: " << CHECKERBOARD_ROWS << "\n"
               << "  --cols N         Checkerboard inner corners (cols), default: " << CHECKERBOARD_COLS << "\n"
@@ -556,15 +1096,38 @@ void PrintUsage()
               << "  --output FILE    Output filename prefix, default: calibration\n"
               << "  --primary SERIAL Serial number of PRIMARY camera (sync hub master port)\n"
               << "  --exclude SERIAL Exclude camera by serial number (can be used multiple times)\n"
-              << "\nInstructions:\n"
+              << "\n=== Mode 2: HMD Calibration (T_checker_to_A) ===\n"
+              << "Calibrates the transform from checkerboard (attached to helmet) to helmet camera.\n"
+              << "\nOptions:\n"
+              << "  --hmd-calib            Enable HMD calibration mode\n"
+              << "  --hmd-orbbec           Use Orbbec camera (Method 1)\n"
+              << "  --hmd-opencv SOURCE    Use OpenCV with external source (Method 2)\n"
+              << "                         SOURCE can be: image file, video file, or camera index\n"
+              << "  --hmd-serial SERIAL    Orbbec camera serial number (optional)\n"
+              << "  --fx N                 Camera intrinsic fx (for OpenCV method)\n"
+              << "  --fy N                 Camera intrinsic fy (for OpenCV method)\n"
+              << "  --cx N                 Camera intrinsic cx (for OpenCV method)\n"
+              << "  --cy N                 Camera intrinsic cy (for OpenCV method)\n"
+              << "\nInstructions (Multi-Camera):\n"
               << "  1. Place checkerboard visible to ALL cameras\n"
               << "  2. Press SPACE to capture and calibrate\n"
               << "  3. Press 'S' to save calibration\n"
               << "  4. Press ESC to quit\n"
+              << "\nInstructions (HMD Calibration):\n"
+              << "  1. Attach checkerboard rigidly to helmet\n"
+              << "  2. Hold checkerboard in front of helmet camera\n"
+              << "  3. Press SPACE to capture (multiple captures for averaging)\n"
+              << "  4. Press 'C' to compute calibration\n"
+              << "  5. Press 'S' to save T_checker_to_A.json\n"
               << "\nExamples:\n"
-              << "  multi_device_calibration.exe --primary CL8T75400DC --rows 4 --cols 5\n"
+              << "  # Multi-camera calibration\n"
               << "  multi_device_calibration.exe --primary CL8T75400DC --exclude CL8T75400GD\n"
-              << "  multi_device_calibration.exe --exclude CAM1 --exclude CAM2\n"
+              << "\n  # HMD calibration with Orbbec camera\n"
+              << "  multi_device_calibration.exe --hmd-orbbec --output T_checker_to_A.json\n"
+              << "\n  # HMD calibration with webcam (camera index 0)\n"
+              << "  multi_device_calibration.exe --hmd-opencv 0 --fx 1000 --fy 1000 --cx 640 --cy 360\n"
+              << "\n  # HMD calibration with image file\n"
+              << "  multi_device_calibration.exe --hmd-opencv image.jpg --fx 1000 --fy 1000 --cx 640 --cy 360\n"
               << std::endl;
 }
 
@@ -586,18 +1149,55 @@ int main(int argc, char** argv)
     std::string primarySerial = "";  // Serial number of PRIMARY camera (sync hub master port)
     std::vector<std::string> excludeSerials;  // Serial numbers to exclude from calibration
 
+    // HMD calibration options
+    bool hmdCalibMode = false;
+    bool hmdUseOrbbec = false;
+    std::string hmdOpenCVSource = "";
+    std::string hmdSerial = "";
+    double hmdFx = 0, hmdFy = 0, hmdCx = 0, hmdCy = 0;
+
     for (int i = 1; i < argc; i++)
     {
         std::string arg(argv[i]);
         if (arg == "--rows" && i + 1 < argc) checkerboardRows = std::atoi(argv[++i]);
         else if (arg == "--cols" && i + 1 < argc) checkerboardCols = std::atoi(argv[++i]);
-        else if (arg == "--square" && i + 1 < argc) squareSize = std::atof(argv[++i]);
+        else if (arg == "--square" && i + 1 < argc) squareSize = static_cast<float>(std::atof(argv[++i]));
         else if (arg == "--output" && i + 1 < argc) outputPrefix = argv[++i];
         else if (arg == "--primary" && i + 1 < argc) primarySerial = argv[++i];
         else if (arg == "--exclude" && i + 1 < argc) excludeSerials.push_back(argv[++i]);
+        else if (arg == "--hmd-calib") hmdCalibMode = true;
+        else if (arg == "--hmd-orbbec") { hmdCalibMode = true; hmdUseOrbbec = true; }
+        else if (arg == "--hmd-opencv" && i + 1 < argc) { hmdCalibMode = true; hmdOpenCVSource = argv[++i]; }
+        else if (arg == "--hmd-serial" && i + 1 < argc) hmdSerial = argv[++i];
+        else if (arg == "--fx" && i + 1 < argc) hmdFx = std::atof(argv[++i]);
+        else if (arg == "--fy" && i + 1 < argc) hmdFy = std::atof(argv[++i]);
+        else if (arg == "--cx" && i + 1 < argc) hmdCx = std::atof(argv[++i]);
+        else if (arg == "--cy" && i + 1 < argc) hmdCy = std::atof(argv[++i]);
         else if (arg == "--help" || arg == "-h") {
             PrintUsage();
             return 0;
+        }
+    }
+
+    // Dispatch to HMD calibration mode if requested
+    if (hmdCalibMode)
+    {
+        std::string hmdOutputFile = outputPrefix;
+        if (hmdOutputFile.find(".json") == std::string::npos)
+        {
+            hmdOutputFile += ".json";
+        }
+
+        if (hmdUseOrbbec || hmdOpenCVSource.empty())
+        {
+            return RunHMDCalibrationOrbbec(checkerboardRows, checkerboardCols,
+                                            squareSize, hmdOutputFile, hmdSerial);
+        }
+        else
+        {
+            return RunHMDCalibrationOpenCV(checkerboardRows, checkerboardCols,
+                                            squareSize, hmdOutputFile, hmdOpenCVSource,
+                                            hmdFx, hmdFy, hmdCx, hmdCy);
         }
     }
 

@@ -17,6 +17,7 @@
 #include <iomanip>
 #include <k4a/k4a.h>
 #include <k4arecord/record.h>
+#include <cstdio>   
 
 // Winsock for UDP communication
 #ifdef _WIN32
@@ -34,6 +35,9 @@ std::atomic<bool> s_isRunning{true};
 std::atomic<bool> g_isRecording{false};
 std::string g_outputDir = ".";
 std::string g_sessionName = "";
+
+std::vector<std::string> g_lastFiles;   // StartReccording 에서 만든 mkv 경로
+
 bool g_enableColor = true;  // RGB recording enabled by default
 
 // Recording handles (one per device)
@@ -234,12 +238,18 @@ void StartRecording()
 
     g_recordings.resize(g_devices.size());
 
+    g_lastFiles.assign(g_devices.size(), "");
+
+
     for (size_t i = 0; i < g_devices.size(); i++)
     {
         std::ostringstream filename;
         filename << g_outputDir << "/recording_cam" << i
                  << "_" << g_devices[i].serialNumber
                  << "_" << session << ".mkv";
+
+        g_lastFiles[i] = filename.str();
+
 
         k4a_device_configuration_t config = K4A_DEVICE_CONFIG_INIT_DISABLE_ALL;
         config.depth_mode = K4A_DEPTH_MODE_NFOV_UNBINNED;
@@ -332,6 +342,37 @@ void WriteCapture(int deviceIndex, k4a_capture_t capture)
     }
 }
 
+
+void RenameLastFilesAsReset()
+{
+    if (g_lastFiles.empty()) return;
+
+    for (auto& path : g_lastFiles)
+    {
+        if (path.empty()) continue;
+
+        auto slash = path.find_last_of("/\\");
+        std::string dir = (slash == std::string::npos) ? "" : path.substr(0, slash + 1);
+        std::string name = (slash == std::string::npos) ? path : path.substr(slash + 1);
+
+        // 이미 reset_이면 스킵
+        if (name.rfind("RESET_", 0) == 0) continue;
+
+        std::string newPath = dir + "RESET_" + name;
+
+        if (std::rename(path.c_str(), newPath.c_str()) == 0)
+        {
+            std::cout << "[RESET] Renamed: " << path << " -> " << newPath << std::endl;
+            path = newPath; // 갱신
+        }
+        else
+        {
+            std::cerr << "[RESET] Rename failed: " << path << std::endl;
+        }
+    }
+}
+
+
 // ============================================================================
 // Process UDP Commands
 // ============================================================================
@@ -341,27 +382,37 @@ void ProcessUdpCommands()
     auto commands = GetPendingCommands();
     for (const auto& cmd : commands)
     {
-        if (cmd == "TOGGLE_RECORD")
+        //if (cmd == "TOGGLE_RECORD")
+        //{
+        //    if (g_isRecording) {
+        //        StopRecording();
+        //        SendUdpCommand("STOP_RECORD");
+        //    } else {
+        //        StartRecording();
+        //        SendUdpCommand("START_RECORD");
+        //    }
+        //}
+        if (cmd.rfind("START_RECORD ", 0) == 0)
         {
-            if (g_isRecording) {
-                StopRecording();
-                SendUdpCommand("STOP_RECORD");
-            } else {
-                StartRecording();
-                SendUdpCommand("START_RECORD");
-            }
+            g_sessionName = cmd.substr(std::string("START_RECORD ").size());
+            std::cout << "[UDP] Session set to: " << g_sessionName << std::endl;
+
+            if (!g_isRecording) StartRecording();
         }
         else if (cmd == "START_RECORD")
         {
-            if (!g_isRecording) {
-                StartRecording();
-            }
+            if (!g_isRecording) StartRecording();
         }
         else if (cmd == "STOP_RECORD")
         {
             if (g_isRecording) {
                 StopRecording();
             }
+        }
+        else if (cmd == "RESET_RECORD")
+        {
+            if (g_isRecording) StopRecording();
+            RenameLastFilesAsReset();
         }
     }
 #endif

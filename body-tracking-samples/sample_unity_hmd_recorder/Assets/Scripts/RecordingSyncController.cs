@@ -136,10 +136,10 @@ public class RecordingSyncController : MonoBehaviour
         ProcessPendingCommand();
 
         // Send commands on key press
-        if (Input.GetKeyDown(KeyCode.R))
-        {
-            SendCommand("TOGGLE_RECORD");
-        }
+        //if (Input.GetKeyDown(KeyCode.R))
+        //{
+        //    SendCommand("TOGGLE_RECORD");
+        //}
 
         if (Input.GetKeyDown(KeyCode.K))
         {
@@ -156,17 +156,20 @@ public class RecordingSyncController : MonoBehaviour
             pendingCommand = null;
         }
 
+        print("리턴하기 전임");
+
         if (string.IsNullOrEmpty(command)) return;
 
         lastReceivedCommand = command;
         Debug.Log($"[RecordingSync] Received: {command}");
 
         // Handle command
+        print("이게안되나");
         switch (command)
         {
-            case "TOGGLE_RECORD":
-                ToggleLocalRecording();
-                break;
+            //case "TOGGLE_RECORD":
+            //    ToggleLocalRecording();
+            //    break;
             case "START_RECORD":
                 StartLocalRecording();
                 break;
@@ -232,6 +235,7 @@ public class RecordingSyncController : MonoBehaviour
 
     void StopLocalRecording()
     {
+        print("엘렐레");
         if (hmdRecorder == null) return;
 
         if (hmdRecorder.IsRecording)

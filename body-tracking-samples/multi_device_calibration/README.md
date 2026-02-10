@@ -174,71 +174,91 @@ The calibration follows the methodology from "Accurate Extrinsic Calibration of 
 
 ---
 
-## HMD Calibration Mode (T_checker_to_A)
+## HMD Bridge Calibration Mode (T_checker_to_A)
 
-This mode computes the fixed transform from a checkerboard (rigidly attached to helmet) to the helmet-mounted camera. This is used by `egocentric_dataset_generator` to compute helmet camera pose at runtime.
+This mode computes the fixed transform from a checkerboard (rigidly attached to helmet) to the helmet-mounted camera using the **Bridge Method** (Simultaneous Observation).
 
-### Two Methods Available
+### The Problem
 
-#### Method 1: Orbbec Camera (`--hmd-orbbec`)
+The helmet camera cannot see the checkerboard attached to itself. We solve this using two checkerboards:
 
-Uses the Orbbec Femto Bolt camera directly with K4A intrinsics.
-
-```cmd
-# Basic HMD calibration with Orbbec camera
-multi_device_calibration.exe --hmd-orbbec --output T_checker_to_A
-
-# Specify checkerboard size
-multi_device_calibration.exe --hmd-orbbec --rows 4 --cols 5 --square 30 --output T_checker_to_A
-
-# Use specific camera by serial number
-multi_device_calibration.exe --hmd-orbbec --hmd-serial CL8T75400GD --output T_checker_to_A
+```
+                    Checkerboard A (Ground)
+                           ▲
+                          / \
+                         /   \
+            T_A_to_Ext  /     \  T_A_to_Helmet
+                       /       \
+                      ▼         ▼
+            External Camera    Helmet Camera
+             (Primary)          (Camera A)
+                  │
+                  │ T_B_to_Ext
+                  ▼
+            Checkerboard B (Helmet)
+                  │
+                  │ T_B_to_Helmet (rigid, UNKNOWN → solve for this)
+                  ▼
+            Helmet Camera Origin
 ```
 
-#### Method 2: OpenCV/External Camera (`--hmd-opencv`)
+### How It Works
 
-Uses any camera via OpenCV (webcam, Basler, or image file). Requires camera intrinsics.
+1. **Ground Checkerboard (A)**: Placed on floor, visible to BOTH cameras
+2. **Helmet Checkerboard (B)**: Attached to helmet, visible ONLY to external camera
 
-```cmd
-# Using webcam (camera index 0)
-multi_device_calibration.exe --hmd-opencv 0 --fx 1000 --fy 1000 --cx 640 --cy 360 --output T_checker_to_A
-
-# Using an image file
-multi_device_calibration.exe --hmd-opencv helmet_view.jpg --fx 800 --fy 800 --cx 320 --cy 240 --output T_checker_to_A
-
-# Using a video file
-multi_device_calibration.exe --hmd-opencv recording.mp4 --fx 1000 --fy 1000 --cx 640 --cy 360 --output T_checker_to_A
+The bridge formula:
+```
+T_checker_to_A = T_helmet_to_external^-1 × T_ground_to_external × T_ground_to_helmet^-1
 ```
 
-### HMD Calibration Options
+### Usage
+
+```cmd
+multi_device_calibration.exe --hmd-bridge ^
+    --helmet-serial CL8T75400GD ^
+    --primary CL8T75400DC ^
+    --ground-rows 6 --ground-cols 9 --ground-square 25 ^
+    --helmet-rows 4 --helmet-cols 5 --helmet-square 30 ^
+    --output T_checker_to_A
+```
+
+### Bridge Mode Options
 
 | Option | Description |
 |--------|-------------|
-| `--hmd-orbbec` | Use Orbbec camera (Method 1) |
-| `--hmd-opencv SOURCE` | Use OpenCV with external source (Method 2) |
-| `--hmd-serial SERIAL` | Orbbec camera serial number (optional) |
-| `--fx N` | Camera intrinsic fx (for OpenCV method) |
-| `--fy N` | Camera intrinsic fy (for OpenCV method) |
-| `--cx N` | Camera intrinsic cx (for OpenCV method) |
-| `--cy N` | Camera intrinsic cy (for OpenCV method) |
+| `--hmd-bridge` | Enable HMD bridge calibration mode |
+| `--helmet-serial SERIAL` | Helmet camera serial number (required) |
+| `--primary SERIAL` | External/primary camera serial (optional) |
+| `--ground-rows N` | Ground checkerboard rows (default: 6) |
+| `--ground-cols N` | Ground checkerboard cols (default: 9) |
+| `--ground-square N` | Ground square size in mm (default: 25) |
+| `--helmet-rows N` | Helmet checkerboard rows (default: 4) |
+| `--helmet-cols N` | Helmet checkerboard cols (default: 5) |
+| `--helmet-square N` | Helmet square size in mm (default: 30) |
 
-### HMD Calibration Controls
+**Important**: Use **different checkerboard sizes** for ground and helmet to avoid detection interference!
+
+### Bridge Calibration Controls
 
 | Key | Action |
 |-----|--------|
-| SPACE | Capture current frame |
+| SPACE | Capture when all boards detected |
 | C | Compute calibration from captures |
 | S | Save T_checker_to_A.json |
 | ESC | Quit |
 
-### HMD Calibration Procedure
+### Bridge Calibration Procedure
 
-1. **Attach checkerboard rigidly to helmet** (the checkerboard moves with the helmet)
-2. **Position helmet so checkerboard faces the helmet camera**
-3. Start calibration: `multi_device_calibration.exe --hmd-orbbec --output T_checker_to_A`
-4. Press **SPACE** multiple times to capture (5-10 captures recommended)
-5. Press **C** to compute the averaged calibration
-6. Press **S** to save
+1. **Place GROUND checkerboard** (e.g., 9x6, 25mm) on the floor
+2. **Attach HELMET checkerboard** (e.g., 5x4, 30mm) rigidly to the helmet
+3. **Position the helmet** so that:
+   - External camera sees BOTH ground and helmet boards
+   - Helmet camera sees the ground board
+4. Press **SPACE** to capture when all three detections are green
+5. **Move to different positions** and capture 5-10 times
+6. Press **C** to compute the averaged calibration
+7. Press **S** to save
 
 ### T_checker_to_A.json Output Format
 
@@ -257,13 +277,11 @@ multi_device_calibration.exe --hmd-opencv recording.mp4 --fx 1000 --fy 1000 --cx
 }
 ```
 
-- `rotation`: 3x3 rotation matrix
-- `translation`: Translation in mm (checkerboard origin to camera)
-- `rvec`: Rodrigues rotation vector (for OpenCV solvePnP compatibility)
+- `rotation`: 3x3 rotation matrix (helmet board to helmet camera)
+- `translation`: Translation in mm
+- `rvec`: Rodrigues rotation vector
 
-### Two-Stage Calibration Workflow
-
-For egocentric body tracking with helmet camera:
+### Complete Two-Stage Calibration Workflow
 
 ```
 Stage 1: External Camera Calibration (checkerboard on ground)
@@ -275,13 +293,17 @@ multi_device_calibration.exe --primary CAM_B --exclude CAM_A --output calibratio
                         (B ↔ C extrinsics)
 
 
-Stage 2: Helmet Camera Calibration (checkerboard on helmet)
+Stage 2: HMD Bridge Calibration (two checkerboards)
 ─────────────────────────────────────────────────────────────
-multi_device_calibration.exe --hmd-orbbec --output T_checker_to_A
+multi_device_calibration.exe --hmd-bridge \
+    --helmet-serial CAM_A \
+    --ground-rows 6 --ground-cols 9 --ground-square 25 \
+    --helmet-rows 4 --helmet-cols 5 --helmet-square 30 \
+    --output T_checker_to_A
                                   │
                                   ▼
                           T_checker_to_A.json
-                      (checkerboard → helmet cam)
+                      (helmet board → helmet cam)
 
 
 Runtime: Egocentric Dataset Generation

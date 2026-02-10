@@ -620,464 +620,531 @@ void SaveHMDCalibrationJSON(const HMDCalibration& calib, const std::string& file
     std::cout << "Saved HMD calibration to: " << filename << std::endl;
 }
 
+
 // ============================================================================
-// HMD Calibration Mode - Method 1: Using Orbbec Camera
-// Computes T_checker_to_A using solvePnP with K4A intrinsics
+// HMD Calibration Mode - Method 3: Bridge Mode (Simultaneous Observation)
+// Uses two checkerboards: Ground board (visible to all) and Helmet board (external only)
+// Computes T_checker_to_A by bridging the spatial relationships
 // ============================================================================
-int RunHMDCalibrationOrbbec(int checkerboardRows, int checkerboardCols,
-                             float squareSize, const std::string& outputFile,
-                             const std::string& targetSerial)
+struct BridgeCaptureData {
+    cv::Mat colorImage;
+    k4a_image_t depthImage = nullptr;
+    std::vector<cv::Point2f> groundCorners;
+    std::vector<cv::Point2f> helmetCorners;
+    bool groundFound = false;
+    bool helmetFound = false;
+    bool hasNewData = false;
+    std::mutex mutex;
+};
+
+// Capture thread for bridge mode (detects both checkerboards)
+void BridgeCaptureThread(DeviceInfo* device, BridgeCaptureData* captureData,
+                          cv::Size groundPatternSize, cv::Size helmetPatternSize)
+{
+    std::cout << "[Device " << device->index << "] Bridge capture thread started" << std::endl;
+
+    while (g_captureRunning)
+    {
+        k4a_capture_t capture = nullptr;
+        k4a_wait_result_t result = k4a_device_get_capture(device->device, &capture, 100);
+
+        if (result == K4A_WAIT_RESULT_SUCCEEDED)
+        {
+            k4a_image_t colorImage = k4a_capture_get_color_image(capture);
+            k4a_image_t depthImage = k4a_capture_get_depth_image(capture);
+
+            if (colorImage && depthImage)
+            {
+                cv::Mat colorMat = K4AImageToMat(colorImage);
+
+                std::vector<cv::Point2f> groundCorners, helmetCorners;
+                bool groundFound = DetectCheckerboardCorners(colorMat, groundCorners, groundPatternSize);
+                bool helmetFound = DetectCheckerboardCorners(colorMat, helmetCorners, helmetPatternSize);
+
+                // Update capture data (thread-safe)
+                {
+                    std::lock_guard<std::mutex> lock(captureData->mutex);
+
+                    if (captureData->depthImage)
+                    {
+                        k4a_image_release(captureData->depthImage);
+                    }
+
+                    captureData->colorImage = colorMat;
+                    captureData->depthImage = depthImage;
+                    k4a_image_reference(depthImage);
+                    captureData->groundCorners = groundCorners;
+                    captureData->helmetCorners = helmetCorners;
+                    captureData->groundFound = groundFound;
+                    captureData->helmetFound = helmetFound;
+                    captureData->hasNewData = true;
+                }
+            }
+
+            if (colorImage) k4a_image_release(colorImage);
+            if (depthImage) k4a_image_release(depthImage);
+            k4a_capture_release(capture);
+        }
+    }
+
+    std::cout << "[Device " << device->index << "] Bridge capture thread stopped" << std::endl;
+}
+
+int RunHMDCalibrationBridge(
+    // Ground checkerboard (visible to external + helmet cameras)
+    int groundRows, int groundCols, float groundSquare,
+    // Helmet checkerboard (visible to external cameras only)
+    int helmetRows, int helmetCols, float helmetSquare,
+    // Camera serial numbers
+    const std::string& helmetSerial,
+    const std::string& primarySerial,
+    // Output
+    const std::string& outputFile)
 {
     std::cout << "\n========================================" << std::endl;
-    std::cout << "HMD Calibration Mode (Orbbec Camera)" << std::endl;
+    std::cout << "HMD Calibration Mode (Bridge Method)" << std::endl;
     std::cout << "========================================\n" << std::endl;
-    std::cout << "Checkerboard: " << checkerboardCols << "x" << checkerboardRows
-              << " inner corners, " << squareSize << "mm squares" << std::endl;
 
-    // Find and open target device
+    std::cout << "Ground Checkerboard: " << groundCols << "x" << groundRows
+              << " inner corners, " << groundSquare << "mm squares" << std::endl;
+    std::cout << "Helmet Checkerboard: " << helmetCols << "x" << helmetRows
+              << " inner corners, " << helmetSquare << "mm squares" << std::endl;
+
+    cv::Size groundPatternSize(groundCols, groundRows);
+    cv::Size helmetPatternSize(helmetCols, helmetRows);
+
+    std::vector<cv::Point3f> groundObjPoints = GenerateCheckerboardPoints(groundRows, groundCols, groundSquare);
+    std::vector<cv::Point3f> helmetObjPoints = GenerateCheckerboardPoints(helmetRows, helmetCols, helmetSquare);
+
+    // Find devices
     uint32_t deviceCount = k4a_device_get_installed_count();
-    if (deviceCount == 0)
+    if (deviceCount < 2)
     {
-        std::cerr << "No devices found!" << std::endl;
+        std::cerr << "Bridge mode requires at least 2 cameras (helmet + external)" << std::endl;
         return -1;
     }
 
-    k4a_device_t device = nullptr;
-    std::string serialNumber;
+    std::vector<DeviceInfo> devices;
+    int helmetDeviceIdx = -1;
+    int externalDeviceIdx = -1;
 
     for (uint32_t i = 0; i < deviceCount; i++)
     {
         k4a_device_t tempDevice = nullptr;
         if (k4a_device_open(i, &tempDevice) != K4A_RESULT_SUCCEEDED)
         {
+            std::cerr << "Failed to open device " << i << std::endl;
             continue;
         }
 
-        std::string serial = GetDeviceSerialNumber(tempDevice);
-        std::cout << "Device " << i << ": " << serial << std::endl;
+        DeviceInfo info;
+        info.device = tempDevice;
+        info.serialNumber = GetDeviceSerialNumber(tempDevice);
+        info.index = static_cast<int>(devices.size());
 
-        if (targetSerial.empty() || serial == targetSerial)
+        std::cout << "Device " << info.index << ": " << info.serialNumber;
+
+        if (info.serialNumber == helmetSerial)
         {
-            device = tempDevice;
-            serialNumber = serial;
-            std::cout << "Using device: " << serial << std::endl;
-            break;
+            helmetDeviceIdx = info.index;
+            std::cout << " (HELMET)";
         }
-        k4a_device_close(tempDevice);
+        else if (primarySerial.empty() || info.serialNumber == primarySerial)
+        {
+            if (externalDeviceIdx < 0)
+            {
+                externalDeviceIdx = info.index;
+                info.isPrimary = true;
+                std::cout << " (EXTERNAL/PRIMARY)";
+            }
+        }
+        std::cout << std::endl;
+
+        devices.push_back(info);
     }
 
-    if (!device)
+    if (helmetDeviceIdx < 0)
     {
-        std::cerr << "Failed to open device" << std::endl;
+        std::cerr << "Helmet camera not found! Specify with --helmet-serial" << std::endl;
+        for (auto& dev : devices) { k4a_device_close(dev.device); }
         return -1;
     }
 
-    // Configure camera
-    k4a_device_configuration_t config = K4A_DEVICE_CONFIG_INIT_DISABLE_ALL;
-    config.depth_mode = K4A_DEPTH_MODE_NFOV_UNBINNED;
-    config.color_resolution = K4A_COLOR_RESOLUTION_1080P;
-    config.color_format = K4A_IMAGE_FORMAT_COLOR_BGRA32;
-    config.camera_fps = K4A_FRAMES_PER_SECOND_30;
-    config.synchronized_images_only = true;
-    config.wired_sync_mode = K4A_WIRED_SYNC_MODE_STANDALONE;
-
-    if (k4a_device_start_cameras(device, &config) != K4A_RESULT_SUCCEEDED)
+    if (externalDeviceIdx < 0)
     {
-        std::cerr << "Failed to start cameras" << std::endl;
-        k4a_device_close(device);
-        return -1;
+        // Use first non-helmet camera
+        for (size_t i = 0; i < devices.size(); i++)
+        {
+            if (static_cast<int>(i) != helmetDeviceIdx)
+            {
+                externalDeviceIdx = static_cast<int>(i);
+                devices[i].isPrimary = true;
+                break;
+            }
+        }
     }
 
-    // Get calibration for intrinsics
-    k4a_calibration_t calibration;
-    if (k4a_device_get_calibration(device, config.depth_mode, config.color_resolution,
-                                    &calibration) != K4A_RESULT_SUCCEEDED)
+    std::cout << "\nHelmet camera: Device " << helmetDeviceIdx << std::endl;
+    std::cout << "External camera: Device " << externalDeviceIdx << std::endl;
+
+    // Configure and start cameras
+    std::cout << "\nStarting cameras..." << std::endl;
+
+    for (int i = static_cast<int>(devices.size()) - 1; i >= 0; i--)
     {
-        std::cerr << "Failed to get calibration" << std::endl;
-        k4a_device_stop_cameras(device);
-        k4a_device_close(device);
-        return -1;
+        k4a_device_configuration_t config = K4A_DEVICE_CONFIG_INIT_DISABLE_ALL;
+        config.depth_mode = K4A_DEPTH_MODE_NFOV_UNBINNED;
+        config.color_resolution = K4A_COLOR_RESOLUTION_1080P;
+        config.color_format = K4A_IMAGE_FORMAT_COLOR_BGRA32;
+        config.camera_fps = K4A_FRAMES_PER_SECOND_30;
+        config.synchronized_images_only = true;
+
+        if (devices.size() > 1)
+        {
+            if (devices[i].isPrimary)
+            {
+                config.wired_sync_mode = K4A_WIRED_SYNC_MODE_MASTER;
+            }
+            else
+            {
+                config.wired_sync_mode = K4A_WIRED_SYNC_MODE_SUBORDINATE;
+                config.subordinate_delay_off_master_usec = 160 * devices[i].index;
+            }
+        }
+        else
+        {
+            config.wired_sync_mode = K4A_WIRED_SYNC_MODE_STANDALONE;
+        }
+
+        if (k4a_device_start_cameras(devices[i].device, &config) != K4A_RESULT_SUCCEEDED)
+        {
+            std::cerr << "Failed to start cameras on device " << i << std::endl;
+            return -1;
+        }
+
+        if (k4a_device_get_calibration(devices[i].device, config.depth_mode,
+                                        config.color_resolution, &devices[i].calibration) != K4A_RESULT_SUCCEEDED)
+        {
+            std::cerr << "Failed to get calibration for device " << i << std::endl;
+            return -1;
+        }
+
+        devices[i].colorWidth = devices[i].calibration.color_camera_calibration.resolution_width;
+        devices[i].colorHeight = devices[i].calibration.color_camera_calibration.resolution_height;
+        devices[i].transformation = k4a_transformation_create(&devices[i].calibration);
+
+        if (i > 0)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        }
     }
 
     // Extract camera intrinsics
-    auto& colorCal = calibration.color_camera_calibration;
-    auto& intrinsics = colorCal.intrinsics.parameters.param;
+    auto GetCameraMatrix = [](const k4a_calibration_t& calib) -> cv::Mat {
+        auto& intrinsics = calib.color_camera_calibration.intrinsics.parameters.param;
+        return (cv::Mat_<double>(3, 3) <<
+            intrinsics.fx, 0, intrinsics.cx,
+            0, intrinsics.fy, intrinsics.cy,
+            0, 0, 1);
+    };
 
-    cv::Mat cameraMatrix = (cv::Mat_<double>(3, 3) <<
-        intrinsics.fx, 0, intrinsics.cx,
-        0, intrinsics.fy, intrinsics.cy,
-        0, 0, 1);
+    auto GetDistCoeffs = [](const k4a_calibration_t& calib) -> cv::Mat {
+        auto& intrinsics = calib.color_camera_calibration.intrinsics.parameters.param;
+        return (cv::Mat_<double>(8, 1) <<
+            intrinsics.k1, intrinsics.k2, intrinsics.p1, intrinsics.p2,
+            intrinsics.k3, intrinsics.k4, intrinsics.k5, intrinsics.k6);
+    };
 
-    cv::Mat distCoeffs = (cv::Mat_<double>(8, 1) <<
-        intrinsics.k1, intrinsics.k2, intrinsics.p1, intrinsics.p2,
-        intrinsics.k3, intrinsics.k4, intrinsics.k5, intrinsics.k6);
+    cv::Mat helmetCamMatrix = GetCameraMatrix(devices[helmetDeviceIdx].calibration);
+    cv::Mat helmetDistCoeffs = GetDistCoeffs(devices[helmetDeviceIdx].calibration);
+    cv::Mat externalCamMatrix = GetCameraMatrix(devices[externalDeviceIdx].calibration);
+    cv::Mat externalDistCoeffs = GetDistCoeffs(devices[externalDeviceIdx].calibration);
 
-    std::cout << "\nCamera intrinsics (fx, fy, cx, cy): "
-              << intrinsics.fx << ", " << intrinsics.fy << ", "
-              << intrinsics.cx << ", " << intrinsics.cy << std::endl;
+    // Start capture threads
+    std::vector<BridgeCaptureData> captureData(devices.size());
+    std::vector<std::thread> captureThreads;
+    g_captureRunning = true;
 
-    cv::Size patternSize(checkerboardCols, checkerboardRows);
-    std::vector<cv::Point3f> objectPoints = GenerateCheckerboardPoints(
-        checkerboardRows, checkerboardCols, squareSize);
+    for (size_t i = 0; i < devices.size(); i++)
+    {
+        captureThreads.emplace_back(BridgeCaptureThread, &devices[i], &captureData[i],
+                                     groundPatternSize, helmetPatternSize);
+    }
 
-    // Storage for multiple captures (for averaging)
-    std::vector<cv::Mat> allRvecs, allTvecs;
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
+    // Create display windows
+    cv::namedWindow("Helmet Camera", cv::WINDOW_NORMAL);
+    cv::namedWindow("External Camera", cv::WINDOW_NORMAL);
+    cv::resizeWindow("Helmet Camera", 800, 450);
+    cv::resizeWindow("External Camera", 800, 450);
+
+    std::cout << "\n=== Bridge Calibration Instructions ===" << std::endl;
+    std::cout << "1. Place GROUND checkerboard (" << groundCols << "x" << groundRows << ") on floor" << std::endl;
+    std::cout << "2. Attach HELMET checkerboard (" << helmetCols << "x" << helmetRows << ") to helmet" << std::endl;
+    std::cout << "3. Ensure GROUND board is visible to BOTH cameras" << std::endl;
+    std::cout << "4. Ensure HELMET board is visible to EXTERNAL camera" << std::endl;
+    std::cout << "5. Press SPACE to capture when all boards detected" << std::endl;
+    std::cout << "6. Press 'C' to compute calibration" << std::endl;
+    std::cout << "7. Press 'S' to save" << std::endl;
+    std::cout << "8. Press ESC to quit" << std::endl;
+
+    // Storage for captures
+    struct BridgeCapture {
+        cv::Mat T_ground_to_external;   // Ground board pose in external camera
+        cv::Mat T_helmet_to_external;   // Helmet board pose in external camera
+        cv::Mat T_ground_to_helmet;     // Ground board pose in helmet camera
+    };
+    std::vector<BridgeCapture> captures;
     HMDCalibration hmdCalib;
-
-    cv::namedWindow("HMD Calibration", cv::WINDOW_NORMAL);
-    cv::resizeWindow("HMD Calibration", 960, 540);
-
-    std::cout << "\n=== Instructions ===" << std::endl;
-    std::cout << "1. Hold checkerboard steady in front of helmet camera" << std::endl;
-    std::cout << "2. Press SPACE to capture (multiple captures recommended)" << std::endl;
-    std::cout << "3. Press 'C' to compute calibration from captures" << std::endl;
-    std::cout << "4. Press 'S' to save calibration" << std::endl;
-    std::cout << "5. Press ESC to quit" << std::endl;
 
     bool running = true;
     while (running)
     {
-        k4a_capture_t capture = nullptr;
-        if (k4a_device_get_capture(device, &capture, 1000) != K4A_WAIT_RESULT_SUCCEEDED)
+        cv::Mat helmetColorImg, externalColorImg;
+        std::vector<cv::Point2f> helmetGroundCorners, externalGroundCorners, externalHelmetCorners;
+        bool helmetGroundFound = false, externalGroundFound = false, externalHelmetFound = false;
+
+        // Get latest data from cameras
         {
-            continue;
+            std::lock_guard<std::mutex> lock(captureData[helmetDeviceIdx].mutex);
+            if (captureData[helmetDeviceIdx].hasNewData)
+            {
+                helmetColorImg = captureData[helmetDeviceIdx].colorImage.clone();
+                helmetGroundCorners = captureData[helmetDeviceIdx].groundCorners;
+                helmetGroundFound = captureData[helmetDeviceIdx].groundFound;
+            }
+        }
+        {
+            std::lock_guard<std::mutex> lock(captureData[externalDeviceIdx].mutex);
+            if (captureData[externalDeviceIdx].hasNewData)
+            {
+                externalColorImg = captureData[externalDeviceIdx].colorImage.clone();
+                externalGroundCorners = captureData[externalDeviceIdx].groundCorners;
+                externalHelmetCorners = captureData[externalDeviceIdx].helmetCorners;
+                externalGroundFound = captureData[externalDeviceIdx].groundFound;
+                externalHelmetFound = captureData[externalDeviceIdx].helmetFound;
+            }
         }
 
-        k4a_image_t colorImage = k4a_capture_get_color_image(capture);
-        if (!colorImage)
+        // Display helmet camera
+        if (!helmetColorImg.empty())
         {
-            k4a_capture_release(capture);
-            continue;
+            cv::Mat display;
+            cv::cvtColor(helmetColorImg, display, cv::COLOR_BGRA2BGR);
+
+            if (helmetGroundFound)
+            {
+                cv::drawChessboardCorners(display, groundPatternSize, helmetGroundCorners, true);
+                cv::putText(display, "GROUND BOARD FOUND", cv::Point(10, 30),
+                            cv::FONT_HERSHEY_SIMPLEX, 0.8, cv::Scalar(0, 255, 0), 2);
+            }
+            else
+            {
+                cv::putText(display, "Ground board NOT found", cv::Point(10, 30),
+                            cv::FONT_HERSHEY_SIMPLEX, 0.8, cv::Scalar(0, 0, 255), 2);
+            }
+
+            cv::putText(display, "Captures: " + std::to_string(captures.size()),
+                        cv::Point(10, 60), cv::FONT_HERSHEY_SIMPLEX, 0.8, cv::Scalar(255, 255, 0), 2);
+
+            cv::imshow("Helmet Camera", display);
         }
 
-        cv::Mat colorMat = K4AImageToMat(colorImage);
-        cv::Mat display;
-        cv::cvtColor(colorMat, display, cv::COLOR_BGRA2BGR);
-
-        std::vector<cv::Point2f> corners;
-        bool found = DetectCheckerboardCorners(colorMat, corners, patternSize);
-
-        if (found)
+        // Display external camera
+        if (!externalColorImg.empty())
         {
-            cv::drawChessboardCorners(display, patternSize, corners, true);
-            cv::putText(display, "Checkerboard FOUND - Press SPACE to capture",
-                        cv::Point(10, 30), cv::FONT_HERSHEY_SIMPLEX, 0.8, cv::Scalar(0, 255, 0), 2);
-        }
-        else
-        {
-            cv::putText(display, "Checkerboard NOT found", cv::Point(10, 30),
-                        cv::FONT_HERSHEY_SIMPLEX, 0.8, cv::Scalar(0, 0, 255), 2);
-        }
+            cv::Mat display;
+            cv::cvtColor(externalColorImg, display, cv::COLOR_BGRA2BGR);
 
-        // Show capture count
-        cv::putText(display, "Captures: " + std::to_string(allRvecs.size()),
-                    cv::Point(10, 60), cv::FONT_HERSHEY_SIMPLEX, 0.8, cv::Scalar(255, 255, 0), 2);
+            int yPos = 30;
+            if (externalGroundFound)
+            {
+                cv::drawChessboardCorners(display, groundPatternSize, externalGroundCorners, true);
+                cv::putText(display, "GROUND BOARD FOUND", cv::Point(10, yPos),
+                            cv::FONT_HERSHEY_SIMPLEX, 0.8, cv::Scalar(0, 255, 0), 2);
+            }
+            else
+            {
+                cv::putText(display, "Ground board NOT found", cv::Point(10, yPos),
+                            cv::FONT_HERSHEY_SIMPLEX, 0.8, cv::Scalar(0, 0, 255), 2);
+            }
+            yPos += 30;
 
-        if (hmdCalib.isValid)
-        {
-            cv::putText(display, "CALIBRATED (Press S to save)", cv::Point(10, 90),
-                        cv::FONT_HERSHEY_SIMPLEX, 0.8, cv::Scalar(0, 255, 0), 2);
+            if (externalHelmetFound)
+            {
+                cv::drawChessboardCorners(display, helmetPatternSize, externalHelmetCorners, true);
+                cv::putText(display, "HELMET BOARD FOUND", cv::Point(10, yPos),
+                            cv::FONT_HERSHEY_SIMPLEX, 0.8, cv::Scalar(0, 255, 0), 2);
+            }
+            else
+            {
+                cv::putText(display, "Helmet board NOT found", cv::Point(10, yPos),
+                            cv::FONT_HERSHEY_SIMPLEX, 0.8, cv::Scalar(0, 128, 255), 2);
+            }
+            yPos += 30;
+
+            // Ready to capture?
+            bool canCapture = helmetGroundFound && externalGroundFound && externalHelmetFound;
+            if (canCapture)
+            {
+                cv::putText(display, "READY - Press SPACE", cv::Point(10, yPos),
+                            cv::FONT_HERSHEY_SIMPLEX, 0.8, cv::Scalar(0, 255, 255), 2);
+            }
+
+            if (hmdCalib.isValid)
+            {
+                yPos += 30;
+                cv::putText(display, "CALIBRATED - Press S to save", cv::Point(10, yPos),
+                            cv::FONT_HERSHEY_SIMPLEX, 0.8, cv::Scalar(0, 255, 0), 2);
+            }
+
+            cv::imshow("External Camera", display);
         }
-
-        cv::imshow("HMD Calibration", display);
 
         int key = cv::waitKey(30);
+
         if (key == 27)  // ESC
         {
             running = false;
         }
-        else if (key == ' ' && found)  // SPACE - Capture
+        else if (key == ' ')  // SPACE - Capture
         {
-            cv::Mat rvec, tvec;
-            bool success = cv::solvePnP(objectPoints, corners, cameraMatrix, distCoeffs,
-                                        rvec, tvec, false, cv::SOLVEPNP_ITERATIVE);
-
-            if (success)
+            bool canCapture = helmetGroundFound && externalGroundFound && externalHelmetFound;
+            if (canCapture)
             {
-                allRvecs.push_back(rvec.clone());
-                allTvecs.push_back(tvec.clone());
-                std::cout << "Capture " << allRvecs.size() << " - Translation: "
-                          << tvec.t() << " mm" << std::endl;
+                BridgeCapture cap;
+
+                // Compute poses using solvePnP
+                cv::Mat rvec, tvec;
+
+                // T_ground_to_external: Ground board in external camera frame
+                cv::solvePnP(groundObjPoints, externalGroundCorners,
+                             externalCamMatrix, externalDistCoeffs, rvec, tvec);
+                cv::Mat R;
+                cv::Rodrigues(rvec, R);
+                cap.T_ground_to_external = cv::Mat::eye(4, 4, CV_64F);
+                R.copyTo(cap.T_ground_to_external(cv::Rect(0, 0, 3, 3)));
+                tvec.copyTo(cap.T_ground_to_external(cv::Rect(3, 0, 1, 3)));
+
+                // T_helmet_to_external: Helmet board in external camera frame
+                cv::solvePnP(helmetObjPoints, externalHelmetCorners,
+                             externalCamMatrix, externalDistCoeffs, rvec, tvec);
+                cv::Rodrigues(rvec, R);
+                cap.T_helmet_to_external = cv::Mat::eye(4, 4, CV_64F);
+                R.copyTo(cap.T_helmet_to_external(cv::Rect(0, 0, 3, 3)));
+                tvec.copyTo(cap.T_helmet_to_external(cv::Rect(3, 0, 1, 3)));
+
+                // T_ground_to_helmet: Ground board in helmet camera frame
+                cv::solvePnP(groundObjPoints, helmetGroundCorners,
+                             helmetCamMatrix, helmetDistCoeffs, rvec, tvec);
+                cv::Rodrigues(rvec, R);
+                cap.T_ground_to_helmet = cv::Mat::eye(4, 4, CV_64F);
+                R.copyTo(cap.T_ground_to_helmet(cv::Rect(0, 0, 3, 3)));
+                tvec.copyTo(cap.T_ground_to_helmet(cv::Rect(3, 0, 1, 3)));
+
+                captures.push_back(cap);
+                std::cout << "Capture " << captures.size() << " recorded" << std::endl;
+            }
+            else
+            {
+                std::cout << "Cannot capture: not all boards detected" << std::endl;
             }
         }
-        else if ((key == 'c' || key == 'C') && !allRvecs.empty())  // Compute
+        else if ((key == 'c' || key == 'C') && !captures.empty())  // Compute
         {
-            // Average all captures
-            cv::Mat avgRvec = cv::Mat::zeros(3, 1, CV_64F);
-            cv::Mat avgTvec = cv::Mat::zeros(3, 1, CV_64F);
+            std::cout << "\n=== Computing Bridge Calibration ===" << std::endl;
+            std::cout << "Using " << captures.size() << " captures" << std::endl;
 
-            for (size_t i = 0; i < allRvecs.size(); i++)
+            // Average the T_checker_to_A results
+            // Formula: T_helmet_board_to_helmet_cam = T_helmet_to_external^-1 * T_ground_to_external * T_ground_to_helmet^-1
+            //
+            // Where:
+            // - T_ground_to_external: Ground board pose in external camera
+            // - T_helmet_to_external: Helmet board pose in external camera
+            // - T_ground_to_helmet: Ground board pose in helmet camera
+            //
+            // The helmet board is rigidly attached to helmet camera, so:
+            // T_helmet_board_to_helmet_cam is the constant transform we want (T_checker_to_A)
+
+            cv::Mat avgR = cv::Mat::zeros(3, 3, CV_64F);
+            cv::Mat avgT = cv::Mat::zeros(3, 1, CV_64F);
+
+            for (const auto& cap : captures)
             {
-                avgRvec += allRvecs[i];
-                avgTvec += allTvecs[i];
+                // T_helmet_to_external^-1
+                cv::Mat T_ext_to_helmet = cap.T_helmet_to_external.inv();
+
+                // T_ground_to_helmet^-1
+                cv::Mat T_helmet_to_ground = cap.T_ground_to_helmet.inv();
+
+                // T_checker_to_A = T_ext_to_helmet * T_ground_to_external * T_helmet_to_ground
+                cv::Mat T_result = T_ext_to_helmet * cap.T_ground_to_external * T_helmet_to_ground;
+
+                cv::Mat R = T_result(cv::Rect(0, 0, 3, 3));
+                cv::Mat t = T_result(cv::Rect(3, 0, 1, 3));
+
+                avgR += R;
+                avgT += t;
             }
-            avgRvec /= static_cast<double>(allRvecs.size());
-            avgTvec /= static_cast<double>(allTvecs.size());
 
-            // Convert rvec to rotation matrix
-            cv::Mat R;
-            cv::Rodrigues(avgRvec, R);
+            avgR /= static_cast<double>(captures.size());
+            avgT /= static_cast<double>(captures.size());
 
-            // Compute reprojection error
-            double totalError = 0;
-            for (size_t i = 0; i < allRvecs.size(); i++)
+            // Re-orthogonalize R using SVD
+            cv::Mat U, S, Vt;
+            cv::SVD::compute(avgR, S, U, Vt);
+            cv::Mat finalR = U * Vt;
+
+            // Ensure proper rotation (det = +1)
+            if (cv::determinant(finalR) < 0)
             {
-                std::vector<cv::Point2f> projectedPoints;
-                cv::projectPoints(objectPoints, allRvecs[i], allTvecs[i],
-                                  cameraMatrix, distCoeffs, projectedPoints);
-                // We don't have original corners stored, so use last capture
+                finalR.col(2) *= -1.0;
             }
 
-            hmdCalib.rotation = R;
-            hmdCalib.translation = avgTvec;
-            hmdCalib.rvec = avgRvec;
-            hmdCalib.numCaptures = static_cast<int>(allRvecs.size());
+            cv::Mat rvec;
+            cv::Rodrigues(finalR, rvec);
+
+            hmdCalib.rotation = finalR;
+            hmdCalib.translation = avgT;
+            hmdCalib.rvec = rvec;
+            hmdCalib.numCaptures = static_cast<int>(captures.size());
             hmdCalib.isValid = true;
 
-            std::cout << "\n=== HMD Calibration Complete ===" << std::endl;
-            std::cout << "Rotation matrix:\n" << R << std::endl;
-            std::cout << "Translation (mm): " << avgTvec.t() << std::endl;
-            std::cout << "Based on " << allRvecs.size() << " captures" << std::endl;
+            std::cout << "\n=== Bridge Calibration Complete ===" << std::endl;
+            std::cout << "Rotation matrix:\n" << finalR << std::endl;
+            std::cout << "Translation (mm): " << avgT.t() << std::endl;
         }
         else if ((key == 's' || key == 'S') && hmdCalib.isValid)  // Save
         {
             SaveHMDCalibrationJSON(hmdCalib, outputFile);
         }
+    }
 
-        k4a_image_release(colorImage);
-        k4a_capture_release(capture);
+    // Cleanup
+    g_captureRunning = false;
+    for (auto& thread : captureThreads)
+    {
+        if (thread.joinable()) thread.join();
+    }
+
+    for (auto& data : captureData)
+    {
+        if (data.depthImage) k4a_image_release(data.depthImage);
     }
 
     cv::destroyAllWindows();
-    k4a_device_stop_cameras(device);
-    k4a_device_close(device);
 
-    return 0;
-}
-
-// ============================================================================
-// HMD Calibration Mode - Method 2: Using External Image (OpenCV only)
-// For cameras like Basler that provide images via pypylon or file
-// ============================================================================
-int RunHMDCalibrationOpenCV(int checkerboardRows, int checkerboardCols,
-                             float squareSize, const std::string& outputFile,
-                             const std::string& imageSource,
-                             double fx, double fy, double cx, double cy)
-{
-    std::cout << "\n========================================" << std::endl;
-    std::cout << "HMD Calibration Mode (OpenCV/External)" << std::endl;
-    std::cout << "========================================\n" << std::endl;
-    std::cout << "Checkerboard: " << checkerboardCols << "x" << checkerboardRows
-              << " inner corners, " << squareSize << "mm squares" << std::endl;
-
-    cv::Size patternSize(checkerboardCols, checkerboardRows);
-    std::vector<cv::Point3f> objectPoints = GenerateCheckerboardPoints(
-        checkerboardRows, checkerboardCols, squareSize);
-
-    cv::Mat cameraMatrix, distCoeffs;
-    cv::Mat image;
-    bool isVideo = false;
-    cv::VideoCapture cap;
-
-    // Check if imageSource is a number (camera index) or file path
-    if (imageSource.length() == 1 && std::isdigit(imageSource[0]))
+    for (auto& device : devices)
     {
-        int camIndex = std::stoi(imageSource);
-        cap.open(camIndex);
-        isVideo = true;
-        std::cout << "Using webcam index: " << camIndex << std::endl;
-    }
-    else if (imageSource.find(".") == std::string::npos)
-    {
-        // Assume it's a camera index
-        int camIndex = std::stoi(imageSource);
-        cap.open(camIndex);
-        isVideo = true;
-    }
-    else
-    {
-        // Check if it's an image or video file
-        image = cv::imread(imageSource);
-        if (image.empty())
+        if (device.transformation) k4a_transformation_destroy(device.transformation);
+        if (device.device)
         {
-            cap.open(imageSource);
-            isVideo = cap.isOpened();
-            if (!isVideo)
-            {
-                std::cerr << "Failed to open image/video: " << imageSource << std::endl;
-                return -1;
-            }
+            k4a_device_stop_cameras(device.device);
+            k4a_device_close(device.device);
         }
-        std::cout << "Using source: " << imageSource << std::endl;
     }
 
-    // Set up camera matrix
-    if (fx > 0 && fy > 0 && cx > 0 && cy > 0)
-    {
-        cameraMatrix = (cv::Mat_<double>(3, 3) <<
-            fx, 0, cx,
-            0, fy, cy,
-            0, 0, 1);
-        distCoeffs = cv::Mat::zeros(5, 1, CV_64F);
-        std::cout << "Using provided intrinsics: fx=" << fx << ", fy=" << fy
-                  << ", cx=" << cx << ", cy=" << cy << std::endl;
-    }
-    else
-    {
-        std::cout << "WARNING: No intrinsics provided. Using estimated values." << std::endl;
-        std::cout << "For accurate calibration, use --fx --fy --cx --cy options." << std::endl;
-
-        // Get image size for estimation
-        cv::Mat tempImg;
-        if (isVideo)
-        {
-            cap >> tempImg;
-            if (tempImg.empty())
-            {
-                std::cerr << "Failed to read frame" << std::endl;
-                return -1;
-            }
-        }
-        else
-        {
-            tempImg = image;
-        }
-
-        // Estimate intrinsics (rough approximation)
-        double imgWidth = tempImg.cols;
-        double imgHeight = tempImg.rows;
-        fx = fy = imgWidth;  // Rough estimate
-        cx = imgWidth / 2.0;
-        cy = imgHeight / 2.0;
-
-        cameraMatrix = (cv::Mat_<double>(3, 3) <<
-            fx, 0, cx,
-            0, fy, cy,
-            0, 0, 1);
-        distCoeffs = cv::Mat::zeros(5, 1, CV_64F);
-
-        std::cout << "Estimated intrinsics: fx=" << fx << ", fy=" << fy
-                  << ", cx=" << cx << ", cy=" << cy << std::endl;
-    }
-
-    std::vector<cv::Mat> allRvecs, allTvecs;
-    HMDCalibration hmdCalib;
-
-    if (!isVideo && !image.empty())
-    {
-        // Single image mode
-        std::vector<cv::Point2f> corners;
-        bool found = DetectCheckerboardCorners(image, corners, patternSize);
-
-        if (!found)
-        {
-            std::cerr << "Checkerboard not found in image!" << std::endl;
-            return -1;
-        }
-
-        cv::Mat rvec, tvec;
-        cv::solvePnP(objectPoints, corners, cameraMatrix, distCoeffs, rvec, tvec);
-
-        cv::Mat R;
-        cv::Rodrigues(rvec, R);
-
-        hmdCalib.rotation = R;
-        hmdCalib.translation = tvec;
-        hmdCalib.rvec = rvec;
-        hmdCalib.numCaptures = 1;
-        hmdCalib.isValid = true;
-
-        std::cout << "\n=== HMD Calibration Complete ===" << std::endl;
-        std::cout << "Rotation matrix:\n" << R << std::endl;
-        std::cout << "Translation (mm): " << tvec.t() << std::endl;
-
-        SaveHMDCalibrationJSON(hmdCalib, outputFile);
-
-        // Show result
-        cv::Mat display = image.clone();
-        cv::drawChessboardCorners(display, patternSize, corners, true);
-        cv::namedWindow("HMD Calibration Result", cv::WINDOW_NORMAL);
-        cv::imshow("HMD Calibration Result", display);
-        cv::waitKey(0);
-    }
-    else
-    {
-        // Video/webcam mode
-        cv::namedWindow("HMD Calibration", cv::WINDOW_NORMAL);
-
-        std::cout << "\n=== Instructions ===" << std::endl;
-        std::cout << "1. Hold checkerboard steady in front of camera" << std::endl;
-        std::cout << "2. Press SPACE to capture" << std::endl;
-        std::cout << "3. Press 'C' to compute calibration" << std::endl;
-        std::cout << "4. Press 'S' to save" << std::endl;
-        std::cout << "5. Press ESC to quit" << std::endl;
-
-        bool running = true;
-        while (running)
-        {
-            cv::Mat frame;
-            cap >> frame;
-            if (frame.empty()) break;
-
-            cv::Mat display = frame.clone();
-            std::vector<cv::Point2f> corners;
-            bool found = DetectCheckerboardCorners(frame, corners, patternSize);
-
-            if (found)
-            {
-                cv::drawChessboardCorners(display, patternSize, corners, true);
-                cv::putText(display, "FOUND - Press SPACE", cv::Point(10, 30),
-                            cv::FONT_HERSHEY_SIMPLEX, 0.8, cv::Scalar(0, 255, 0), 2);
-            }
-
-            cv::putText(display, "Captures: " + std::to_string(allRvecs.size()),
-                        cv::Point(10, 60), cv::FONT_HERSHEY_SIMPLEX, 0.8, cv::Scalar(255, 255, 0), 2);
-
-            cv::imshow("HMD Calibration", display);
-
-            int key = cv::waitKey(30);
-            if (key == 27) running = false;
-            else if (key == ' ' && found)
-            {
-                cv::Mat rvec, tvec;
-                cv::solvePnP(objectPoints, corners, cameraMatrix, distCoeffs, rvec, tvec);
-                allRvecs.push_back(rvec);
-                allTvecs.push_back(tvec);
-                std::cout << "Capture " << allRvecs.size() << std::endl;
-            }
-            else if ((key == 'c' || key == 'C') && !allRvecs.empty())
-            {
-                cv::Mat avgRvec = cv::Mat::zeros(3, 1, CV_64F);
-                cv::Mat avgTvec = cv::Mat::zeros(3, 1, CV_64F);
-                for (size_t i = 0; i < allRvecs.size(); i++)
-                {
-                    avgRvec += allRvecs[i];
-                    avgTvec += allTvecs[i];
-                }
-                avgRvec /= static_cast<double>(allRvecs.size());
-                avgTvec /= static_cast<double>(allTvecs.size());
-
-                cv::Mat R;
-                cv::Rodrigues(avgRvec, R);
-
-                hmdCalib.rotation = R;
-                hmdCalib.translation = avgTvec;
-                hmdCalib.rvec = avgRvec;
-                hmdCalib.numCaptures = static_cast<int>(allRvecs.size());
-                hmdCalib.isValid = true;
-
-                std::cout << "\nCalibration complete!" << std::endl;
-                std::cout << "Translation (mm): " << avgTvec.t() << std::endl;
-            }
-            else if ((key == 's' || key == 'S') && hmdCalib.isValid)
-            {
-                SaveHMDCalibrationJSON(hmdCalib, outputFile);
-            }
-        }
-        cap.release();
-    }
-
-    cv::destroyAllWindows();
     return 0;
 }
 
@@ -1089,6 +1156,7 @@ void PrintUsage()
     std::cout << "\n=== Multi-Device Extrinsic Calibration Tool ===\n"
               << "USAGE: multi_device_calibration.exe [OPTIONS]\n\n"
               << "=== Mode 1: Multi-Camera Calibration (default) ===\n"
+              << "Calibrates extrinsics between multiple fixed cameras.\n\n"
               << "Options:\n"
               << "  --rows N         Checkerboard inner corners (rows), default: " << CHECKERBOARD_ROWS << "\n"
               << "  --cols N         Checkerboard inner corners (cols), default: " << CHECKERBOARD_COLS << "\n"
@@ -1096,38 +1164,39 @@ void PrintUsage()
               << "  --output FILE    Output filename prefix, default: calibration\n"
               << "  --primary SERIAL Serial number of PRIMARY camera (sync hub master port)\n"
               << "  --exclude SERIAL Exclude camera by serial number (can be used multiple times)\n"
-              << "\n=== Mode 2: HMD Calibration (T_checker_to_A) ===\n"
-              << "Calibrates the transform from checkerboard (attached to helmet) to helmet camera.\n"
-              << "\nOptions:\n"
-              << "  --hmd-calib            Enable HMD calibration mode\n"
-              << "  --hmd-orbbec           Use Orbbec camera (Method 1)\n"
-              << "  --hmd-opencv SOURCE    Use OpenCV with external source (Method 2)\n"
-              << "                         SOURCE can be: image file, video file, or camera index\n"
-              << "  --hmd-serial SERIAL    Orbbec camera serial number (optional)\n"
-              << "  --fx N                 Camera intrinsic fx (for OpenCV method)\n"
-              << "  --fy N                 Camera intrinsic fy (for OpenCV method)\n"
-              << "  --cx N                 Camera intrinsic cx (for OpenCV method)\n"
-              << "  --cy N                 Camera intrinsic cy (for OpenCV method)\n"
+              << "\n=== Mode 2: HMD Bridge Calibration (T_checker_to_A) ===\n"
+              << "Calibrates helmet camera using two checkerboards (bridge method).\n"
+              << "Ground board: visible to BOTH external and helmet cameras\n"
+              << "Helmet board: visible ONLY to external camera (attached to helmet)\n\n"
+              << "Options:\n"
+              << "  --hmd-bridge              Enable HMD bridge calibration mode\n"
+              << "  --helmet-serial SERIAL    Helmet camera serial number (required)\n"
+              << "  --ground-rows N           Ground checkerboard rows (default: " << CHECKERBOARD_ROWS << ")\n"
+              << "  --ground-cols N           Ground checkerboard cols (default: " << CHECKERBOARD_COLS << ")\n"
+              << "  --ground-square N         Ground square size in mm (default: " << SQUARE_SIZE_MM << ")\n"
+              << "  --helmet-rows N           Helmet checkerboard rows (default: " << HEAD_CB_ROWS << ")\n"
+              << "  --helmet-cols N           Helmet checkerboard cols (default: " << HEAD_CB_COLS << ")\n"
+              << "  --helmet-square N         Helmet square size in mm (default: " << HEAD_CB_SQUARE_MM << ")\n"
               << "\nInstructions (Multi-Camera):\n"
               << "  1. Place checkerboard visible to ALL cameras\n"
               << "  2. Press SPACE to capture and calibrate\n"
               << "  3. Press 'S' to save calibration\n"
               << "  4. Press ESC to quit\n"
-              << "\nInstructions (HMD Calibration):\n"
-              << "  1. Attach checkerboard rigidly to helmet\n"
-              << "  2. Hold checkerboard in front of helmet camera\n"
-              << "  3. Press SPACE to capture (multiple captures for averaging)\n"
-              << "  4. Press 'C' to compute calibration\n"
-              << "  5. Press 'S' to save T_checker_to_A.json\n"
+              << "\nInstructions (HMD Bridge Calibration):\n"
+              << "  1. Place GROUND checkerboard on floor (visible to all cameras)\n"
+              << "  2. Attach HELMET checkerboard to helmet (visible to external camera)\n"
+              << "  3. Position so external camera sees BOTH boards, helmet camera sees GROUND board\n"
+              << "  4. Press SPACE to capture when all boards detected\n"
+              << "  5. Press 'C' to compute calibration\n"
+              << "  6. Press 'S' to save T_checker_to_A.json\n"
               << "\nExamples:\n"
-              << "  # Multi-camera calibration\n"
+              << "  # Multi-camera calibration (exclude helmet camera)\n"
               << "  multi_device_calibration.exe --primary CL8T75400DC --exclude CL8T75400GD\n"
-              << "\n  # HMD calibration with Orbbec camera\n"
-              << "  multi_device_calibration.exe --hmd-orbbec --output T_checker_to_A.json\n"
-              << "\n  # HMD calibration with webcam (camera index 0)\n"
-              << "  multi_device_calibration.exe --hmd-opencv 0 --fx 1000 --fy 1000 --cx 640 --cy 360\n"
-              << "\n  # HMD calibration with image file\n"
-              << "  multi_device_calibration.exe --hmd-opencv image.jpg --fx 1000 --fy 1000 --cx 640 --cy 360\n"
+              << "\n  # HMD bridge calibration\n"
+              << "  multi_device_calibration.exe --hmd-bridge --helmet-serial CL8T75400GD \\\n"
+              << "      --ground-rows 6 --ground-cols 9 --ground-square 25 \\\n"
+              << "      --helmet-rows 4 --helmet-cols 5 --helmet-square 30 \\\n"
+              << "      --output T_checker_to_A\n"
               << std::endl;
 }
 
@@ -1149,12 +1218,15 @@ int main(int argc, char** argv)
     std::string primarySerial = "";  // Serial number of PRIMARY camera (sync hub master port)
     std::vector<std::string> excludeSerials;  // Serial numbers to exclude from calibration
 
-    // HMD calibration options
-    bool hmdCalibMode = false;
-    bool hmdUseOrbbec = false;
-    std::string hmdOpenCVSource = "";
-    std::string hmdSerial = "";
-    double hmdFx = 0, hmdFy = 0, hmdCx = 0, hmdCy = 0;
+    // HMD bridge calibration options
+    bool hmdBridgeMode = false;
+    std::string helmetSerial = "";
+    int groundRows = CHECKERBOARD_ROWS;
+    int groundCols = CHECKERBOARD_COLS;
+    float groundSquare = SQUARE_SIZE_MM;
+    int helmetRows = HEAD_CB_ROWS;
+    int helmetCols = HEAD_CB_COLS;
+    float helmetSquare = HEAD_CB_SQUARE_MM;
 
     for (int i = 1; i < argc; i++)
     {
@@ -1165,22 +1237,23 @@ int main(int argc, char** argv)
         else if (arg == "--output" && i + 1 < argc) outputPrefix = argv[++i];
         else if (arg == "--primary" && i + 1 < argc) primarySerial = argv[++i];
         else if (arg == "--exclude" && i + 1 < argc) excludeSerials.push_back(argv[++i]);
-        else if (arg == "--hmd-calib") hmdCalibMode = true;
-        else if (arg == "--hmd-orbbec") { hmdCalibMode = true; hmdUseOrbbec = true; }
-        else if (arg == "--hmd-opencv" && i + 1 < argc) { hmdCalibMode = true; hmdOpenCVSource = argv[++i]; }
-        else if (arg == "--hmd-serial" && i + 1 < argc) hmdSerial = argv[++i];
-        else if (arg == "--fx" && i + 1 < argc) hmdFx = std::atof(argv[++i]);
-        else if (arg == "--fy" && i + 1 < argc) hmdFy = std::atof(argv[++i]);
-        else if (arg == "--cx" && i + 1 < argc) hmdCx = std::atof(argv[++i]);
-        else if (arg == "--cy" && i + 1 < argc) hmdCy = std::atof(argv[++i]);
+        // HMD bridge mode options
+        else if (arg == "--hmd-bridge") hmdBridgeMode = true;
+        else if (arg == "--helmet-serial" && i + 1 < argc) helmetSerial = argv[++i];
+        else if (arg == "--ground-rows" && i + 1 < argc) groundRows = std::atoi(argv[++i]);
+        else if (arg == "--ground-cols" && i + 1 < argc) groundCols = std::atoi(argv[++i]);
+        else if (arg == "--ground-square" && i + 1 < argc) groundSquare = static_cast<float>(std::atof(argv[++i]));
+        else if (arg == "--helmet-rows" && i + 1 < argc) helmetRows = std::atoi(argv[++i]);
+        else if (arg == "--helmet-cols" && i + 1 < argc) helmetCols = std::atoi(argv[++i]);
+        else if (arg == "--helmet-square" && i + 1 < argc) helmetSquare = static_cast<float>(std::atof(argv[++i]));
         else if (arg == "--help" || arg == "-h") {
             PrintUsage();
             return 0;
         }
     }
 
-    // Dispatch to HMD calibration mode if requested
-    if (hmdCalibMode)
+    // Dispatch to HMD bridge calibration mode if requested
+    if (hmdBridgeMode)
     {
         std::string hmdOutputFile = outputPrefix;
         if (hmdOutputFile.find(".json") == std::string::npos)
@@ -1188,17 +1261,11 @@ int main(int argc, char** argv)
             hmdOutputFile += ".json";
         }
 
-        if (hmdUseOrbbec || hmdOpenCVSource.empty())
-        {
-            return RunHMDCalibrationOrbbec(checkerboardRows, checkerboardCols,
-                                            squareSize, hmdOutputFile, hmdSerial);
-        }
-        else
-        {
-            return RunHMDCalibrationOpenCV(checkerboardRows, checkerboardCols,
-                                            squareSize, hmdOutputFile, hmdOpenCVSource,
-                                            hmdFx, hmdFy, hmdCx, hmdCy);
-        }
+        return RunHMDCalibrationBridge(
+            groundRows, groundCols, groundSquare,
+            helmetRows, helmetCols, helmetSquare,
+            helmetSerial, primarySerial,
+            hmdOutputFile);
     }
 
     cv::Size patternSize(checkerboardCols, checkerboardRows);

@@ -55,7 +55,6 @@ public class ActionBtn : MonoBehaviour
 
     private void Start()
     {
-        // participant ID는 시작 시 한 번만 가져와서 고정
         if (recorder != null)
             participantIdCached = recorder.participantID;
         else
@@ -196,8 +195,12 @@ public class ActionBtn : MonoBehaviour
             countdownText.text = "";
 
         // 3) 비디오 실행 & CSV 저장 시작
-        //UDPcontrol.SendCommand($"SET_PARTICIPANT {recorder.participantID}");
-        UDPcontrol.SendCommand($"START_RECORD {item.text}");
+        // mkv도 csv와 같은 participant 폴더에 저장되게 출력 폴더 생성
+        string mkvOutDir = System.IO.Path.Combine(Application.dataPath, recorder.outputFolder, recorder.participantID);
+
+        // 구분자 | 사용 (공백 대신)
+        UDPcontrol.SendCommand($"START_RECORD|{item.text}|{recorder.participantID}|{mkvOutDir}");
+        //UDPcontrol.SendCommand($"START_RECORD {item.text}");
         //UDPcontrol.SendCommand("START_RECORD");
 
         recorder.SetSessionName(item.text);
@@ -268,6 +271,6 @@ public class ActionBtn : MonoBehaviour
 
     private void OnDisable()
     {
-        ResetFlow(); // 안전 정리
+        ResetFlow(); 
     }
 }

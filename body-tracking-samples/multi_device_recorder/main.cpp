@@ -18,6 +18,8 @@
 #include <k4a/k4a.h>
 #include <k4arecord/record.h>
 #include <cstdio>   
+#include <filesystem>
+namespace fs = std::filesystem;
 
 // Winsock for UDP communication
 #ifdef _WIN32
@@ -233,34 +235,36 @@ void StartRecording()
         return;
     }
 
+    // output dir 보장
+    try { fs::create_directories(fs::path(g_outputDir)); }
+    catch (...) {}
+
     std::string timestamp = GenerateTimestamp();
     std::string session = g_sessionName.empty() ? timestamp : g_sessionName + "_" + timestamp;
 
     g_recordings.resize(g_devices.size());
-
     g_lastFiles.assign(g_devices.size(), "");
-
 
     for (size_t i = 0; i < g_devices.size(); i++)
     {
-        std::ostringstream filename;
-        filename << g_outputDir << "/recording_cam" << i
-                 << "_" << g_devices[i].serialNumber
-                 << "_" << session << ".mkv";
+        std::ostringstream base;
+        base << "recording_cam" << i
+            << "_" << g_devices[i].serialNumber
+            << "_" << session << ".mkv";
 
-        g_lastFiles[i] = filename.str();
-
+        fs::path outPath = fs::path(g_outputDir) / base.str();
+        g_lastFiles[i] = outPath.string();
 
         k4a_device_configuration_t config = K4A_DEVICE_CONFIG_INIT_DISABLE_ALL;
         config.depth_mode = K4A_DEPTH_MODE_NFOV_UNBINNED;
         config.camera_fps = K4A_FRAMES_PER_SECOND_30;
 
-        // RGB configuration
         if (g_enableColor) {
             config.color_format = K4A_IMAGE_FORMAT_COLOR_MJPG;
             config.color_resolution = K4A_COLOR_RESOLUTION_1080P;
-            config.synchronized_images_only = true;  // Sync color and depth
-        } else {
+            config.synchronized_images_only = true;
+        }
+        else {
             config.color_resolution = K4A_COLOR_RESOLUTION_OFF;
         }
 
@@ -271,7 +275,7 @@ void StartRecording()
         }
 
         k4a_result_t result = k4a_record_create(
-            filename.str().c_str(),
+            outPath.string().c_str(),          
             g_devices[i].device,
             config,
             &g_recordings[i]);
@@ -279,7 +283,6 @@ void StartRecording()
         if (result != K4A_RESULT_SUCCEEDED)
         {
             std::cerr << "Failed to create recording for device " << i << std::endl;
-            // Cleanup already created recordings
             for (size_t j = 0; j < i; j++) {
                 if (g_recordings[j]) {
                     k4a_record_close(g_recordings[j]);
@@ -289,19 +292,19 @@ void StartRecording()
             return;
         }
 
-        // Write header
         result = k4a_record_write_header(g_recordings[i]);
         if (result != K4A_RESULT_SUCCEEDED)
         {
             std::cerr << "Failed to write header for device " << i << std::endl;
         }
 
-        std::cout << "Recording started: " << filename.str() << std::endl;
+        std::cout << "Recording started: " << outPath.string() << std::endl; 
     }
 
     g_isRecording = true;
     std::cout << "\n=== RECORDING STARTED ===" << std::endl;
 }
+
 
 void StopRecording()
 {
@@ -376,6 +379,15 @@ void RenameLastFilesAsReset()
 // ============================================================================
 // Process UDP Commands
 // ============================================================================
+static std::vector<std::string> Split(const std::string& s, char delim)
+{
+    std::vector<std::string> out;
+    std::stringstream ss(s);
+    std::string item;
+    while (std::getline(ss, item, delim)) out.push_back(item);
+    return out;
+}
+
 void ProcessUdpCommands()
 {
 #ifdef _WIN32
@@ -392,17 +404,40 @@ void ProcessUdpCommands()
         //        SendUdpCommand("START_RECORD");
         //    }
         //}
-        if (cmd.rfind("START_RECORD ", 0) == 0)
+        // START_RECORD|sessionName|participantID|outputDir
+        if (cmd.rfind("START_RECORD|", 0) == 0)
         {
-            g_sessionName = cmd.substr(std::string("START_RECORD ").size());
-            std::cout << "[UDP] Session set to: " << g_sessionName << std::endl;
+            auto parts = Split(cmd, '|');
+
+            // parts[0] = "START_RECORD"
+            // parts[1] = sessionName
+            // parts[2] = participantID (선택적으로 파일명에 쓰고 싶으면 사용)
+            // parts[3] = outputDir (mkv 저장 폴더)
+
+            if (parts.size() >= 2) {
+                g_sessionName = parts[1];
+                std::cout << "[UDP] Session set to: " << g_sessionName << std::endl;
+            }
+
+            if (parts.size() >= 4) {
+                g_outputDir = parts[3];
+                std::cout << "[UDP] OutputDir set to: " << g_outputDir << std::endl;
+
+                // 폴더 없으면 생성
+                try {
+                    fs::create_directories(fs::path(g_outputDir));
+                }
+                catch (...) {
+                    std::cerr << "[UDP] Failed to create output dir: " << g_outputDir << std::endl;
+                }
+            }
 
             if (!g_isRecording) StartRecording();
         }
-        else if (cmd == "START_RECORD")
+        /*else if (cmd == "START_RECORD")
         {
             if (!g_isRecording) StartRecording();
-        }
+        }*/
         else if (cmd == "STOP_RECORD")
         {
             if (g_isRecording) {

@@ -156,15 +156,12 @@ public class RecordingSyncController : MonoBehaviour
             pendingCommand = null;
         }
 
-        print("리턴하기 전임");
-
         if (string.IsNullOrEmpty(command)) return;
 
         lastReceivedCommand = command;
         Debug.Log($"[RecordingSync] Received: {command}");
 
         // Handle command
-        print("이게안되나");
         switch (command)
         {
             //case "TOGGLE_RECORD":
@@ -235,7 +232,6 @@ public class RecordingSyncController : MonoBehaviour
 
     void StopLocalRecording()
     {
-        print("엘렐레");
         if (hmdRecorder == null) return;
 
         if (hmdRecorder.IsRecording)

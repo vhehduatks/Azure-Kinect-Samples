@@ -207,9 +207,49 @@ The helmet camera cannot see the checkerboard attached to itself. We solve this 
 1. **Ground Checkerboard (A)**: Placed on floor, visible to BOTH cameras
 2. **Helmet Checkerboard (B)**: Attached to helmet, visible ONLY to external camera
 
-The bridge formula:
+### Bridge Formula Derivation
+
+**Goal**: Find `T_checker_to_A` (helmet board → helmet camera transform)
+
+**What we measure via solvePnP**:
+
+| Transform | Description | Source |
+|-----------|-------------|--------|
+| `T_ground_to_external` | Ground board in external camera | External sees ground |
+| `T_helmet_to_external` | Helmet board in external camera | External sees helmet board |
+| `T_ground_to_helmet` | Ground board in helmet camera | Helmet sees ground |
+
+**Visual chain** (ground board as bridge):
+
 ```
-T_checker_to_A = T_helmet_to_external^-1 × T_ground_to_external × T_ground_to_helmet^-1
+Helmet Board ──T_helmet_to_ext──► External Cam
+     │                                 │
+     │ T_checker_to_A                  │ T_ground_to_ext⁻¹
+     │ (UNKNOWN)                       │
+     ▼                                 ▼
+Helmet Cam ◄──T_ground_to_helmet⁻¹── Ground Board
+```
+
+**Derivation**:
+
+The helmet board and helmet camera are rigidly attached. Express helmet camera position through two paths:
+
+```
+Path via helmet board:  P_ext = T_helmet_to_ext × T_checker_to_A⁻¹ × P_helmet
+Path via ground board:  P_ext = T_ground_to_ext × T_ground_to_helmet⁻¹ × P_helmet
+```
+
+Setting equal and solving:
+
+```
+T_checker_to_A = T_helmet_to_external⁻¹ × T_ground_to_external × T_ground_to_helmet⁻¹
+```
+
+**In code**:
+```cpp
+cv::Mat T_ext_to_helmet = T_helmet_to_external.inv();
+cv::Mat T_helmet_to_ground = T_ground_to_helmet.inv();
+cv::Mat T_checker_to_A = T_ext_to_helmet * T_ground_to_external * T_helmet_to_ground;
 ```
 
 ### Usage

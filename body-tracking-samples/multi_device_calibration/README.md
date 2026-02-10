@@ -9,7 +9,7 @@ Multi-camera extrinsic calibration tool for Orbbec Femto Bolt cameras using the 
 - SVD-based extrinsic calibration algorithm
 - Exports calibration in YAML and JSON formats
 - Computes relative transformations (secondary cameras to primary)
-- **HMD Calibration Mode**: Computes T_checker_to_A for helmet-mounted cameras
+- **HMD Calibration Mode**: Computes T_checker_to_A (helmet checkerboard → helmet camera transform) via bridge method
 
 ## Requirements
 
@@ -178,38 +178,47 @@ The calibration follows the methodology from "Accurate Extrinsic Calibration of 
 
 This mode computes the fixed transform from a checkerboard (rigidly attached to helmet) to the helmet-mounted camera using the **Bridge Method** (Simultaneous Observation).
 
+### Naming Convention
+
+| Name | Refers to |
+|------|-----------|
+| **Camera A** (helmet camera) | The camera mounted on the helmet |
+| **External camera** | The fixed/primary camera observing the scene |
+| **Ground checkerboard** | Checkerboard placed on the floor, visible to BOTH cameras |
+| **Helmet checkerboard** | Checkerboard rigidly attached to the helmet, visible ONLY to the external camera |
+| **T_checker_to_A** | Transform from the **helmet checkerboard** to **Camera A** (the helmet camera). "checker" = helmet checkerboard, "A" = Camera A |
+
 ### The Problem
 
-The helmet camera cannot see the checkerboard attached to itself. We solve this using two checkerboards:
+Camera A (helmet camera) cannot see the checkerboard attached to itself. We solve this using two checkerboards and an external camera as a bridge:
 
 ```
-                    Checkerboard A (Ground)
+                    Ground Checkerboard
                            ▲
                           / \
                          /   \
-            T_A_to_Ext  /     \  T_A_to_Helmet
+  T_ground_to_external  /     \  T_ground_to_helmet
                        /       \
                       ▼         ▼
-            External Camera    Helmet Camera
-             (Primary)          (Camera A)
+            External Camera    Camera A (Helmet)
                   │
-                  │ T_B_to_Ext
+                  │ T_helmet_to_external
                   ▼
-            Checkerboard B (Helmet)
+            Helmet Checkerboard
                   │
-                  │ T_B_to_Helmet (rigid, UNKNOWN → solve for this)
+                  │ T_checker_to_A (rigid, UNKNOWN → solve for this)
                   ▼
-            Helmet Camera Origin
+            Camera A Origin
 ```
 
 ### How It Works
 
-1. **Ground Checkerboard (A)**: Placed on floor, visible to BOTH cameras
-2. **Helmet Checkerboard (B)**: Attached to helmet, visible ONLY to external camera
+1. **Ground checkerboard**: Placed on floor, visible to BOTH cameras
+2. **Helmet checkerboard**: Attached to helmet, visible ONLY to external camera
 
 ### Bridge Formula Derivation
 
-**Goal**: Find `T_checker_to_A` (helmet board → helmet camera transform)
+**Goal**: Find `T_checker_to_A` — the transform from the **helmet checkerboard** to **Camera A** (the helmet camera)
 
 **What we measure via solvePnP**:
 
@@ -317,8 +326,8 @@ multi_device_calibration.exe --hmd-bridge ^
 }
 ```
 
-- `rotation`: 3x3 rotation matrix (helmet board to helmet camera)
-- `translation`: Translation in mm
+- `rotation`: 3x3 rotation matrix (helmet checkerboard → Camera A)
+- `translation`: Translation in mm (helmet checkerboard → Camera A)
 - `rvec`: Rodrigues rotation vector
 
 ### Complete Two-Stage Calibration Workflow
@@ -343,7 +352,7 @@ multi_device_calibration.exe --hmd-bridge \
                                   │
                                   ▼
                           T_checker_to_A.json
-                      (helmet board → helmet cam)
+                   (helmet checkerboard → Camera A)
 
 
 Runtime: Egocentric Dataset Generation

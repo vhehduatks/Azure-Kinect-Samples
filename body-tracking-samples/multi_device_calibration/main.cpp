@@ -68,7 +68,11 @@ struct HMDCalibration {
     cv::Mat rvec;           // Rodrigues rotation vector
     bool isValid = false;
     int numCaptures = 0;
-    double reprojectionError = 0.0;
+    int numUsed = 0;        // Captures used after outlier removal
+    double translationStdDev = 0.0;  // ||t|| std dev across captures (mm)
+    double rotationStdDev = 0.0;     // Rotation angle std dev across captures (degrees)
+    double maxTranslationError = 0.0; // Max ||t|| deviation from mean (mm)
+    double maxRotationError = 0.0;    // Max rotation angle deviation from mean (degrees)
 };
 
 // ============================================================================
@@ -591,7 +595,13 @@ void SaveHMDCalibrationJSON(const HMDCalibration& calib, const std::string& file
     file << "{\n";
     file << "  \"description\": \"Checkerboard to Helmet Camera (A) transformation\",\n";
     file << "  \"num_captures\": " << calib.numCaptures << ",\n";
-    file << "  \"reprojection_error\": " << calib.reprojectionError << ",\n";
+    file << "  \"num_used\": " << calib.numUsed << ",\n";
+    file << "  \"consistency\": {\n";
+    file << "    \"translation_std_dev_mm\": " << calib.translationStdDev << ",\n";
+    file << "    \"rotation_std_dev_deg\": " << calib.rotationStdDev << ",\n";
+    file << "    \"max_translation_error_mm\": " << calib.maxTranslationError << ",\n";
+    file << "    \"max_rotation_error_deg\": " << calib.maxRotationError << "\n";
+    file << "  },\n";
     file << "  \"rotation\": [\n";
     for (int r = 0; r < 3; r++)
     {
@@ -1054,42 +1064,161 @@ int RunHMDCalibrationBridge(
         else if ((key == 'c' || key == 'C') && !captures.empty())  // Compute
         {
             std::cout << "\n=== Computing Bridge Calibration ===" << std::endl;
-            std::cout << "Using " << captures.size() << " captures" << std::endl;
+            std::cout << "Total captures: " << captures.size() << std::endl;
 
-            // Average the T_checker_to_A results
-            // Formula: T_helmet_board_to_helmet_cam = T_helmet_to_external^-1 * T_ground_to_external * T_ground_to_helmet^-1
-            //
-            // Where:
-            // - T_ground_to_external: Ground board pose in external camera
-            // - T_helmet_to_external: Helmet board pose in external camera
-            // - T_ground_to_helmet: Ground board pose in helmet camera
-            //
-            // The helmet board is rigidly attached to helmet camera, so:
-            // T_helmet_board_to_helmet_cam is the constant transform we want (T_checker_to_A)
+            // Step 1: Compute T_checker_to_A independently for each capture
+            struct PerCaptureResult {
+                cv::Mat R;          // 3x3 rotation
+                cv::Mat t;          // 3x1 translation
+                double tNorm;       // ||t|| in mm
+                double angle;       // rotation angle in degrees
+                bool isOutlier = false;
+            };
 
-            cv::Mat avgR = cv::Mat::zeros(3, 3, CV_64F);
-            cv::Mat avgT = cv::Mat::zeros(3, 1, CV_64F);
+            std::vector<PerCaptureResult> results;
+            results.reserve(captures.size());
 
             for (const auto& cap : captures)
             {
-                // T_helmet_to_external^-1
                 cv::Mat T_ext_to_helmet = cap.T_helmet_to_external.inv();
-
-                // T_ground_to_helmet^-1
                 cv::Mat T_helmet_to_ground = cap.T_ground_to_helmet.inv();
-
-                // T_checker_to_A = T_ext_to_helmet * T_ground_to_external * T_helmet_to_ground
                 cv::Mat T_result = T_ext_to_helmet * cap.T_ground_to_external * T_helmet_to_ground;
 
-                cv::Mat R = T_result(cv::Rect(0, 0, 3, 3));
-                cv::Mat t = T_result(cv::Rect(3, 0, 1, 3));
+                PerCaptureResult res;
+                res.R = T_result(cv::Rect(0, 0, 3, 3)).clone();
+                res.t = T_result(cv::Rect(3, 0, 1, 3)).clone();
+                res.tNorm = cv::norm(res.t);
 
-                avgR += R;
-                avgT += t;
+                // Rotation angle from axis-angle representation
+                cv::Mat rvec;
+                cv::Rodrigues(res.R, rvec);
+                res.angle = cv::norm(rvec) * 180.0 / CV_PI;
+
+                results.push_back(res);
             }
 
-            avgR /= static_cast<double>(captures.size());
-            avgT /= static_cast<double>(captures.size());
+            // Step 2: Compute per-capture statistics
+            double meanTNorm = 0.0, meanAngle = 0.0;
+            for (const auto& res : results)
+            {
+                meanTNorm += res.tNorm;
+                meanAngle += res.angle;
+            }
+            meanTNorm /= results.size();
+            meanAngle /= results.size();
+
+            double varTNorm = 0.0, varAngle = 0.0;
+            for (const auto& res : results)
+            {
+                varTNorm += (res.tNorm - meanTNorm) * (res.tNorm - meanTNorm);
+                varAngle += (res.angle - meanAngle) * (res.angle - meanAngle);
+            }
+            double stdTNorm = std::sqrt(varTNorm / results.size());
+            double stdAngle = std::sqrt(varAngle / results.size());
+
+            // Step 3: Print per-capture results
+            std::cout << "\n--- Per-Capture Results ---" << std::endl;
+            std::cout << std::fixed << std::setprecision(2);
+            std::cout << "  #   ||t|| (mm)   angle (deg)   status" << std::endl;
+            std::cout << "  --  ----------   -----------   ------" << std::endl;
+
+            // Step 4: Flag outliers (>2 sigma from mean in either translation or rotation)
+            const double outlierSigma = 2.0;
+            for (size_t i = 0; i < results.size(); i++)
+            {
+                auto& res = results[i];
+                double tDev = std::abs(res.tNorm - meanTNorm);
+                double aDev = std::abs(res.angle - meanAngle);
+
+                // Only flag outliers if we have enough captures and nonzero std dev
+                if (results.size() >= 4)
+                {
+                    if ((stdTNorm > 0.01 && tDev > outlierSigma * stdTNorm) ||
+                        (stdAngle > 0.01 && aDev > outlierSigma * stdAngle))
+                    {
+                        res.isOutlier = true;
+                    }
+                }
+
+                std::cout << "  " << std::setw(2) << (i + 1)
+                          << "  " << std::setw(10) << res.tNorm
+                          << "   " << std::setw(11) << res.angle
+                          << "   " << (res.isOutlier ? "OUTLIER" : "OK") << std::endl;
+            }
+
+            std::cout << "  --  ----------   -----------" << std::endl;
+            std::cout << "  Mean: " << std::setw(8) << meanTNorm
+                      << "   " << std::setw(11) << meanAngle << std::endl;
+            std::cout << "  StdDev: " << std::setw(6) << stdTNorm
+                      << "   " << std::setw(11) << stdAngle << std::endl;
+
+            // Step 5: Average only non-outlier captures
+            cv::Mat avgR = cv::Mat::zeros(3, 3, CV_64F);
+            cv::Mat avgT = cv::Mat::zeros(3, 1, CV_64F);
+            int usedCount = 0;
+
+            for (const auto& res : results)
+            {
+                if (!res.isOutlier)
+                {
+                    avgR += res.R;
+                    avgT += res.t;
+                    usedCount++;
+                }
+            }
+
+            if (usedCount == 0)
+            {
+                std::cout << "\nWARNING: All captures flagged as outliers. Using all captures." << std::endl;
+                for (const auto& res : results)
+                {
+                    avgR += res.R;
+                    avgT += res.t;
+                }
+                usedCount = static_cast<int>(results.size());
+            }
+
+            int outlierCount = static_cast<int>(results.size()) - usedCount;
+            if (outlierCount > 0)
+            {
+                std::cout << "\nRemoved " << outlierCount << " outlier(s), using "
+                          << usedCount << "/" << results.size() << " captures" << std::endl;
+            }
+
+            avgR /= static_cast<double>(usedCount);
+            avgT /= static_cast<double>(usedCount);
+
+            // Step 6: Recompute std dev on used captures only
+            double finalMeanTNorm = 0.0, finalMeanAngle = 0.0;
+            double maxTErr = 0.0, maxAErr = 0.0;
+            int finalCount = 0;
+            for (const auto& res : results)
+            {
+                if (!res.isOutlier)
+                {
+                    finalMeanTNorm += res.tNorm;
+                    finalMeanAngle += res.angle;
+                    finalCount++;
+                }
+            }
+            finalMeanTNorm /= finalCount;
+            finalMeanAngle /= finalCount;
+
+            double finalVarT = 0.0, finalVarA = 0.0;
+            for (const auto& res : results)
+            {
+                if (!res.isOutlier)
+                {
+                    double tErr = std::abs(res.tNorm - finalMeanTNorm);
+                    double aErr = std::abs(res.angle - finalMeanAngle);
+                    finalVarT += tErr * tErr;
+                    finalVarA += aErr * aErr;
+                    if (tErr > maxTErr) maxTErr = tErr;
+                    if (aErr > maxAErr) maxAErr = aErr;
+                }
+            }
+            double finalStdT = std::sqrt(finalVarT / finalCount);
+            double finalStdA = std::sqrt(finalVarA / finalCount);
 
             // Re-orthogonalize R using SVD
             cv::Mat U, S, Vt;
@@ -1109,11 +1238,39 @@ int RunHMDCalibrationBridge(
             hmdCalib.translation = avgT;
             hmdCalib.rvec = rvec;
             hmdCalib.numCaptures = static_cast<int>(captures.size());
+            hmdCalib.numUsed = usedCount;
+            hmdCalib.translationStdDev = finalStdT;
+            hmdCalib.rotationStdDev = finalStdA;
+            hmdCalib.maxTranslationError = maxTErr;
+            hmdCalib.maxRotationError = maxAErr;
             hmdCalib.isValid = true;
 
+            // Step 7: Print final results with quality assessment
             std::cout << "\n=== Bridge Calibration Complete ===" << std::endl;
             std::cout << "Rotation matrix:\n" << finalR << std::endl;
             std::cout << "Translation (mm): " << avgT.t() << std::endl;
+            std::cout << "||t|| = " << cv::norm(avgT) << " mm" << std::endl;
+
+            std::cout << "\n--- Consistency Metrics (after outlier removal) ---" << std::endl;
+            std::cout << "  Captures used:      " << usedCount << "/" << results.size() << std::endl;
+            std::cout << "  ||t|| std dev:      " << finalStdT << " mm" << std::endl;
+            std::cout << "  ||t|| max error:    " << maxTErr << " mm" << std::endl;
+            std::cout << "  Angle std dev:      " << finalStdA << " deg" << std::endl;
+            std::cout << "  Angle max error:    " << maxAErr << " deg" << std::endl;
+
+            // Quality assessment
+            std::cout << "\n--- Quality Assessment ---" << std::endl;
+            if (finalStdT < 2.0 && finalStdA < 1.0)
+                std::cout << "  EXCELLENT: Very consistent across captures" << std::endl;
+            else if (finalStdT < 5.0 && finalStdA < 2.0)
+                std::cout << "  GOOD: Reasonably consistent" << std::endl;
+            else if (finalStdT < 10.0 && finalStdA < 5.0)
+                std::cout << "  FAIR: Consider recapturing with better poses" << std::endl;
+            else
+                std::cout << "  POOR: High variance, recapture recommended" << std::endl;
+
+            std::cout << "  TIP: Physically measure checkerboard-to-lens distance and compare to ||t|| = "
+                      << std::setprecision(1) << cv::norm(avgT) << " mm" << std::endl;
         }
         else if ((key == 's' || key == 'S') && hmdCalib.isValid)  // Save
         {

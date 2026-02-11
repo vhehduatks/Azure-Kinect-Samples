@@ -69,9 +69,15 @@ struct ExtrinsicCalibration {
 // Per-capture storage for Mode 1 multi-capture accumulation
 // ============================================================================
 struct Mode1Capture {
+    // SVD method results
     std::vector<cv::Mat> rotations;     // [deviceCount] 3x3 (relative to primary)
     std::vector<cv::Mat> translations;  // [deviceCount] 3x1 (relative to primary)
     std::vector<bool> isValid;          // [deviceCount]
+    // Horn's method results
+    std::vector<cv::Mat> hornRotations;
+    std::vector<cv::Mat> hornTranslations;
+    std::vector<bool> hornIsValid;
+    std::vector<double> hornRMS;        // per-device RMS residual
 };
 
 // ============================================================================
@@ -265,9 +271,9 @@ bool Convert2DTo3D(DeviceInfo& device,
         }
 
         // Get depth value at corner using expanding ring search.
-        // Transformed depth (640x576 → 1920x1080) has large holes; search outward
+        // Transformed depth (640x576 → 1920x1080) has holes; search outward
         // from the corner pixel until valid depth is found.
-        const int maxSearchRadius = 20;
+        const int maxSearchRadius = 25;
         float depthMm = 0;
         for (int r = 0; r <= maxSearchRadius; r++)
         {
@@ -399,11 +405,11 @@ ExtrinsicCalibration ComputeExtrinsicSVD(const std::vector<cv::Point3f>& points3
         result.rotation.col(2) *= -1.0;
     }
 
-    // Step 6: Translation is negative centroid
-    result.translation = cv::Mat(3, 1, CV_64F);
-    result.translation.at<double>(0, 0) = -centroid.x;
-    result.translation.at<double>(1, 0) = -centroid.y;
-    result.translation.at<double>(2, 0) = -centroid.z;
+    // Step 6: Translation = -R * centroid
+    // The SVD normalization is P_norm = R * (P_cam - centroid) = R * P_cam + t
+    // where t = -R * centroid (NOT just -centroid)
+    cv::Mat centroidMat = (cv::Mat_<double>(3, 1) << centroid.x, centroid.y, centroid.z);
+    result.translation = -result.rotation * centroidMat;
 
     result.isValid = true;
     return result;
@@ -969,7 +975,7 @@ int RunHMDCalibrationBridge(
     {
         k4a_device_configuration_t config = K4A_DEVICE_CONFIG_INIT_DISABLE_ALL;
         config.depth_mode = K4A_DEPTH_MODE_NFOV_UNBINNED;
-        config.color_resolution = useDepth ? K4A_COLOR_RESOLUTION_720P : K4A_COLOR_RESOLUTION_1080P;
+        config.color_resolution = K4A_COLOR_RESOLUTION_1080P;
         config.color_format = K4A_IMAGE_FORMAT_COLOR_BGRA32;
         config.camera_fps = K4A_FRAMES_PER_SECOND_30;
         config.synchronized_images_only = true;
@@ -1833,7 +1839,7 @@ int main(int argc, char** argv)
     {
         k4a_device_configuration_t config = K4A_DEVICE_CONFIG_INIT_DISABLE_ALL;
         config.depth_mode = K4A_DEPTH_MODE_NFOV_UNBINNED;
-        config.color_resolution = K4A_COLOR_RESOLUTION_720P;
+        config.color_resolution = K4A_COLOR_RESOLUTION_1080P;
         config.color_format = K4A_IMAGE_FORMAT_COLOR_BGRA32;
         config.camera_fps = K4A_FRAMES_PER_SECOND_30;
         config.synchronized_images_only = true;
@@ -1909,7 +1915,7 @@ int main(int argc, char** argv)
         std::string windowName = "Device " + std::to_string(i) + " (" +
                                   (devices[i].isPrimary ? "PRIMARY" : "SECONDARY") + ")";
         cv::namedWindow(windowName, cv::WINDOW_NORMAL);
-        cv::resizeWindow(windowName, 640, 360);
+        cv::resizeWindow(windowName, 960, 540);
     }
 
     // Create capture data and start capture threads for each device
@@ -2044,8 +2050,15 @@ int main(int argc, char** argv)
                 std::vector<std::vector<cv::Point3f>> allPoints3D(deviceCount);
                 bool allConverted = true;
 
-                // Temporary per-device calibrations for this capture
-                std::vector<ExtrinsicCalibration> tempCalibs(deviceCount);
+                // Known checkerboard geometry for Horn's method
+                std::vector<cv::Point3f> objectPoints = GenerateCheckerboardPoints(
+                    checkerboardRows, checkerboardCols, squareSize);
+
+                // Per-device results for both methods
+                std::vector<ExtrinsicCalibration> tempCalibs(deviceCount);  // SVD
+                std::vector<cv::Mat> T_obj_to_cam(deviceCount);            // Horn's
+                std::vector<double> hornRMS(deviceCount, 0.0);
+                bool hornOk = true;
 
                 for (uint32_t i = 0; i < deviceCount; i++)
                 {
@@ -2061,15 +2074,28 @@ int main(int argc, char** argv)
 
                     std::cout << "  Converted " << allPoints3D[i].size() << " points to 3D" << std::endl;
 
-                    // Compute extrinsic calibration using SVD
+                    // Method 1: SVD (principal axes)
                     tempCalibs[i] = ComputeExtrinsicSVD(allPoints3D[i],
                                                          devices[i].serialNumber,
                                                          devices[i].index);
+
+                    // Method 2: Horn's method (3D-to-3D correspondence)
+                    if (!ComputePose3DTo3D(objectPoints, allPoints3D[i],
+                                           T_obj_to_cam[i], hornRMS[i]))
+                    {
+                        std::cerr << "  Horn's method failed" << std::endl;
+                        hornOk = false;
+                    }
+                    else
+                    {
+                        std::cout << "  Horn's RMS: " << std::fixed << std::setprecision(2)
+                                  << hornRMS[i] << " mm" << std::endl;
+                    }
                 }
 
                 if (allConverted && tempCalibs[primaryIdx].isValid)
                 {
-                    // Compute relative transforms (secondary cameras relative to primary)
+                    // --- SVD relative transforms ---
                     for (uint32_t i = 0; i < deviceCount; i++)
                     {
                         if (static_cast<int>(i) != primaryIdx && tempCalibs[i].isValid)
@@ -2077,24 +2103,63 @@ int main(int argc, char** argv)
                             ComputeRelativeTransform(tempCalibs[primaryIdx], tempCalibs[i]);
                         }
                     }
-
-                    // Primary is identity
                     tempCalibs[primaryIdx].rotation = cv::Mat::eye(3, 3, CV_64F);
                     tempCalibs[primaryIdx].translation = cv::Mat::zeros(3, 1, CV_64F);
+
+                    // --- Horn's relative transforms ---
+                    // T_s_to_p = T_obj_to_p * inv(T_obj_to_s)
+                    std::vector<cv::Mat> hornRelR(deviceCount);
+                    std::vector<cv::Mat> hornRelT(deviceCount);
+                    std::vector<bool> hornRelValid(deviceCount, false);
+
+                    if (hornOk)
+                    {
+                        cv::Mat R_p = T_obj_to_cam[primaryIdx](cv::Rect(0, 0, 3, 3));
+                        cv::Mat t_p = T_obj_to_cam[primaryIdx](cv::Rect(3, 0, 1, 3));
+
+                        hornRelR[primaryIdx] = cv::Mat::eye(3, 3, CV_64F);
+                        hornRelT[primaryIdx] = cv::Mat::zeros(3, 1, CV_64F);
+                        hornRelValid[primaryIdx] = true;
+
+                        for (uint32_t i = 0; i < deviceCount; i++)
+                        {
+                            if (static_cast<int>(i) != primaryIdx)
+                            {
+                                cv::Mat R_s = T_obj_to_cam[i](cv::Rect(0, 0, 3, 3));
+                                cv::Mat t_s = T_obj_to_cam[i](cv::Rect(3, 0, 1, 3));
+                                hornRelR[i] = R_p * R_s.t();
+                                hornRelT[i] = t_p - hornRelR[i] * t_s;
+                                hornRelValid[i] = true;
+                            }
+                        }
+                    }
 
                     // Store into Mode1Capture
                     Mode1Capture cap;
                     cap.rotations.resize(deviceCount);
                     cap.translations.resize(deviceCount);
                     cap.isValid.resize(deviceCount, false);
+                    cap.hornRotations.resize(deviceCount);
+                    cap.hornTranslations.resize(deviceCount);
+                    cap.hornIsValid.resize(deviceCount, false);
+                    cap.hornRMS.resize(deviceCount, 0.0);
 
                     for (uint32_t i = 0; i < deviceCount; i++)
                     {
+                        // SVD results
                         if (tempCalibs[i].isValid)
                         {
                             cap.rotations[i] = tempCalibs[i].rotation.clone();
                             cap.translations[i] = tempCalibs[i].translation.clone();
                             cap.isValid[i] = true;
+                        }
+                        // Horn's results
+                        if (hornRelValid[i])
+                        {
+                            cap.hornRotations[i] = hornRelR[i].clone();
+                            cap.hornTranslations[i] = hornRelT[i].clone();
+                            cap.hornIsValid[i] = true;
+                            cap.hornRMS[i] = hornRMS[i];
                         }
                     }
 
@@ -2103,17 +2168,47 @@ int main(int argc, char** argv)
                     std::cout << "\nCapture " << mode1Captures.size() << " recorded" << std::endl;
 
                     // Print per-device relative transform preview for secondary cameras
+                    std::cout << std::fixed;
+                    std::cout << "  Device     SVD ||t|| (mm)  angle (deg)    Horn ||t|| (mm)  angle (deg)  RMS (mm)" << std::endl;
+                    std::cout << "  ------     ---------------  -----------    ----------------  -----------  --------" << std::endl;
                     for (uint32_t i = 0; i < deviceCount; i++)
                     {
-                        if (static_cast<int>(i) != primaryIdx && cap.isValid[i])
+                        if (static_cast<int>(i) == primaryIdx) continue;
+
+                        std::cout << "  " << std::setw(6) << i << "     ";
+
+                        if (cap.isValid[i])
                         {
                             double tNorm = cv::norm(cap.translations[i]);
                             cv::Mat rvec;
                             cv::Rodrigues(cap.rotations[i], rvec);
                             double angle = cv::norm(rvec) * 180.0 / CV_PI;
-                            std::cout << "  Device " << i << ": ||t|| = " << std::fixed << std::setprecision(1)
-                                      << tNorm << " mm, angle = " << std::setprecision(2) << angle << " deg" << std::endl;
+                            std::cout << std::setw(10) << std::setprecision(1) << tNorm
+                                      << "      " << std::setw(6) << std::setprecision(2) << angle;
                         }
+                        else
+                        {
+                            std::cout << "     FAILED                ";
+                        }
+
+                        std::cout << "    ";
+
+                        if (cap.hornIsValid[i])
+                        {
+                            double hTNorm = cv::norm(cap.hornTranslations[i]);
+                            cv::Mat hRvec;
+                            cv::Rodrigues(cap.hornRotations[i], hRvec);
+                            double hAngle = cv::norm(hRvec) * 180.0 / CV_PI;
+                            std::cout << std::setw(11) << std::setprecision(1) << hTNorm
+                                      << "      " << std::setw(6) << std::setprecision(2) << hAngle
+                                      << "     " << std::setw(5) << std::setprecision(2) << cap.hornRMS[i];
+                        }
+                        else
+                        {
+                            std::cout << "      FAILED";
+                        }
+
+                        std::cout << std::endl;
                     }
 
                     std::cout << "Press SPACE for more captures, 'C' to compute, ESC to quit" << std::endl;
@@ -2156,13 +2251,21 @@ int main(int argc, char** argv)
 
                 std::cout << "\n--- Device " << camIdx << " (" << devices[camIdx].serialNumber << ") ---" << std::endl;
 
-                // Collect per-capture R, t for this camera
+                // Collect per-capture R, t for this camera (both methods)
                 struct PerCaptureResult {
                     cv::Mat R;
                     cv::Mat t;
                     double tNorm;
                     double angle;
                     bool isOutlier = false;
+                    // Horn's
+                    cv::Mat hornR;
+                    cv::Mat hornT;
+                    double hornTNorm = 0.0;
+                    double hornAngle = 0.0;
+                    double hornRMS = 0.0;
+                    bool hornValid = false;
+                    bool hornOutlier = false;
                 };
 
                 std::vector<PerCaptureResult> results;
@@ -2173,13 +2276,26 @@ int main(int argc, char** argv)
                     if (!cap.isValid[camIdx]) continue;
 
                     PerCaptureResult res;
+                    // SVD
                     res.R = cap.rotations[camIdx].clone();
                     res.t = cap.translations[camIdx].clone();
                     res.tNorm = cv::norm(res.t);
-
                     cv::Mat rvec;
                     cv::Rodrigues(res.R, rvec);
                     res.angle = cv::norm(rvec) * 180.0 / CV_PI;
+
+                    // Horn's
+                    if (camIdx < cap.hornIsValid.size() && cap.hornIsValid[camIdx])
+                    {
+                        res.hornR = cap.hornRotations[camIdx].clone();
+                        res.hornT = cap.hornTranslations[camIdx].clone();
+                        res.hornTNorm = cv::norm(res.hornT);
+                        cv::Mat hRvec;
+                        cv::Rodrigues(res.hornR, hRvec);
+                        res.hornAngle = cv::norm(hRvec) * 180.0 / CV_PI;
+                        res.hornRMS = cap.hornRMS[camIdx];
+                        res.hornValid = true;
+                    }
 
                     results.push_back(res);
                 }
@@ -2191,7 +2307,7 @@ int main(int argc, char** argv)
                     continue;
                 }
 
-                // Compute statistics
+                // ===== SVD Statistics =====
                 double meanTNorm = 0.0, meanAngle = 0.0;
                 for (const auto& res : results)
                 {
@@ -2210,19 +2326,50 @@ int main(int argc, char** argv)
                 double stdTNorm = std::sqrt(varTNorm / results.size());
                 double stdAngle = std::sqrt(varAngle / results.size());
 
-                // Print per-capture table
-                std::cout << std::fixed << std::setprecision(2);
-                std::cout << "  #   ||t|| (mm)   angle (deg)   status" << std::endl;
-                std::cout << "  --  ----------   -----------   ------" << std::endl;
+                // ===== Horn's Statistics =====
+                int hornCount = 0;
+                double hornMeanTNorm = 0.0, hornMeanAngle = 0.0;
+                for (const auto& res : results)
+                {
+                    if (res.hornValid)
+                    {
+                        hornMeanTNorm += res.hornTNorm;
+                        hornMeanAngle += res.hornAngle;
+                        hornCount++;
+                    }
+                }
+                double hornStdTNorm = 0.0, hornStdAngle = 0.0;
+                if (hornCount > 0)
+                {
+                    hornMeanTNorm /= hornCount;
+                    hornMeanAngle /= hornCount;
+                    double hVarT = 0.0, hVarA = 0.0;
+                    for (const auto& res : results)
+                    {
+                        if (res.hornValid)
+                        {
+                            hVarT += (res.hornTNorm - hornMeanTNorm) * (res.hornTNorm - hornMeanTNorm);
+                            hVarA += (res.hornAngle - hornMeanAngle) * (res.hornAngle - hornMeanAngle);
+                        }
+                    }
+                    hornStdTNorm = std::sqrt(hVarT / hornCount);
+                    hornStdAngle = std::sqrt(hVarA / hornCount);
+                }
 
-                // Outlier detection (>2 sigma, needs >=4 captures)
+                // Print per-capture table (both methods side by side)
+                std::cout << std::fixed << std::setprecision(2);
+                std::cout << "        --- SVD ---                    --- Horn's ---" << std::endl;
+                std::cout << "  #   ||t|| (mm)   angle (deg)  st    ||t|| (mm)   angle (deg)  RMS    st" << std::endl;
+                std::cout << "  --  ----------   -----------  --    ----------   -----------  -----  --" << std::endl;
+
+                // SVD outlier detection (>2 sigma, needs >=4 captures)
                 const double outlierSigma = 2.0;
                 for (size_t i = 0; i < results.size(); i++)
                 {
                     auto& res = results[i];
+                    // SVD outlier
                     double tDev = std::abs(res.tNorm - meanTNorm);
                     double aDev = std::abs(res.angle - meanAngle);
-
                     if (results.size() >= 4)
                     {
                         if ((stdTNorm > 0.01 && tDev > outlierSigma * stdTNorm) ||
@@ -2232,19 +2379,48 @@ int main(int argc, char** argv)
                         }
                     }
 
+                    // Horn's outlier
+                    if (res.hornValid && hornCount >= 4)
+                    {
+                        double hTDev = std::abs(res.hornTNorm - hornMeanTNorm);
+                        double hADev = std::abs(res.hornAngle - hornMeanAngle);
+                        if ((hornStdTNorm > 0.01 && hTDev > outlierSigma * hornStdTNorm) ||
+                            (hornStdAngle > 0.01 && hADev > outlierSigma * hornStdAngle))
+                        {
+                            res.hornOutlier = true;
+                        }
+                    }
+
                     std::cout << "  " << std::setw(2) << (i + 1)
                               << "  " << std::setw(10) << res.tNorm
                               << "   " << std::setw(11) << res.angle
-                              << "   " << (res.isOutlier ? "OUTLIER" : "OK") << std::endl;
+                              << "  " << std::setw(2) << (res.isOutlier ? "X " : "OK");
+
+                    if (res.hornValid)
+                    {
+                        std::cout << "    " << std::setw(10) << res.hornTNorm
+                                  << "   " << std::setw(11) << res.hornAngle
+                                  << "  " << std::setw(5) << res.hornRMS
+                                  << "  " << std::setw(2) << (res.hornOutlier ? "X " : "OK");
+                    }
+                    std::cout << std::endl;
                 }
 
-                std::cout << "  --  ----------   -----------" << std::endl;
+                std::cout << "  --  ----------   -----------        ----------   -----------  -----" << std::endl;
                 std::cout << "  Mean: " << std::setw(8) << meanTNorm
-                          << "   " << std::setw(11) << meanAngle << std::endl;
-                std::cout << "  StdDev: " << std::setw(6) << stdTNorm
-                          << "   " << std::setw(11) << stdAngle << std::endl;
+                          << "   " << std::setw(11) << meanAngle;
+                if (hornCount > 0)
+                    std::cout << "      " << std::setw(8) << hornMeanTNorm
+                              << "   " << std::setw(11) << hornMeanAngle;
+                std::cout << std::endl;
+                std::cout << "  StdD: " << std::setw(8) << stdTNorm
+                          << "   " << std::setw(11) << stdAngle;
+                if (hornCount > 0)
+                    std::cout << "      " << std::setw(8) << hornStdTNorm
+                              << "   " << std::setw(11) << hornStdAngle;
+                std::cout << std::endl;
 
-                // Average non-outlier captures
+                // ===== SVD Averaging (non-outlier) =====
                 cv::Mat avgR = cv::Mat::zeros(3, 3, CV_64F);
                 cv::Mat avgT = cv::Mat::zeros(3, 1, CV_64F);
                 int usedCount = 0;
@@ -2261,7 +2437,7 @@ int main(int argc, char** argv)
 
                 if (usedCount == 0)
                 {
-                    std::cout << "\n  WARNING: All captures flagged as outliers. Using all captures." << std::endl;
+                    std::cout << "\n  SVD WARNING: All captures flagged as outliers. Using all." << std::endl;
                     for (const auto& res : results)
                     {
                         avgR += res.R;
@@ -2271,16 +2447,10 @@ int main(int argc, char** argv)
                 }
 
                 int outlierCount = static_cast<int>(results.size()) - usedCount;
-                if (outlierCount > 0)
-                {
-                    std::cout << "\n  Removed " << outlierCount << " outlier(s), using "
-                              << usedCount << "/" << results.size() << " captures" << std::endl;
-                }
-
                 avgR /= static_cast<double>(usedCount);
                 avgT /= static_cast<double>(usedCount);
 
-                // Recompute std dev on used captures only
+                // SVD: Recompute std dev on used captures only
                 double finalMeanTNorm = 0.0, finalMeanAngle = 0.0;
                 double maxTErr = 0.0, maxAErr = 0.0;
                 int finalCount = 0;
@@ -2322,7 +2492,85 @@ int main(int argc, char** argv)
                     finalR.col(2) *= -1.0;
                 }
 
-                // Store in calibrations
+                // ===== Horn's Averaging (non-outlier) =====
+                cv::Mat hornAvgR = cv::Mat::zeros(3, 3, CV_64F);
+                cv::Mat hornAvgT = cv::Mat::zeros(3, 1, CV_64F);
+                int hornUsedCount = 0;
+
+                for (const auto& res : results)
+                {
+                    if (res.hornValid && !res.hornOutlier)
+                    {
+                        hornAvgR += res.hornR;
+                        hornAvgT += res.hornT;
+                        hornUsedCount++;
+                    }
+                }
+
+                cv::Mat hornFinalR, hornFinalT;
+                double hFinalStdT = 0.0, hFinalStdA = 0.0;
+                double hMaxTErr = 0.0, hMaxAErr = 0.0;
+                int hornFinalCount = 0;
+
+                if (hornUsedCount == 0 && hornCount > 0)
+                {
+                    std::cout << "\n  Horn WARNING: All captures flagged as outliers. Using all." << std::endl;
+                    for (const auto& res : results)
+                    {
+                        if (res.hornValid)
+                        {
+                            hornAvgR += res.hornR;
+                            hornAvgT += res.hornT;
+                            hornUsedCount++;
+                        }
+                    }
+                }
+
+                if (hornUsedCount > 0)
+                {
+                    hornAvgR /= static_cast<double>(hornUsedCount);
+                    hornAvgT /= static_cast<double>(hornUsedCount);
+
+                    // Re-orthogonalize Horn's averaged R
+                    cv::Mat hU, hS, hVt;
+                    cv::SVD::compute(hornAvgR, hS, hU, hVt);
+                    hornFinalR = hU * hVt;
+                    if (cv::determinant(hornFinalR) < 0)
+                        hornFinalR.col(2) *= -1.0;
+                    hornFinalT = hornAvgT;
+
+                    // Horn's: Recompute std dev on used captures
+                    double hMeanT = 0.0, hMeanA = 0.0;
+                    for (const auto& res : results)
+                    {
+                        if (res.hornValid && !res.hornOutlier)
+                        {
+                            hMeanT += res.hornTNorm;
+                            hMeanA += res.hornAngle;
+                            hornFinalCount++;
+                        }
+                    }
+                    hMeanT /= hornFinalCount;
+                    hMeanA /= hornFinalCount;
+
+                    double hVarTF = 0.0, hVarAF = 0.0;
+                    for (const auto& res : results)
+                    {
+                        if (res.hornValid && !res.hornOutlier)
+                        {
+                            double tE = std::abs(res.hornTNorm - hMeanT);
+                            double aE = std::abs(res.hornAngle - hMeanA);
+                            hVarTF += tE * tE;
+                            hVarAF += aE * aE;
+                            if (tE > hMaxTErr) hMaxTErr = tE;
+                            if (aE > hMaxAErr) hMaxAErr = aE;
+                        }
+                    }
+                    hFinalStdT = std::sqrt(hVarTF / hornFinalCount);
+                    hFinalStdA = std::sqrt(hVarAF / hornFinalCount);
+                }
+
+                // Store SVD results in calibrations (primary output)
                 calibrations[camIdx].rotation = finalR;
                 calibrations[camIdx].translation = avgT;
                 calibrations[camIdx].serialNumber = devices[camIdx].serialNumber;
@@ -2335,25 +2583,88 @@ int main(int argc, char** argv)
                 calibrations[camIdx].maxTranslationError = maxTErr;
                 calibrations[camIdx].maxRotationError = maxAErr;
 
-                // Print results
-                std::cout << "\n  Rotation matrix:\n" << finalR << std::endl;
+                // Print SVD results
+                std::cout << "\n  ===== SVD Method =====" << std::endl;
+                if (outlierCount > 0)
+                    std::cout << "  Removed " << outlierCount << " outlier(s), using "
+                              << usedCount << "/" << results.size() << " captures" << std::endl;
+                std::cout << "  Rotation matrix:\n" << finalR << std::endl;
                 std::cout << "  Translation (mm): " << avgT.t() << std::endl;
-                std::cout << "  ||t|| = " << cv::norm(avgT) << " mm" << std::endl;
+                std::cout << "  ||t|| = " << std::setprecision(1) << cv::norm(avgT) << " mm" << std::endl;
+                std::cout << "  Consistency: stdT=" << std::setprecision(2) << finalStdT
+                          << " mm, stdA=" << finalStdA << " deg" << std::endl;
 
-                std::cout << "\n  --- Consistency Metrics (after outlier removal) ---" << std::endl;
+                // Print Horn's results
+                if (hornUsedCount > 0)
+                {
+                    int hornOutlierCount = hornCount - hornUsedCount;
+                    std::cout << "\n  ===== Horn's Method =====" << std::endl;
+                    if (hornOutlierCount > 0)
+                        std::cout << "  Removed " << hornOutlierCount << " outlier(s), using "
+                                  << hornUsedCount << "/" << hornCount << " captures" << std::endl;
+                    std::cout << "  Rotation matrix:\n" << hornFinalR << std::endl;
+                    std::cout << "  Translation (mm): " << hornFinalT.t() << std::endl;
+                    std::cout << "  ||t|| = " << std::setprecision(1) << cv::norm(hornFinalT) << " mm" << std::endl;
+                    std::cout << "  Consistency: stdT=" << std::setprecision(2) << hFinalStdT
+                              << " mm, stdA=" << hFinalStdA << " deg" << std::endl;
+
+                    // Cross-validation: compare SVD vs Horn's
+                    std::cout << "\n  ===== Cross-Validation (SVD vs Horn's) =====" << std::endl;
+                    double tDiff = cv::norm(avgT - hornFinalT);
+                    cv::Mat Rdiff = finalR * hornFinalR.t();
+                    cv::Mat rdiffVec;
+                    cv::Rodrigues(Rdiff, rdiffVec);
+                    double angleDiff = cv::norm(rdiffVec) * 180.0 / CV_PI;
+                    std::cout << "  ||t_svd - t_horn|| = " << std::setprecision(1) << tDiff << " mm" << std::endl;
+                    std::cout << "  Rotation difference = " << std::setprecision(3) << angleDiff << " deg" << std::endl;
+
+                    if (tDiff < 5.0 && angleDiff < 1.0)
+                        std::cout << "  AGREEMENT: Both methods agree closely" << std::endl;
+                    else if (tDiff < 15.0 && angleDiff < 3.0)
+                        std::cout << "  MODERATE: Some disagreement, check conditions" << std::endl;
+                    else
+                        std::cout << "  DIVERGENCE: Methods disagree significantly, investigate" << std::endl;
+
+                    // Use Horn's if it has better consistency
+                    if (hFinalStdT < finalStdT * 0.5 && hFinalStdA < finalStdA * 0.5)
+                    {
+                        std::cout << "\n  NOTE: Horn's method shows significantly better consistency." << std::endl;
+                        std::cout << "  Consider using Horn's results. (Currently saving SVD results.)" << std::endl;
+                    }
+                }
+
+                std::cout << "\n  --- Consistency Metrics (SVD, after outlier removal) ---" << std::endl;
                 std::cout << "  Captures used:      " << usedCount << "/" << results.size() << std::endl;
                 std::cout << "  ||t|| std dev:      " << finalStdT << " mm" << std::endl;
                 std::cout << "  ||t|| max error:    " << maxTErr << " mm" << std::endl;
                 std::cout << "  Angle std dev:      " << finalStdA << " deg" << std::endl;
                 std::cout << "  Angle max error:    " << maxAErr << " deg" << std::endl;
 
-                // Quality assessment
+                if (hornUsedCount > 0)
+                {
+                    std::cout << "\n  --- Consistency Metrics (Horn's, after outlier removal) ---" << std::endl;
+                    std::cout << "  Captures used:      " << hornUsedCount << "/" << hornCount << std::endl;
+                    std::cout << "  ||t|| std dev:      " << hFinalStdT << " mm" << std::endl;
+                    std::cout << "  ||t|| max error:    " << hMaxTErr << " mm" << std::endl;
+                    std::cout << "  Angle std dev:      " << hFinalStdA << " deg" << std::endl;
+                    std::cout << "  Angle max error:    " << hMaxAErr << " deg" << std::endl;
+                }
+
+                // Quality assessment (based on better method)
+                double bestStdT = finalStdT;
+                double bestStdA = finalStdA;
+                if (hornUsedCount > 0)
+                {
+                    bestStdT = std::min(finalStdT, hFinalStdT);
+                    bestStdA = std::min(finalStdA, hFinalStdA);
+                }
+
                 std::cout << "\n  --- Quality Assessment ---" << std::endl;
-                if (finalStdT < 2.0 && finalStdA < 1.0)
+                if (bestStdT < 2.0 && bestStdA < 1.0)
                     std::cout << "  EXCELLENT: Very consistent across captures" << std::endl;
-                else if (finalStdT < 5.0 && finalStdA < 2.0)
+                else if (bestStdT < 5.0 && bestStdA < 2.0)
                     std::cout << "  GOOD: Reasonably consistent" << std::endl;
-                else if (finalStdT < 10.0 && finalStdA < 5.0)
+                else if (bestStdT < 10.0 && bestStdA < 5.0)
                     std::cout << "  FAIR: Consider recapturing with better poses" << std::endl;
                 else
                     std::cout << "  POOR: High variance, recapture recommended" << std::endl;

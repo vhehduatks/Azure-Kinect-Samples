@@ -220,7 +220,7 @@ Camera A (helmet camera) cannot see the checkerboard attached to itself. We solv
 
 **Goal**: Find `T_checker_to_A` — the transform from the **helmet checkerboard** to **Camera A** (the helmet camera)
 
-**What we measure via solvePnP**:
+**What we measure** (via solvePnP or Horn's method with `--bridge-depth`):
 
 | Transform | Description | Source |
 |-----------|-------------|--------|
@@ -277,6 +277,7 @@ multi_device_calibration.exe --hmd-bridge ^
 | Option | Description |
 |--------|-------------|
 | `--hmd-bridge` | Enable HMD bridge calibration mode |
+| `--bridge-depth` | Use depth-based Horn's method instead of solvePnP |
 | `--helmet-serial SERIAL` | Helmet camera serial number (required) |
 | `--primary SERIAL` | External/primary camera serial (optional) |
 | `--ground-rows N` | Ground checkerboard rows (default: 6) |
@@ -287,6 +288,26 @@ multi_device_calibration.exe --hmd-bridge ^
 | `--helmet-square N` | Helmet square size in mm (default: 30) |
 
 **Important**: Use **different checkerboard sizes** for ground and helmet to avoid detection interference!
+
+### Pose Estimation Methods
+
+By default, bridge mode uses **solvePnP** (2D corners + known geometry + camera intrinsics) to estimate each checkerboard's pose. This works with any camera.
+
+With `--bridge-depth`, the tool uses **Horn's method** (3D-to-3D point registration) instead:
+1. 2D corner locations are converted to 3D using the depth sensor via `k4a_calibration_2d_to_3d()`
+2. Horn's closed-form algorithm registers the known checkerboard geometry to the measured 3D points
+3. RMS residual (mm) is reported per detection for quality feedback
+
+Horn's method can be more accurate for depth cameras since it uses direct depth measurements rather than solving the perspective projection. Use `--bridge-depth` when both cameras have depth sensors (K4A/Orbbec).
+
+```cmd
+# Depth-based bridge calibration
+multi_device_calibration.exe --hmd-bridge --bridge-depth ^
+    --helmet-serial CL8T75400GD ^
+    --ground-rows 6 --ground-cols 9 --ground-square 25 ^
+    --helmet-rows 4 --helmet-cols 5 --helmet-square 30 ^
+    --output T_checker_to_A
+```
 
 ### Bridge Calibration Controls
 
@@ -314,6 +335,7 @@ multi_device_calibration.exe --hmd-bridge ^
 ```json
 {
   "description": "Checkerboard to Helmet Camera (A) transformation",
+  "method": "solvePnP",
   "num_captures": 10,
   "reprojection_error": 0.5,
   "rotation": [
@@ -326,6 +348,7 @@ multi_device_calibration.exe --hmd-bridge ^
 }
 ```
 
+- `method`: Pose estimation method (`"solvePnP"` or `"horn_3d_depth"`)
 - `rotation`: 3x3 rotation matrix (helmet checkerboard → Camera A)
 - `translation`: Translation in mm (helmet checkerboard → Camera A)
 - `rvec`: Rodrigues rotation vector

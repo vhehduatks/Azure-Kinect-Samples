@@ -73,6 +73,7 @@ struct HMDCalibration {
     double rotationStdDev = 0.0;     // Rotation angle std dev across captures (degrees)
     double maxTranslationError = 0.0; // Max ||t|| deviation from mean (mm)
     double maxRotationError = 0.0;    // Max rotation angle deviation from mean (degrees)
+    std::string method = "solvePnP";  // "solvePnP" or "horn_3d_depth"
 };
 
 // ============================================================================
@@ -248,35 +249,49 @@ bool Convert2DTo3D(DeviceInfo& device,
             return false;
         }
 
-        // Get depth value at corner location (sample 3x3 region for robustness)
-        float depthSum = 0;
-        int validCount = 0;
-        for (int dy = -1; dy <= 1; dy++)
+        // Get depth value at corner using expanding ring search.
+        // Transformed depth (640x576 → 1920x1080) has large holes; search outward
+        // from the corner pixel until valid depth is found.
+        const int maxSearchRadius = 20;
+        float depthMm = 0;
+        for (int r = 0; r <= maxSearchRadius; r++)
         {
-            for (int dx = -1; dx <= 1; dx++)
+            float depthSum = 0;
+            int validCount = 0;
+            for (int dy = -r; dy <= r; dy++)
             {
-                int nx = x + dx;
-                int ny = y + dy;
-                if (nx >= 0 && nx < device.colorWidth && ny >= 0 && ny < device.colorHeight)
+                for (int dx = -r; dx <= r; dx++)
                 {
-                    uint16_t d = depthBuffer[ny * depthStride + nx];
-                    if (d > 0)
+                    // Only check the outermost ring (interior already checked)
+                    if (r > 0 && std::abs(dx) < r && std::abs(dy) < r) continue;
+
+                    int nx = x + dx;
+                    int ny = y + dy;
+                    if (nx >= 0 && nx < device.colorWidth && ny >= 0 && ny < device.colorHeight)
                     {
-                        depthSum += d;
-                        validCount++;
+                        uint16_t d = depthBuffer[ny * depthStride + nx];
+                        if (d > 0)
+                        {
+                            depthSum += d;
+                            validCount++;
+                        }
                     }
                 }
             }
+            if (validCount > 0)
+            {
+                depthMm = depthSum / validCount;
+                break;
+            }
         }
 
-        if (validCount == 0)
+        if (depthMm == 0)
         {
-            std::cerr << "No valid depth at corner (" << x << ", " << y << ")" << std::endl;
+            std::cerr << "No valid depth within " << maxSearchRadius
+                      << "px of corner (" << x << ", " << y << ")" << std::endl;
             k4a_image_release(transformedDepth);
             return false;
         }
-
-        float depthMm = depthSum / validCount;
 
         // Convert 2D color + depth to 3D
         k4a_float2_t sourcePoint2D = { corner.x, corner.y };
@@ -377,6 +392,97 @@ ExtrinsicCalibration ComputeExtrinsicSVD(const std::vector<cv::Point3f>& points3
 
     result.isValid = true;
     return result;
+}
+
+// ============================================================================
+// Compute 3D-to-3D pose using Horn's method (closed-form point registration)
+// Input: objectPoints (known checkerboard geometry), cameraPoints (measured via depth)
+// Output: 4x4 T_object_to_camera (same convention as solvePnP)
+// Algorithm: centroids → center → cross-covariance H = P^T * Q → SVD(H) → R, t
+// ============================================================================
+bool ComputePose3DTo3D(const std::vector<cv::Point3f>& objectPoints,
+                       const std::vector<cv::Point3f>& cameraPoints,
+                       cv::Mat& T_out,
+                       double& rmsResidual)
+{
+    if (objectPoints.size() != cameraPoints.size() || objectPoints.size() < 3)
+    {
+        std::cerr << "ComputePose3DTo3D: need >= 3 matching point pairs" << std::endl;
+        return false;
+    }
+
+    int N = static_cast<int>(objectPoints.size());
+
+    // Step 1: Compute centroids
+    cv::Point3d centroidObj(0, 0, 0), centroidCam(0, 0, 0);
+    for (int i = 0; i < N; i++)
+    {
+        centroidObj.x += objectPoints[i].x;
+        centroidObj.y += objectPoints[i].y;
+        centroidObj.z += objectPoints[i].z;
+        centroidCam.x += cameraPoints[i].x;
+        centroidCam.y += cameraPoints[i].y;
+        centroidCam.z += cameraPoints[i].z;
+    }
+    centroidObj *= (1.0 / N);
+    centroidCam *= (1.0 / N);
+
+    // Step 2: Center points
+    cv::Mat P(N, 3, CV_64F);  // centered object points
+    cv::Mat Q(N, 3, CV_64F);  // centered camera points
+    for (int i = 0; i < N; i++)
+    {
+        P.at<double>(i, 0) = objectPoints[i].x - centroidObj.x;
+        P.at<double>(i, 1) = objectPoints[i].y - centroidObj.y;
+        P.at<double>(i, 2) = objectPoints[i].z - centroidObj.z;
+        Q.at<double>(i, 0) = cameraPoints[i].x - centroidCam.x;
+        Q.at<double>(i, 1) = cameraPoints[i].y - centroidCam.y;
+        Q.at<double>(i, 2) = cameraPoints[i].z - centroidCam.z;
+    }
+
+    // Step 3: Cross-covariance matrix H = P^T * Q (3x3)
+    cv::Mat H = P.t() * Q;
+
+    // Step 4: SVD(H) = U * S * V^T
+    cv::Mat U, S, Vt;
+    cv::SVD::compute(H, S, U, Vt);
+
+    // Step 5: R = V * U^T
+    cv::Mat R = Vt.t() * U.t();
+
+    // Ensure proper rotation (det = +1, not reflection)
+    if (cv::determinant(R) < 0)
+    {
+        // Flip sign of last column of Vt (i.e., last row before transpose)
+        Vt.row(2) *= -1.0;
+        R = Vt.t() * U.t();
+    }
+
+    // Step 6: t = centroid_cam - R * centroid_obj
+    cv::Mat centObjMat = (cv::Mat_<double>(3, 1) << centroidObj.x, centroidObj.y, centroidObj.z);
+    cv::Mat centCamMat = (cv::Mat_<double>(3, 1) << centroidCam.x, centroidCam.y, centroidCam.z);
+    cv::Mat t = centCamMat - R * centObjMat;
+
+    // Build 4x4 homogeneous transform
+    T_out = cv::Mat::eye(4, 4, CV_64F);
+    R.copyTo(T_out(cv::Rect(0, 0, 3, 3)));
+    t.copyTo(T_out(cv::Rect(3, 0, 1, 3)));
+
+    // Compute RMS residual
+    double sumSqErr = 0.0;
+    for (int i = 0; i < N; i++)
+    {
+        cv::Mat objPt = (cv::Mat_<double>(3, 1) <<
+            objectPoints[i].x, objectPoints[i].y, objectPoints[i].z);
+        cv::Mat predicted = R * objPt + t;
+        double dx = predicted.at<double>(0) - cameraPoints[i].x;
+        double dy = predicted.at<double>(1) - cameraPoints[i].y;
+        double dz = predicted.at<double>(2) - cameraPoints[i].z;
+        sumSqErr += dx * dx + dy * dy + dz * dz;
+    }
+    rmsResidual = std::sqrt(sumSqErr / N);
+
+    return true;
 }
 
 // ============================================================================
@@ -594,6 +700,7 @@ void SaveHMDCalibrationJSON(const HMDCalibration& calib, const std::string& file
     file << std::fixed << std::setprecision(9);
     file << "{\n";
     file << "  \"description\": \"Checkerboard to Helmet Camera (A) transformation\",\n";
+    file << "  \"method\": \"" << calib.method << "\",\n";
     file << "  \"num_captures\": " << calib.numCaptures << ",\n";
     file << "  \"num_used\": " << calib.numUsed << ",\n";
     file << "  \"consistency\": {\n";
@@ -709,7 +816,9 @@ int RunHMDCalibrationBridge(
     const std::string& helmetSerial,
     const std::string& primarySerial,
     // Output
-    const std::string& outputFile)
+    const std::string& outputFile,
+    // Use depth-based Horn's method instead of solvePnP
+    bool useDepth = false)
 {
     std::cout << "\n========================================" << std::endl;
     std::cout << "HMD Calibration Mode (Bridge Method)" << std::endl;
@@ -719,6 +828,7 @@ int RunHMDCalibrationBridge(
               << " inner corners, " << groundSquare << "mm squares" << std::endl;
     std::cout << "Helmet Checkerboard: " << helmetCols << "x" << helmetRows
               << " inner corners, " << helmetSquare << "mm squares" << std::endl;
+    std::cout << "Pose estimation: " << (useDepth ? "Horn's method (depth-based 3D-to-3D)" : "solvePnP (2D-to-3D)") << std::endl;
 
     cv::Size groundPatternSize(groundCols, groundRows);
     cv::Size helmetPatternSize(helmetCols, helmetRows);
@@ -794,21 +904,39 @@ int RunHMDCalibrationBridge(
         }
     }
 
+    // Close unused cameras (bridge mode only needs helmet + external)
+    for (int i = static_cast<int>(devices.size()) - 1; i >= 0; i--)
+    {
+        if (i != helmetDeviceIdx && i != externalDeviceIdx)
+        {
+            std::cout << "Closing unused device " << i << " (" << devices[i].serialNumber << ")" << std::endl;
+            k4a_device_close(devices[i].device);
+            devices.erase(devices.begin() + i);
+            // Adjust indices after removal
+            if (helmetDeviceIdx > i) helmetDeviceIdx--;
+            if (externalDeviceIdx > i) externalDeviceIdx--;
+        }
+    }
+
     std::cout << "\nHelmet camera: Device " << helmetDeviceIdx << std::endl;
     std::cout << "External camera: Device " << externalDeviceIdx << std::endl;
 
     // Configure and start cameras
     std::cout << "\nStarting cameras..." << std::endl;
 
+    int subordinateCount = 1;  // First subordinate gets 160*1, second gets 160*2, etc.
     for (int i = static_cast<int>(devices.size()) - 1; i >= 0; i--)
     {
         k4a_device_configuration_t config = K4A_DEVICE_CONFIG_INIT_DISABLE_ALL;
         config.depth_mode = K4A_DEPTH_MODE_NFOV_UNBINNED;
-        config.color_resolution = K4A_COLOR_RESOLUTION_1080P;
+        config.color_resolution = useDepth ? K4A_COLOR_RESOLUTION_720P : K4A_COLOR_RESOLUTION_1080P;
         config.color_format = K4A_IMAGE_FORMAT_COLOR_BGRA32;
         config.camera_fps = K4A_FRAMES_PER_SECOND_30;
         config.synchronized_images_only = true;
 
+        // Subordinate delay prevents IR interference between depth cameras.
+        // Each subordinate offsets by 160us * N (N=1,2,...) from master.
+        // Reference: Orbbec Femto Bolt multi-device sync documentation
         if (devices.size() > 1)
         {
             if (devices[i].isPrimary)
@@ -818,7 +946,8 @@ int RunHMDCalibrationBridge(
             else
             {
                 config.wired_sync_mode = K4A_WIRED_SYNC_MODE_SUBORDINATE;
-                config.subordinate_delay_off_master_usec = 160 * devices[i].index;
+                config.subordinate_delay_off_master_usec = 160 * subordinateCount;
+                subordinateCount++;
             }
         }
         else
@@ -912,6 +1041,7 @@ int RunHMDCalibrationBridge(
     while (running)
     {
         cv::Mat helmetColorImg, externalColorImg;
+        k4a_image_t helmetDepthImg = nullptr, externalDepthImg = nullptr;
         std::vector<cv::Point2f> helmetGroundCorners, externalGroundCorners, externalHelmetCorners;
         bool helmetGroundFound = false, externalGroundFound = false, externalHelmetFound = false;
 
@@ -921,6 +1051,11 @@ int RunHMDCalibrationBridge(
             if (captureData[helmetDeviceIdx].hasNewData)
             {
                 helmetColorImg = captureData[helmetDeviceIdx].colorImage.clone();
+                if (captureData[helmetDeviceIdx].depthImage)
+                {
+                    helmetDepthImg = captureData[helmetDeviceIdx].depthImage;
+                    k4a_image_reference(helmetDepthImg);
+                }
                 helmetGroundCorners = captureData[helmetDeviceIdx].groundCorners;
                 helmetGroundFound = captureData[helmetDeviceIdx].groundFound;
             }
@@ -930,6 +1065,11 @@ int RunHMDCalibrationBridge(
             if (captureData[externalDeviceIdx].hasNewData)
             {
                 externalColorImg = captureData[externalDeviceIdx].colorImage.clone();
+                if (captureData[externalDeviceIdx].depthImage)
+                {
+                    externalDepthImg = captureData[externalDeviceIdx].depthImage;
+                    k4a_image_reference(externalDepthImg);
+                }
                 externalGroundCorners = captureData[externalDeviceIdx].groundCorners;
                 externalHelmetCorners = captureData[externalDeviceIdx].helmetCorners;
                 externalGroundFound = captureData[externalDeviceIdx].groundFound;
@@ -955,8 +1095,20 @@ int RunHMDCalibrationBridge(
                             cv::FONT_HERSHEY_SIMPLEX, 0.8, cv::Scalar(0, 0, 255), 2);
             }
 
+            int hYPos = 60;
+            if (useDepth)
+            {
+                if (helmetDepthImg)
+                    cv::putText(display, "DEPTH OK", cv::Point(10, hYPos),
+                                cv::FONT_HERSHEY_SIMPLEX, 0.8, cv::Scalar(0, 255, 0), 2);
+                else
+                    cv::putText(display, "NO DEPTH", cv::Point(10, hYPos),
+                                cv::FONT_HERSHEY_SIMPLEX, 0.8, cv::Scalar(0, 0, 255), 2);
+                hYPos += 30;
+            }
+
             cv::putText(display, "Captures: " + std::to_string(captures.size()),
-                        cv::Point(10, 60), cv::FONT_HERSHEY_SIMPLEX, 0.8, cv::Scalar(255, 255, 0), 2);
+                        cv::Point(10, hYPos), cv::FONT_HERSHEY_SIMPLEX, 0.8, cv::Scalar(255, 255, 0), 2);
 
             cv::imshow("Helmet Camera", display);
         }
@@ -994,6 +1146,17 @@ int RunHMDCalibrationBridge(
             }
             yPos += 30;
 
+            if (useDepth)
+            {
+                if (externalDepthImg)
+                    cv::putText(display, "DEPTH OK", cv::Point(10, yPos),
+                                cv::FONT_HERSHEY_SIMPLEX, 0.8, cv::Scalar(0, 255, 0), 2);
+                else
+                    cv::putText(display, "NO DEPTH", cv::Point(10, yPos),
+                                cv::FONT_HERSHEY_SIMPLEX, 0.8, cv::Scalar(0, 0, 255), 2);
+                yPos += 30;
+            }
+
             // Ready to capture?
             bool canCapture = helmetGroundFound && externalGroundFound && externalHelmetFound;
             if (canCapture)
@@ -1024,37 +1187,110 @@ int RunHMDCalibrationBridge(
             if (canCapture)
             {
                 BridgeCapture cap;
+                bool captureOk = false;
 
-                // Compute poses using solvePnP
-                cv::Mat rvec, tvec;
+                if (useDepth)
+                {
+                    // Depth-based Horn's method: Convert 2D corners to 3D via depth,
+                    // then compute pose using 3D-to-3D registration
+                    do {
+                        if (!externalDepthImg || !helmetDepthImg)
+                        {
+                            std::cout << "No depth images available for depth-based pose" << std::endl;
+                            break;
+                        }
 
-                // T_ground_to_external: Ground board in external camera frame
-                cv::solvePnP(groundObjPoints, externalGroundCorners,
-                             externalCamMatrix, externalDistCoeffs, rvec, tvec);
-                cv::Mat R;
-                cv::Rodrigues(rvec, R);
-                cap.T_ground_to_external = cv::Mat::eye(4, 4, CV_64F);
-                R.copyTo(cap.T_ground_to_external(cv::Rect(0, 0, 3, 3)));
-                tvec.copyTo(cap.T_ground_to_external(cv::Rect(3, 0, 1, 3)));
+                        double rms = 0.0;
 
-                // T_helmet_to_external: Helmet board in external camera frame
-                cv::solvePnP(helmetObjPoints, externalHelmetCorners,
-                             externalCamMatrix, externalDistCoeffs, rvec, tvec);
-                cv::Rodrigues(rvec, R);
-                cap.T_helmet_to_external = cv::Mat::eye(4, 4, CV_64F);
-                R.copyTo(cap.T_helmet_to_external(cv::Rect(0, 0, 3, 3)));
-                tvec.copyTo(cap.T_helmet_to_external(cv::Rect(3, 0, 1, 3)));
+                        // T_ground_to_external: Ground board 3D points in external camera
+                        std::vector<cv::Point3f> extGroundPts3D;
+                        if (!Convert2DTo3D(devices[externalDeviceIdx], externalDepthImg, nullptr,
+                                           externalGroundCorners, extGroundPts3D))
+                        {
+                            std::cout << "Failed to convert ground corners to 3D (external)" << std::endl;
+                            break;
+                        }
+                        if (!ComputePose3DTo3D(groundObjPoints, extGroundPts3D,
+                                              cap.T_ground_to_external, rms))
+                        {
+                            std::cout << "Failed Horn's method for ground->external" << std::endl;
+                            break;
+                        }
+                        std::cout << "  Ground->External RMS: " << std::fixed << std::setprecision(2) << rms << " mm" << std::endl;
 
-                // T_ground_to_helmet: Ground board in helmet camera frame
-                cv::solvePnP(groundObjPoints, helmetGroundCorners,
-                             helmetCamMatrix, helmetDistCoeffs, rvec, tvec);
-                cv::Rodrigues(rvec, R);
-                cap.T_ground_to_helmet = cv::Mat::eye(4, 4, CV_64F);
-                R.copyTo(cap.T_ground_to_helmet(cv::Rect(0, 0, 3, 3)));
-                tvec.copyTo(cap.T_ground_to_helmet(cv::Rect(3, 0, 1, 3)));
+                        // T_helmet_to_external: Helmet board 3D points in external camera
+                        std::vector<cv::Point3f> extHelmetPts3D;
+                        if (!Convert2DTo3D(devices[externalDeviceIdx], externalDepthImg, nullptr,
+                                           externalHelmetCorners, extHelmetPts3D))
+                        {
+                            std::cout << "Failed to convert helmet corners to 3D (external)" << std::endl;
+                            break;
+                        }
+                        if (!ComputePose3DTo3D(helmetObjPoints, extHelmetPts3D,
+                                              cap.T_helmet_to_external, rms))
+                        {
+                            std::cout << "Failed Horn's method for helmet->external" << std::endl;
+                            break;
+                        }
+                        std::cout << "  Helmet->External RMS: " << std::fixed << std::setprecision(2) << rms << " mm" << std::endl;
 
-                captures.push_back(cap);
-                std::cout << "Capture " << captures.size() << " recorded" << std::endl;
+                        // T_ground_to_helmet: Ground board 3D points in helmet camera
+                        std::vector<cv::Point3f> helGroundPts3D;
+                        if (!Convert2DTo3D(devices[helmetDeviceIdx], helmetDepthImg, nullptr,
+                                           helmetGroundCorners, helGroundPts3D))
+                        {
+                            std::cout << "Failed to convert ground corners to 3D (helmet)" << std::endl;
+                            break;
+                        }
+                        if (!ComputePose3DTo3D(groundObjPoints, helGroundPts3D,
+                                              cap.T_ground_to_helmet, rms))
+                        {
+                            std::cout << "Failed Horn's method for ground->helmet" << std::endl;
+                            break;
+                        }
+                        std::cout << "  Ground->Helmet RMS: " << std::fixed << std::setprecision(2) << rms << " mm" << std::endl;
+
+                        captureOk = true;
+                    } while (false);
+                }
+                else
+                {
+                    // solvePnP: 2D corners + known geometry + camera intrinsics
+                    cv::Mat rvec, tvec;
+
+                    // T_ground_to_external: Ground board in external camera frame
+                    cv::solvePnP(groundObjPoints, externalGroundCorners,
+                                 externalCamMatrix, externalDistCoeffs, rvec, tvec);
+                    cv::Mat R;
+                    cv::Rodrigues(rvec, R);
+                    cap.T_ground_to_external = cv::Mat::eye(4, 4, CV_64F);
+                    R.copyTo(cap.T_ground_to_external(cv::Rect(0, 0, 3, 3)));
+                    tvec.copyTo(cap.T_ground_to_external(cv::Rect(3, 0, 1, 3)));
+
+                    // T_helmet_to_external: Helmet board in external camera frame
+                    cv::solvePnP(helmetObjPoints, externalHelmetCorners,
+                                 externalCamMatrix, externalDistCoeffs, rvec, tvec);
+                    cv::Rodrigues(rvec, R);
+                    cap.T_helmet_to_external = cv::Mat::eye(4, 4, CV_64F);
+                    R.copyTo(cap.T_helmet_to_external(cv::Rect(0, 0, 3, 3)));
+                    tvec.copyTo(cap.T_helmet_to_external(cv::Rect(3, 0, 1, 3)));
+
+                    // T_ground_to_helmet: Ground board in helmet camera frame
+                    cv::solvePnP(groundObjPoints, helmetGroundCorners,
+                                 helmetCamMatrix, helmetDistCoeffs, rvec, tvec);
+                    cv::Rodrigues(rvec, R);
+                    cap.T_ground_to_helmet = cv::Mat::eye(4, 4, CV_64F);
+                    R.copyTo(cap.T_ground_to_helmet(cv::Rect(0, 0, 3, 3)));
+                    tvec.copyTo(cap.T_ground_to_helmet(cv::Rect(3, 0, 1, 3)));
+
+                    captureOk = true;
+                }
+
+                if (captureOk)
+                {
+                    captures.push_back(cap);
+                    std::cout << "Capture " << captures.size() << " recorded" << std::endl;
+                }
             }
             else
             {
@@ -1243,6 +1479,7 @@ int RunHMDCalibrationBridge(
             hmdCalib.rotationStdDev = finalStdA;
             hmdCalib.maxTranslationError = maxTErr;
             hmdCalib.maxRotationError = maxAErr;
+            hmdCalib.method = useDepth ? "horn_3d_depth" : "solvePnP";
             hmdCalib.isValid = true;
 
             // Step 7: Print final results with quality assessment
@@ -1276,6 +1513,10 @@ int RunHMDCalibrationBridge(
         {
             SaveHMDCalibrationJSON(hmdCalib, outputFile);
         }
+
+        // Release depth images acquired this iteration
+        if (helmetDepthImg) k4a_image_release(helmetDepthImg);
+        if (externalDepthImg) k4a_image_release(externalDepthImg);
     }
 
     // Cleanup
@@ -1327,6 +1568,7 @@ void PrintUsage()
               << "Helmet board: visible ONLY to external camera (attached to helmet)\n\n"
               << "Options:\n"
               << "  --hmd-bridge              Enable HMD bridge calibration mode\n"
+              << "  --bridge-depth            Use depth-based Horn's method instead of solvePnP\n"
               << "  --helmet-serial SERIAL    Helmet camera serial number (required)\n"
               << "  --ground-rows N           Ground checkerboard rows (default: " << CHECKERBOARD_ROWS << ")\n"
               << "  --ground-cols N           Ground checkerboard cols (default: " << CHECKERBOARD_COLS << ")\n"
@@ -1377,6 +1619,7 @@ int main(int argc, char** argv)
 
     // HMD bridge calibration options
     bool hmdBridgeMode = false;
+    bool bridgeDepth = false;
     std::string helmetSerial = "";
     int groundRows = CHECKERBOARD_ROWS;
     int groundCols = CHECKERBOARD_COLS;
@@ -1396,6 +1639,7 @@ int main(int argc, char** argv)
         else if (arg == "--exclude" && i + 1 < argc) excludeSerials.push_back(argv[++i]);
         // HMD bridge mode options
         else if (arg == "--hmd-bridge") hmdBridgeMode = true;
+        else if (arg == "--bridge-depth") bridgeDepth = true;
         else if (arg == "--helmet-serial" && i + 1 < argc) helmetSerial = argv[++i];
         else if (arg == "--ground-rows" && i + 1 < argc) groundRows = std::atoi(argv[++i]);
         else if (arg == "--ground-cols" && i + 1 < argc) groundCols = std::atoi(argv[++i]);
@@ -1422,7 +1666,7 @@ int main(int argc, char** argv)
             groundRows, groundCols, groundSquare,
             helmetRows, helmetCols, helmetSquare,
             helmetSerial, primarySerial,
-            hmdOutputFile);
+            hmdOutputFile, bridgeDepth);
     }
 
     cv::Size patternSize(checkerboardCols, checkerboardRows);
@@ -1543,6 +1787,7 @@ int main(int argc, char** argv)
     // Need COLOR for checkerboard detection, DEPTH for 3D conversion
     std::cout << "\nStarting cameras..." << std::endl;
 
+    int mode1SubordinateCount = 1;  // First subordinate gets 160*1, second gets 160*2, etc.
     for (int i = deviceCount - 1; i >= 0; i--)
     {
         k4a_device_configuration_t config = K4A_DEVICE_CONFIG_INIT_DISABLE_ALL;
@@ -1552,32 +1797,25 @@ int main(int argc, char** argv)
         config.camera_fps = K4A_FRAMES_PER_SECOND_30;
         config.synchronized_images_only = true;
 
-        // Set sync mode for multi-device
-        // Depth delay prevents IR interference between cameras
-        // Reference: green_screen example from OrbbecSDK-K4A-Wrapper
-        constexpr int32_t MIN_TIME_BETWEEN_DEPTH_USEC = 160;
-
+        // Subordinate delay prevents IR interference between depth cameras.
+        // Each subordinate offsets by 160us * N (N=1,2,...) from master.
+        // Reference: Orbbec Femto Bolt multi-device sync documentation
         if (deviceCount > 1)
         {
             if (devices[i].isPrimary)
             {
                 config.wired_sync_mode = K4A_WIRED_SYNC_MODE_MASTER;
-                config.subordinate_delay_off_master_usec = 0;
-                // Master: capture depth slightly BEFORE color (-80μs)
-                config.depth_delay_off_color_usec = -(MIN_TIME_BETWEEN_DEPTH_USEC / 2);
             }
             else
             {
                 config.wired_sync_mode = K4A_WIRED_SYNC_MODE_SUBORDINATE;
-                config.subordinate_delay_off_master_usec = MIN_TIME_BETWEEN_DEPTH_USEC * devices[i].index;
-                // Subordinate: capture depth slightly AFTER color (+80μs)
-                config.depth_delay_off_color_usec = MIN_TIME_BETWEEN_DEPTH_USEC / 2;
+                config.subordinate_delay_off_master_usec = 160 * mode1SubordinateCount;
+                mode1SubordinateCount++;
             }
         }
         else
         {
             config.wired_sync_mode = K4A_WIRED_SYNC_MODE_STANDALONE;
-            config.depth_delay_off_color_usec = 0;
         }
 
         std::cout << "Starting device " << i << " ("

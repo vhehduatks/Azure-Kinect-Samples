@@ -57,6 +57,21 @@ struct ExtrinsicCalibration {
     std::string serialNumber;
     int deviceIndex;
     bool isValid = false;
+    int numCaptures = 0;
+    int numUsed = 0;
+    double translationStdDev = 0.0;
+    double rotationStdDev = 0.0;
+    double maxTranslationError = 0.0;
+    double maxRotationError = 0.0;
+};
+
+// ============================================================================
+// Per-capture storage for Mode 1 multi-capture accumulation
+// ============================================================================
+struct Mode1Capture {
+    std::vector<cv::Mat> rotations;     // [deviceCount] 3x3 (relative to primary)
+    std::vector<cv::Mat> translations;  // [deviceCount] 3x1 (relative to primary)
+    std::vector<bool> isValid;          // [deviceCount]
 };
 
 // ============================================================================
@@ -592,7 +607,32 @@ void SaveCalibrationJSON(const std::vector<ExtrinsicCalibration>& calibrations,
             file << "      \"translation\": ["
                  << calib.translation.at<double>(0, 0) << ", "
                  << calib.translation.at<double>(1, 0) << ", "
-                 << calib.translation.at<double>(2, 0) << "]\n";
+                 << calib.translation.at<double>(2, 0) << "]";
+
+            if (calib.numCaptures > 0)
+            {
+                file << ",\n";
+                file << "      \"num_captures\": " << calib.numCaptures << ",\n";
+                file << "      \"num_used\": " << calib.numUsed;
+                if (calib.translationStdDev > 0.0 || calib.rotationStdDev > 0.0)
+                {
+                    file << ",\n";
+                    file << "      \"consistency\": {\n";
+                    file << "        \"translation_std_dev_mm\": " << calib.translationStdDev << ",\n";
+                    file << "        \"rotation_std_dev_deg\": " << calib.rotationStdDev << ",\n";
+                    file << "        \"max_translation_error_mm\": " << calib.maxTranslationError << ",\n";
+                    file << "        \"max_rotation_error_deg\": " << calib.maxRotationError << "\n";
+                    file << "      }\n";
+                }
+                else
+                {
+                    file << "\n";
+                }
+            }
+            else
+            {
+                file << "\n";
+            }
         }
         else
         {
@@ -1578,9 +1618,10 @@ void PrintUsage()
               << "  --helmet-square N         Helmet square size in mm (default: " << HEAD_CB_SQUARE_MM << ")\n"
               << "\nInstructions (Multi-Camera):\n"
               << "  1. Place checkerboard visible to ALL cameras\n"
-              << "  2. Press SPACE to capture and calibrate\n"
-              << "  3. Press 'S' to save calibration\n"
-              << "  4. Press ESC to quit\n"
+              << "  2. Press SPACE to capture (take 5-10 from different positions)\n"
+              << "  3. Press 'C' to compute averaged calibration\n"
+              << "  4. Press 'S' to save calibration\n"
+              << "  5. Press ESC to quit\n"
               << "\nInstructions (HMD Bridge Calibration):\n"
               << "  1. Place GROUND checkerboard on floor (visible to all cameras)\n"
               << "  2. Attach HELMET checkerboard to helmet (visible to external camera)\n"
@@ -1857,7 +1898,8 @@ int main(int argc, char** argv)
     std::cout << "\nAll devices started successfully!" << std::endl;
     std::cout << "\nInstructions:" << std::endl;
     std::cout << "  - Hold checkerboard visible to ALL cameras" << std::endl;
-    std::cout << "  - Press SPACE to capture and calibrate" << std::endl;
+    std::cout << "  - Press SPACE to capture (take 5-10 from different positions)" << std::endl;
+    std::cout << "  - Press 'C' to compute averaged calibration" << std::endl;
     std::cout << "  - Press 'S' to save calibration to file" << std::endl;
     std::cout << "  - Press ESC to quit" << std::endl;
 
@@ -1884,6 +1926,7 @@ int main(int argc, char** argv)
     std::this_thread::sleep_for(std::chrono::milliseconds(500));
 
     std::vector<ExtrinsicCalibration> calibrations(deviceCount);
+    std::vector<Mode1Capture> mode1Captures;
     bool calibrationDone = false;
     bool running = true;
 
@@ -1932,9 +1975,17 @@ int main(int argc, char** argv)
                                 cv::FONT_HERSHEY_SIMPLEX, 1.0, cv::Scalar(0, 0, 255), 2);
                 }
 
+                if (!mode1Captures.empty())
+                {
+                    std::string capText = "Captures: " + std::to_string(mode1Captures.size());
+                    cv::putText(display, capText, cv::Point(10, 60),
+                                cv::FONT_HERSHEY_SIMPLEX, 1.0, cv::Scalar(255, 200, 0), 2);
+                }
+
                 if (calibrationDone && calibrations[i].isValid)
                 {
-                    cv::putText(display, "CALIBRATED", cv::Point(10, 60),
+                    int yPos = mode1Captures.empty() ? 60 : 90;
+                    cv::putText(display, "CALIBRATED", cv::Point(10, yPos),
                                 cv::FONT_HERSHEY_SIMPLEX, 1.0, cv::Scalar(0, 255, 0), 2);
                 }
 
@@ -1951,7 +2002,7 @@ int main(int argc, char** argv)
         {
             running = false;
         }
-        else if (key == ' ')  // SPACE - Calibrate
+        else if (key == ' ')  // SPACE - Capture
         {
             // Check if all devices found checkerboard
             bool allFound = true;
@@ -1966,7 +2017,7 @@ int main(int argc, char** argv)
 
             if (allFound)
             {
-                std::cout << "\n=== Computing Calibration ===" << std::endl;
+                std::cout << "\n=== Capturing ===" << std::endl;
 
                 // Find primary camera index
                 int primaryIdx = 0;
@@ -1980,7 +2031,6 @@ int main(int argc, char** argv)
                 }
 
                 // Fix corner orientation for secondary cameras relative to primary
-                // This ensures consistent corner ordering even if checkerboard appears rotated
                 std::cout << "Checking corner orientation..." << std::endl;
                 for (uint32_t i = 0; i < deviceCount; i++)
                 {
@@ -1993,6 +2043,9 @@ int main(int argc, char** argv)
                 // Convert 2D to 3D for each device
                 std::vector<std::vector<cv::Point3f>> allPoints3D(deviceCount);
                 bool allConverted = true;
+
+                // Temporary per-device calibrations for this capture
+                std::vector<ExtrinsicCalibration> tempCalibs(deviceCount);
 
                 for (uint32_t i = 0; i < deviceCount; i++)
                 {
@@ -2009,41 +2062,306 @@ int main(int argc, char** argv)
                     std::cout << "  Converted " << allPoints3D[i].size() << " points to 3D" << std::endl;
 
                     // Compute extrinsic calibration using SVD
-                    calibrations[i] = ComputeExtrinsicSVD(allPoints3D[i],
-                                                          devices[i].serialNumber,
-                                                          devices[i].index);
+                    tempCalibs[i] = ComputeExtrinsicSVD(allPoints3D[i],
+                                                         devices[i].serialNumber,
+                                                         devices[i].index);
                 }
 
-                if (allConverted)
+                if (allConverted && tempCalibs[primaryIdx].isValid)
                 {
                     // Compute relative transforms (secondary cameras relative to primary)
-                    if (calibrations[0].isValid)
+                    for (uint32_t i = 0; i < deviceCount; i++)
                     {
-                        for (uint32_t i = 1; i < deviceCount; i++)
+                        if (static_cast<int>(i) != primaryIdx && tempCalibs[i].isValid)
                         {
-                            if (calibrations[i].isValid)
-                            {
-                                ComputeRelativeTransform(calibrations[0], calibrations[i]);
-                                std::cout << "\nDevice " << i << " -> Device 0 transformation:" << std::endl;
-                                std::cout << "  Rotation:\n" << calibrations[i].rotation << std::endl;
-                                std::cout << "  Translation: " << calibrations[i].translation.t() << " mm" << std::endl;
-                            }
+                            ComputeRelativeTransform(tempCalibs[primaryIdx], tempCalibs[i]);
                         }
-
-                        // Primary camera is identity in its own coordinate system
-                        calibrations[0].rotation = cv::Mat::eye(3, 3, CV_64F);
-                        calibrations[0].translation = cv::Mat::zeros(3, 1, CV_64F);
                     }
 
-                    calibrationDone = true;
-                    std::cout << "\n=== Calibration Complete ===" << std::endl;
-                    std::cout << "Press 'S' to save, ESC to quit" << std::endl;
+                    // Primary is identity
+                    tempCalibs[primaryIdx].rotation = cv::Mat::eye(3, 3, CV_64F);
+                    tempCalibs[primaryIdx].translation = cv::Mat::zeros(3, 1, CV_64F);
+
+                    // Store into Mode1Capture
+                    Mode1Capture cap;
+                    cap.rotations.resize(deviceCount);
+                    cap.translations.resize(deviceCount);
+                    cap.isValid.resize(deviceCount, false);
+
+                    for (uint32_t i = 0; i < deviceCount; i++)
+                    {
+                        if (tempCalibs[i].isValid)
+                        {
+                            cap.rotations[i] = tempCalibs[i].rotation.clone();
+                            cap.translations[i] = tempCalibs[i].translation.clone();
+                            cap.isValid[i] = true;
+                        }
+                    }
+
+                    mode1Captures.push_back(cap);
+
+                    std::cout << "\nCapture " << mode1Captures.size() << " recorded" << std::endl;
+
+                    // Print per-device relative transform preview for secondary cameras
+                    for (uint32_t i = 0; i < deviceCount; i++)
+                    {
+                        if (static_cast<int>(i) != primaryIdx && cap.isValid[i])
+                        {
+                            double tNorm = cv::norm(cap.translations[i]);
+                            cv::Mat rvec;
+                            cv::Rodrigues(cap.rotations[i], rvec);
+                            double angle = cv::norm(rvec) * 180.0 / CV_PI;
+                            std::cout << "  Device " << i << ": ||t|| = " << std::fixed << std::setprecision(1)
+                                      << tNorm << " mm, angle = " << std::setprecision(2) << angle << " deg" << std::endl;
+                        }
+                    }
+
+                    std::cout << "Press SPACE for more captures, 'C' to compute, ESC to quit" << std::endl;
                 }
             }
             else
             {
-                std::cout << "Cannot calibrate: checkerboard not visible in all cameras" << std::endl;
+                std::cout << "Cannot capture: checkerboard not visible in all cameras" << std::endl;
             }
+        }
+        else if ((key == 'c' || key == 'C') && !mode1Captures.empty())  // Compute averaged calibration
+        {
+            std::cout << "\n=== Computing Averaged Calibration ===" << std::endl;
+            std::cout << "Total captures: " << mode1Captures.size() << std::endl;
+
+            // Find primary camera index
+            int primaryIdx = 0;
+            for (uint32_t i = 0; i < deviceCount; i++)
+            {
+                if (devices[i].isPrimary)
+                {
+                    primaryIdx = i;
+                    break;
+                }
+            }
+
+            // Primary camera: always identity
+            calibrations[primaryIdx].rotation = cv::Mat::eye(3, 3, CV_64F);
+            calibrations[primaryIdx].translation = cv::Mat::zeros(3, 1, CV_64F);
+            calibrations[primaryIdx].serialNumber = devices[primaryIdx].serialNumber;
+            calibrations[primaryIdx].deviceIndex = devices[primaryIdx].index;
+            calibrations[primaryIdx].isValid = true;
+            calibrations[primaryIdx].numCaptures = static_cast<int>(mode1Captures.size());
+            calibrations[primaryIdx].numUsed = static_cast<int>(mode1Captures.size());
+
+            // For each secondary camera independently
+            for (uint32_t camIdx = 0; camIdx < deviceCount; camIdx++)
+            {
+                if (static_cast<int>(camIdx) == primaryIdx) continue;
+
+                std::cout << "\n--- Device " << camIdx << " (" << devices[camIdx].serialNumber << ") ---" << std::endl;
+
+                // Collect per-capture R, t for this camera
+                struct PerCaptureResult {
+                    cv::Mat R;
+                    cv::Mat t;
+                    double tNorm;
+                    double angle;
+                    bool isOutlier = false;
+                };
+
+                std::vector<PerCaptureResult> results;
+                results.reserve(mode1Captures.size());
+
+                for (const auto& cap : mode1Captures)
+                {
+                    if (!cap.isValid[camIdx]) continue;
+
+                    PerCaptureResult res;
+                    res.R = cap.rotations[camIdx].clone();
+                    res.t = cap.translations[camIdx].clone();
+                    res.tNorm = cv::norm(res.t);
+
+                    cv::Mat rvec;
+                    cv::Rodrigues(res.R, rvec);
+                    res.angle = cv::norm(rvec) * 180.0 / CV_PI;
+
+                    results.push_back(res);
+                }
+
+                if (results.empty())
+                {
+                    std::cout << "  No valid captures for this device" << std::endl;
+                    calibrations[camIdx].isValid = false;
+                    continue;
+                }
+
+                // Compute statistics
+                double meanTNorm = 0.0, meanAngle = 0.0;
+                for (const auto& res : results)
+                {
+                    meanTNorm += res.tNorm;
+                    meanAngle += res.angle;
+                }
+                meanTNorm /= results.size();
+                meanAngle /= results.size();
+
+                double varTNorm = 0.0, varAngle = 0.0;
+                for (const auto& res : results)
+                {
+                    varTNorm += (res.tNorm - meanTNorm) * (res.tNorm - meanTNorm);
+                    varAngle += (res.angle - meanAngle) * (res.angle - meanAngle);
+                }
+                double stdTNorm = std::sqrt(varTNorm / results.size());
+                double stdAngle = std::sqrt(varAngle / results.size());
+
+                // Print per-capture table
+                std::cout << std::fixed << std::setprecision(2);
+                std::cout << "  #   ||t|| (mm)   angle (deg)   status" << std::endl;
+                std::cout << "  --  ----------   -----------   ------" << std::endl;
+
+                // Outlier detection (>2 sigma, needs >=4 captures)
+                const double outlierSigma = 2.0;
+                for (size_t i = 0; i < results.size(); i++)
+                {
+                    auto& res = results[i];
+                    double tDev = std::abs(res.tNorm - meanTNorm);
+                    double aDev = std::abs(res.angle - meanAngle);
+
+                    if (results.size() >= 4)
+                    {
+                        if ((stdTNorm > 0.01 && tDev > outlierSigma * stdTNorm) ||
+                            (stdAngle > 0.01 && aDev > outlierSigma * stdAngle))
+                        {
+                            res.isOutlier = true;
+                        }
+                    }
+
+                    std::cout << "  " << std::setw(2) << (i + 1)
+                              << "  " << std::setw(10) << res.tNorm
+                              << "   " << std::setw(11) << res.angle
+                              << "   " << (res.isOutlier ? "OUTLIER" : "OK") << std::endl;
+                }
+
+                std::cout << "  --  ----------   -----------" << std::endl;
+                std::cout << "  Mean: " << std::setw(8) << meanTNorm
+                          << "   " << std::setw(11) << meanAngle << std::endl;
+                std::cout << "  StdDev: " << std::setw(6) << stdTNorm
+                          << "   " << std::setw(11) << stdAngle << std::endl;
+
+                // Average non-outlier captures
+                cv::Mat avgR = cv::Mat::zeros(3, 3, CV_64F);
+                cv::Mat avgT = cv::Mat::zeros(3, 1, CV_64F);
+                int usedCount = 0;
+
+                for (const auto& res : results)
+                {
+                    if (!res.isOutlier)
+                    {
+                        avgR += res.R;
+                        avgT += res.t;
+                        usedCount++;
+                    }
+                }
+
+                if (usedCount == 0)
+                {
+                    std::cout << "\n  WARNING: All captures flagged as outliers. Using all captures." << std::endl;
+                    for (const auto& res : results)
+                    {
+                        avgR += res.R;
+                        avgT += res.t;
+                    }
+                    usedCount = static_cast<int>(results.size());
+                }
+
+                int outlierCount = static_cast<int>(results.size()) - usedCount;
+                if (outlierCount > 0)
+                {
+                    std::cout << "\n  Removed " << outlierCount << " outlier(s), using "
+                              << usedCount << "/" << results.size() << " captures" << std::endl;
+                }
+
+                avgR /= static_cast<double>(usedCount);
+                avgT /= static_cast<double>(usedCount);
+
+                // Recompute std dev on used captures only
+                double finalMeanTNorm = 0.0, finalMeanAngle = 0.0;
+                double maxTErr = 0.0, maxAErr = 0.0;
+                int finalCount = 0;
+                for (const auto& res : results)
+                {
+                    if (!res.isOutlier)
+                    {
+                        finalMeanTNorm += res.tNorm;
+                        finalMeanAngle += res.angle;
+                        finalCount++;
+                    }
+                }
+                finalMeanTNorm /= finalCount;
+                finalMeanAngle /= finalCount;
+
+                double finalVarT = 0.0, finalVarA = 0.0;
+                for (const auto& res : results)
+                {
+                    if (!res.isOutlier)
+                    {
+                        double tErr = std::abs(res.tNorm - finalMeanTNorm);
+                        double aErr = std::abs(res.angle - finalMeanAngle);
+                        finalVarT += tErr * tErr;
+                        finalVarA += aErr * aErr;
+                        if (tErr > maxTErr) maxTErr = tErr;
+                        if (aErr > maxAErr) maxAErr = aErr;
+                    }
+                }
+                double finalStdT = std::sqrt(finalVarT / finalCount);
+                double finalStdA = std::sqrt(finalVarA / finalCount);
+
+                // Re-orthogonalize averaged R via SVD
+                cv::Mat U, S, Vt;
+                cv::SVD::compute(avgR, S, U, Vt);
+                cv::Mat finalR = U * Vt;
+
+                if (cv::determinant(finalR) < 0)
+                {
+                    finalR.col(2) *= -1.0;
+                }
+
+                // Store in calibrations
+                calibrations[camIdx].rotation = finalR;
+                calibrations[camIdx].translation = avgT;
+                calibrations[camIdx].serialNumber = devices[camIdx].serialNumber;
+                calibrations[camIdx].deviceIndex = devices[camIdx].index;
+                calibrations[camIdx].isValid = true;
+                calibrations[camIdx].numCaptures = static_cast<int>(results.size());
+                calibrations[camIdx].numUsed = usedCount;
+                calibrations[camIdx].translationStdDev = finalStdT;
+                calibrations[camIdx].rotationStdDev = finalStdA;
+                calibrations[camIdx].maxTranslationError = maxTErr;
+                calibrations[camIdx].maxRotationError = maxAErr;
+
+                // Print results
+                std::cout << "\n  Rotation matrix:\n" << finalR << std::endl;
+                std::cout << "  Translation (mm): " << avgT.t() << std::endl;
+                std::cout << "  ||t|| = " << cv::norm(avgT) << " mm" << std::endl;
+
+                std::cout << "\n  --- Consistency Metrics (after outlier removal) ---" << std::endl;
+                std::cout << "  Captures used:      " << usedCount << "/" << results.size() << std::endl;
+                std::cout << "  ||t|| std dev:      " << finalStdT << " mm" << std::endl;
+                std::cout << "  ||t|| max error:    " << maxTErr << " mm" << std::endl;
+                std::cout << "  Angle std dev:      " << finalStdA << " deg" << std::endl;
+                std::cout << "  Angle max error:    " << maxAErr << " deg" << std::endl;
+
+                // Quality assessment
+                std::cout << "\n  --- Quality Assessment ---" << std::endl;
+                if (finalStdT < 2.0 && finalStdA < 1.0)
+                    std::cout << "  EXCELLENT: Very consistent across captures" << std::endl;
+                else if (finalStdT < 5.0 && finalStdA < 2.0)
+                    std::cout << "  GOOD: Reasonably consistent" << std::endl;
+                else if (finalStdT < 10.0 && finalStdA < 5.0)
+                    std::cout << "  FAIR: Consider recapturing with better poses" << std::endl;
+                else
+                    std::cout << "  POOR: High variance, recapture recommended" << std::endl;
+            }
+
+            calibrationDone = true;
+            std::cout << "\n=== Calibration Complete ===" << std::endl;
+            std::cout << "Press 'S' to save, ESC to quit" << std::endl;
         }
         else if (key == 's' || key == 'S')  // Save
         {
@@ -2054,7 +2372,7 @@ int main(int argc, char** argv)
             }
             else
             {
-                std::cout << "No calibration to save. Press SPACE to calibrate first." << std::endl;
+                std::cout << "No calibration to save. Press SPACE to capture, then 'C' to compute." << std::endl;
             }
         }
 

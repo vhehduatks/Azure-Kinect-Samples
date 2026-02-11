@@ -67,7 +67,8 @@ multi_device_calibration.exe --primary CL8T75400DC --exclude CAM1 --exclude CAM2
 
 | Key | Action |
 |-----|--------|
-| SPACE | Capture and calibrate |
+| SPACE | Capture checkerboard pose (accumulate) |
+| C | Compute averaged calibration from captures |
 | S | Save calibration to file |
 | ESC | Quit |
 
@@ -79,7 +80,9 @@ multi_device_calibration.exe --primary CL8T75400DC --exclude CAM1 --exclude CAM2
 4. Run the calibration tool with `--primary <serial>` option
 5. Hold a checkerboard pattern visible to ALL cameras simultaneously
 6. Press SPACE when checkerboard is detected in all views (green indicator)
-7. Press S to save calibration results
+7. Move the checkerboard to a different position and repeat (5-10 captures recommended)
+8. Press C to compute the averaged calibration with outlier removal and quality metrics
+9. Press S to save calibration results
 
 ### Sync Hub Configuration
 
@@ -116,7 +119,24 @@ calibrations:
       "serial_number": "ABC123",
       "is_valid": true,
       "rotation": [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
-      "translation": [0, 0, 0]
+      "translation": [0, 0, 0],
+      "num_captures": 10,
+      "num_used": 10
+    },
+    {
+      "device_index": 1,
+      "serial_number": "DEF456",
+      "is_valid": true,
+      "rotation": [[0.99, -0.01, 0.02], [0.01, 1.0, 0.0], [-0.02, 0.0, 0.99]],
+      "translation": [500.0, 10.0, -20.0],
+      "num_captures": 10,
+      "num_used": 9,
+      "consistency": {
+        "translation_std_dev_mm": 1.5,
+        "rotation_std_dev_deg": 0.3,
+        "max_translation_error_mm": 2.1,
+        "max_rotation_error_deg": 0.5
+      }
     }
   ]
 }

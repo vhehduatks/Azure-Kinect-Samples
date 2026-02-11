@@ -136,10 +136,10 @@ public class RecordingSyncController : MonoBehaviour
         ProcessPendingCommand();
 
         // Send commands on key press
-        if (Input.GetKeyDown(KeyCode.R))
-        {
-            SendCommand("TOGGLE_RECORD");
-        }
+        //if (Input.GetKeyDown(KeyCode.R))
+        //{
+        //    SendCommand("TOGGLE_RECORD");
+        //}
 
         if (Input.GetKeyDown(KeyCode.K))
         {
@@ -164,9 +164,9 @@ public class RecordingSyncController : MonoBehaviour
         // Handle command
         switch (command)
         {
-            case "TOGGLE_RECORD":
-                ToggleLocalRecording();
-                break;
+            //case "TOGGLE_RECORD":
+            //    ToggleLocalRecording();
+            //    break;
             case "START_RECORD":
                 StartLocalRecording();
                 break;

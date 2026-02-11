@@ -2,7 +2,7 @@
 REM Copy Orbbec K4A Wrapper DLLs to build output directory
 REM Run this after building to replace Azure Kinect DLLs with Orbbec versions
 
-set ORBBEC_SDK=C:\OrbbecSDK_K4A_Wrapper_v1.10.5_windows_202510212040\bin
+set ORBBEC_SDK=C:\Users\kangsei\Desktop\ORBEC\OrbbecSDK_K4A_Wrapper_v1.10.5_windows_202510212040\bin
 set BUILD_DIR=%~dp0build\bin\Release
 
 echo.

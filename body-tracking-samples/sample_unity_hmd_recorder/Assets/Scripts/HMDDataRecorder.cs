@@ -28,7 +28,7 @@ public class HMDDataRecorder : MonoBehaviour
     public string participantID = "P01";
 
     [Tooltip("Session name for filename")]
-    public string sessionName = "Session01";
+    string sessionName = "Session01";
 
     [Tooltip("Recording frame rate (Hz)")]
     [Range(1f, 120f)]
@@ -79,24 +79,24 @@ public class HMDDataRecorder : MonoBehaviour
         }
     }
 
-    void Update()
-    {
-        // Toggle recording with R key
-        if (Input.GetKeyDown(KeyCode.R))
-        {
-            if (!isRecording)
-                StartRecording();
-            else
-                StopRecording();
-        }
+    //void Update()
+    //{
+    //    // Toggle recording with R key
+    //    if (Input.GetKeyDown(KeyCode.R))
+    //    {
+    //        if (!isRecording)
+    //            StartRecording();
+    //        else
+    //            StopRecording();
+    //    }
 
-        // Quit with ESC
-        if (Input.GetKeyDown(KeyCode.Escape))
-        {
-            StopRecording();
-            Application.Quit();
-        }
-    }
+    //    // Quit with ESC
+    //    if (Input.GetKeyDown(KeyCode.Escape))
+    //    {
+    //        StopRecording();
+    //        Application.Quit();
+    //    }
+    //}
 
     void OnDisable()
     {
@@ -107,6 +107,21 @@ public class HMDDataRecorder : MonoBehaviour
     {
         StopRecording();
     }
+
+    public void SetSessionName(string newSessionName)
+    {
+        sessionName = newSessionName;
+    }
+
+    public void StartNewSession(string newSessionName)
+    {
+        // 이미 녹화중이면 끊고 새 파일로 시작
+        if (IsRecording) StopRecording();
+        sessionName = newSessionName;
+        StartRecording();
+    }
+
+   
 
     /// <summary>
     /// Starts recording HMD and controller data to CSV.
@@ -121,7 +136,7 @@ public class HMDDataRecorder : MonoBehaviour
         }
 
         // Create output directory
-        string folderPath = Path.Combine(Application.dataPath, outputFolder);
+        string folderPath = Path.Combine(Application.dataPath, outputFolder, participantID);
         if (!Directory.Exists(folderPath))
         {
             Directory.CreateDirectory(folderPath);
@@ -187,7 +202,7 @@ public class HMDDataRecorder : MonoBehaviour
 
     private void WriteHeader()
     {
-        string header = "timestamp_ms,frame,unity_time";
+        string header = "milisecond, timestamp_ms,frame,unity_time";
 
         if (useQuaternion)
         {
@@ -224,6 +239,7 @@ public class HMDDataRecorder : MonoBehaviour
     {
         // Get timestamp
         long timestampMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        string timestp = System.DateTime.Now.ToString("HH:mm:ss:fff");
         float unityTime = Time.time;
 
         // Get poses
@@ -237,7 +253,7 @@ public class HMDDataRecorder : MonoBehaviour
         Quaternion rightRot = rightControllerTransform != null ? rightControllerTransform.rotation : Quaternion.identity;
 
         // Build CSV line
-        string line = $"{timestampMs},{frameCount},{unityTime:F4}";
+        string line = $"{timestampMs},{timestp},{frameCount},{unityTime:F4}";
 
         if (useQuaternion)
         {
@@ -264,5 +280,31 @@ public class HMDDataRecorder : MonoBehaviour
     {
         Vector3 euler = rot.eulerAngles;
         return $"{pos.x:F4},{pos.y:F4},{pos.z:F4},{euler.x:F3},{euler.y:F3},{euler.z:F3}";
+    }
+
+    public void MarkLastFileAsReset()
+    {
+        if (string.IsNullOrEmpty(currentFilePath)) return;
+        if (!File.Exists(currentFilePath)) return;
+
+        try
+        {
+            string dir = Path.GetDirectoryName(currentFilePath);
+            string name = Path.GetFileName(currentFilePath);
+
+            // 이미 reset 붙어있으면 무시
+            if (name.StartsWith("RESET_")) return;
+
+            string newPath = Path.Combine(dir, "RESET_" + name);
+
+            File.Move(currentFilePath, newPath);
+            currentFilePath = newPath;
+
+            Debug.Log("[HMDDataRecorder] File renamed to RESET: " + newPath);
+        }
+        catch (Exception e)
+        {
+            Debug.LogError("[HMDDataRecorder] Rename failed: " + e.Message);
+        }
     }
 }

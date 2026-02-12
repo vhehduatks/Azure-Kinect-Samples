@@ -100,6 +100,7 @@ struct FixedCameraFrame {
     cv::Mat depthImage;     // CV_16UC1
     int deviceIndex = -1;
     bool hasNewData = false;
+    uint64_t frameSeq = 0;  // Incremented by capture thread on each new frame
 };
 
 struct FixedCameraInfo {
@@ -963,17 +964,37 @@ void HelmetDetectorThread()
     bool hasPrevPose = false;
     auto prevPoseTime = std::chrono::steady_clock::now();
 
+    int diagCounter = 0;
+    const int DIAG_INTERVAL = 10; // Print diagnostics every ~10 iterations (~330ms at 33ms sleep)
+
+    // Track last processed frame sequence per camera to avoid re-processing
+    std::vector<uint64_t> lastProcessedSeq;
+
     while (g_detectorRunning)
     {
-        // Copy latest frames from fixed cameras
+        // Copy latest frames from fixed cameras (don't clear flags — frames persist)
         std::vector<FixedCameraFrame> frames;
         {
             std::lock_guard<std::mutex> lock(g_fixedFramesMutex);
             frames = g_fixedFrames;
-            // Clear new data flags
-            for (auto& f : g_fixedFrames) {
-                f.hasNewData = false;
+        }
+
+        // Initialize sequence tracking on first iteration
+        if (lastProcessedSeq.empty()) {
+            lastProcessedSeq.resize(frames.size(), 0);
+        }
+
+        // Wait for at least one camera to have a new frame
+        bool anyNew = false;
+        for (size_t i = 0; i < frames.size(); i++) {
+            if (frames[i].frameSeq > lastProcessedSeq[i]) {
+                anyNew = true;
+                break;
             }
+        }
+        if (!anyNew) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            continue;
         }
 
         cv::Size patternSize = g_helmetCB.patternSize();
@@ -981,18 +1002,36 @@ void HelmetDetectorThread()
         // Collect helmet pose candidates from all fixed cameras
         std::vector<WeightedPose> candidates;
 
+        bool doDiag = (diagCounter % DIAG_INTERVAL == 0);
+        diagCounter++;
+
+        // Per-camera diagnostic state
+        int camNewFrames = 0;
+        std::string diagNoData, diagNoCB, diagNoDepth, diagNoPose, diagOK;
+
         for (size_t i = 0; i < frames.size(); i++)
         {
-            if (!frames[i].hasNewData || frames[i].colorImage.empty() || frames[i].depthImage.empty())
+            int devIdx = frames[i].deviceIndex;
+
+            if (frames[i].colorImage.empty() || frames[i].depthImage.empty())
+            {
+                if (doDiag) diagNoData += " dev" + std::to_string(devIdx);
                 continue;
+            }
+
+            bool isNew = (frames[i].frameSeq > lastProcessedSeq[i]);
+            lastProcessedSeq[i] = frames[i].frameSeq;
+            if (isNew) camNewFrames++;
 
             // Try to detect checkerboard
             std::vector<cv::Point2f> corners;
             if (!HelmetDetectCheckerboardCorners(frames[i].colorImage, corners, patternSize))
+            {
+                if (doDiag) diagNoCB += " dev" + std::to_string(devIdx);
                 continue;
+            }
 
             // Find the fixed camera info for this device
-            int devIdx = frames[i].deviceIndex;
             FixedCameraInfo* camInfo = nullptr;
             for (auto& fci : g_fixedCameraInfos) {
                 if (fci.deviceIndex == devIdx) {
@@ -1006,7 +1045,10 @@ void HelmetDetectorThread()
             std::vector<cv::Point3f> points3D;
             if (!HelmetConvert2DTo3D(camInfo->calibration, camInfo->transformation,
                                       frames[i].depthImage, corners, points3D))
+            {
+                if (doDiag) diagNoDepth += " dev" + std::to_string(devIdx);
                 continue;
+            }
 
             // Compute average depth for confidence weighting
             float avgDepth = 0.0f;
@@ -1034,7 +1076,11 @@ void HelmetDetectorThread()
 
             // Compute checkerboard pose in world frame
             Transform checkerPose = ComputeCheckerboardPose(points3D, patternSize);
-            if (!checkerPose.valid) continue;
+            if (!checkerPose.valid)
+            {
+                if (doDiag) diagNoPose += " dev" + std::to_string(devIdx);
+                continue;
+            }
 
             // Compose with T_checker_to_A to get helmet camera pose in world
             Transform helmetPose;
@@ -1045,6 +1091,20 @@ void HelmetDetectorThread()
 
             // Weight: inverse-square distance (depth noise scales with distance²)
             candidates.push_back({helmetPose, 1.0f / (avgDepth * avgDepth), devIdx});
+            if (doDiag) diagOK += " dev" + std::to_string(devIdx) + "(d=" + std::to_string((int)avgDepth) + "mm)";
+        }
+
+        if (doDiag)
+        {
+            std::cout << "[DIAG-CB] new=" << camNewFrames << " cams=" << frames.size();
+            if (!diagNoData.empty()) std::cout << " | no_data:" << diagNoData;
+            if (!diagNoCB.empty())   std::cout << " | no_corners:" << diagNoCB;
+            if (!diagNoDepth.empty()) std::cout << " | depth_fail:" << diagNoDepth;
+            if (!diagNoPose.empty())  std::cout << " | pose_fail:" << diagNoPose;
+            if (!diagOK.empty())      std::cout << " | OK:" << diagOK;
+            if (candidates.empty())   std::cout << " | RESULT: NO_DETECTION";
+            else                      std::cout << " | RESULT: " << candidates.size() << " candidate(s)";
+            std::cout << std::endl;
         }
 
         if (!candidates.empty())
@@ -1054,14 +1114,25 @@ void HelmetDetectorThread()
             // EMA temporal smoothing
             auto now = std::chrono::steady_clock::now();
             Transform smoothed;
+            bool snapped = false;
             if (hasPrevPose && (now - prevPoseTime) < STALENESS_THRESHOLD) {
                 smoothed = SmoothPose(fused, prevSmoothedPose, EMA_ALPHA);
             } else {
                 smoothed = fused;
+                snapped = true;
             }
             prevSmoothedPose = smoothed;
             hasPrevPose = true;
             prevPoseTime = now;
+
+            if (doDiag)
+            {
+                std::cout << "[DIAG-CB] pose t=("
+                    << (int)smoothed.translation.at<double>(0) << ","
+                    << (int)smoothed.translation.at<double>(1) << ","
+                    << (int)smoothed.translation.at<double>(2) << ")mm"
+                    << (snapped ? " SNAP" : " EMA") << std::endl;
+            }
 
             std::lock_guard<std::mutex> lock(g_helmetPoseMutex);
             g_helmetPose = smoothed;
@@ -2014,6 +2085,7 @@ void DeviceCaptureThread(DeviceInfo* deviceInfo, int dataIndex)
                             }
                             g_fixedFrames[fixedIdx].deviceIndex = deviceInfo->index;
                             g_fixedFrames[fixedIdx].hasNewData = true;
+                            g_fixedFrames[fixedIdx].frameSeq++;
                             k4a_image_release(colorImg);
                         }
                     }
@@ -2153,6 +2225,9 @@ void PrintUsage()
               << "  --helmet-cb-rows N   - Checkerboard inner rows (default: 4)\n"
               << "  --helmet-cb-cols N   - Checkerboard inner cols (default: 5)\n"
               << "  --helmet-cb-square N - Checkerboard square size in mm (default: 30)\n\n"
+              << "Body Tracking:\n"
+              << "  --sensor-orientation ORI - Sensor orientation: default, cw90, ccw90, flip180\n"
+              << "  --smoothing FACTOR       - Temporal smoothing factor 0.0-1.0 (default: 0.0)\n\n"
               << "Runtime Controls:\n"
               << "  K - Cycle camera view (All -> Cam0 -> Cam1 -> ...)\n"
               << "  R - Start/stop CSV recording\n"
@@ -2178,6 +2253,8 @@ int main(int argc, char** argv)
     // Parse arguments
     k4a_depth_mode_t depthMode = K4A_DEPTH_MODE_NFOV_UNBINNED;
     k4abt_tracker_processing_mode_t processingMode = K4ABT_TRACKER_PROCESSING_MODE_GPU_DIRECTML;
+    k4abt_sensor_orientation_t sensorOrientation = K4ABT_SENSOR_ORIENTATION_DEFAULT;
+    float smoothingFactor = 0.0f;
     bool enableUdp = true;
     int udpPort = 9000;
 
@@ -2230,6 +2307,25 @@ int main(int argc, char** argv)
         }
         else if (arg == "--helmet-cb-square" && i + 1 < argc) {
             g_helmetCB.squareMm = std::stof(argv[++i]);
+        }
+        else if (arg == "--sensor-orientation" && i + 1 < argc) {
+            std::string ori(argv[++i]);
+            if (ori == "default") sensorOrientation = K4ABT_SENSOR_ORIENTATION_DEFAULT;
+            else if (ori == "cw90") sensorOrientation = K4ABT_SENSOR_ORIENTATION_CLOCKWISE90;
+            else if (ori == "ccw90") sensorOrientation = K4ABT_SENSOR_ORIENTATION_COUNTERCLOCKWISE90;
+            else if (ori == "flip180") sensorOrientation = K4ABT_SENSOR_ORIENTATION_FLIP180;
+            else {
+                std::cerr << "Unknown sensor orientation: " << ori << std::endl;
+                PrintUsage();
+                return -1;
+            }
+        }
+        else if (arg == "--smoothing" && i + 1 < argc) {
+            smoothingFactor = std::stof(argv[++i]);
+            if (smoothingFactor < 0.0f || smoothingFactor > 1.0f) {
+                std::cerr << "Smoothing factor must be between 0.0 and 1.0" << std::endl;
+                return -1;
+            }
         }
         else if (arg == "--help" || arg == "-h") {
             PrintUsage();
@@ -2437,6 +2533,7 @@ int main(int argc, char** argv)
         {
             k4abt_tracker_configuration_t trackerConfig = K4ABT_TRACKER_CONFIG_DEFAULT;
             trackerConfig.processing_mode = processingMode;
+            trackerConfig.sensor_orientation = sensorOrientation;
 
             std::cout << "Creating body tracker for device " << i << "..." << std::endl;
             if (k4abt_tracker_create(&devices[i].calibration, trackerConfig, &devices[i].tracker) != K4A_RESULT_SUCCEEDED)
@@ -2444,6 +2541,7 @@ int main(int argc, char** argv)
                 std::cerr << "Failed to create body tracker for device " << i << std::endl;
                 return -1;
             }
+            k4abt_tracker_set_temporal_smoothing(devices[i].tracker, smoothingFactor);
         }
 
         // Small delay between starting devices

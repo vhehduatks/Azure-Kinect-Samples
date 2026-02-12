@@ -65,6 +65,10 @@ Skeleton Fusion:
 
 CSV Recording:
   --output FILE      Output CSV file path (default: skeleton_data_YYYYMMDD_HHMMSS.csv)
+
+Body Tracking:
+  --sensor-orientation ORI  Sensor orientation: default, cw90, ccw90, flip180
+  --smoothing FACTOR        Temporal smoothing factor 0.0-1.0 (default: 0.0)
 ```
 
 ### Examples
@@ -78,6 +82,9 @@ multi_device_body_viewer.exe --primary CL8T75400DC --calibration calibration.jso
 
 # With specific fusion mode
 multi_device_body_viewer.exe --primary CL8T75400DC --calibration calibration.json --fusion-mode winner
+
+# With tilted cameras (90° counterclockwise) and temporal smoothing
+multi_device_body_viewer.exe --primary CL8T75400DC --sensor-orientation ccw90 --smoothing 0.5
 ```
 
 ## Runtime Controls

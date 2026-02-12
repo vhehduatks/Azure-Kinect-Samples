@@ -37,6 +37,11 @@ multi_device_offline_processor.exe --calibration calib.json --output skeleton.cs
 # Specify processing mode
 multi_device_offline_processor.exe --mode DirectML --calibration calib.json \
     --output skeleton.csv recording_cam0.mkv recording_cam1.mkv
+
+# With tilted cameras (90° counterclockwise) and temporal smoothing
+multi_device_offline_processor.exe --calibration calib.json \
+    --sensor-orientation ccw90 --smoothing 0.5 \
+    --output skeleton.csv recording_cam0.mkv recording_cam1.mkv
 ```
 
 ### Ego-View Mode
@@ -70,6 +75,8 @@ The helmet camera MKV is identified by its serial number. The processor:
 | `--output FILE` | Output CSV file (default: output.csv) |
 | `--mode MODE` | Processing mode: CPU, CUDA, DirectML (default), TensorRT |
 | `--sync-threshold MS` | Max timestamp difference for sync (default: 33ms) |
+| `--sensor-orientation ORI` | Sensor orientation: default, cw90, ccw90, flip180 |
+| `--smoothing FACTOR` | Temporal smoothing factor 0.0-1.0 (default: 0.0) |
 
 ### Ego-View Options
 
@@ -243,6 +250,16 @@ Helmet MKV ──► Color Frame    3D joints: R^T × (P_world - t) → ego 3D
                    └──────── Save annotation JSON
 ```
 
+### Frame Synchronization
+
+MKV files from different cameras have independent timelines. The processor uses **timestamp-interleaved advancement** — at each iteration, only the camera with the oldest unprocessed timestamp advances. This ensures:
+
+- Fixed camera skeletons are fused at closely-matched timestamps
+- Helmet frames use the most recent fused skeleton data (not stale data from a different point in time)
+- No frames are skipped or duplicated regardless of per-camera frame rate differences
+
+Without interleaved advancement, lock-step processing (advancing all cameras simultaneously) can cause the helmet image to be several frames ahead or behind the skeleton data, producing visibly desynchronized 2D/3D annotations.
+
 ### Helmet Pose Processing
 
 When multiple fixed cameras detect the checkerboard simultaneously, their pose estimates are combined for robustness:
@@ -297,6 +314,7 @@ multi_device_offline_processor.exe \
     --calibration calibration.json \
     --helmet-serial CL3FC3100HN \
     --t-checker-to-a T_checker_to_A.json \
+    --helmet-cb-rows 4 --helmet-cb-cols 5 --helmet-cb-square 30 \
     --ego-output ego_dataset/ \
     recordings/recording_cam0_*.mkv \
     recordings/recording_cam1_*.mkv \

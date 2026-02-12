@@ -965,7 +965,7 @@ struct MkvProcessor {
 };
 
 bool InitMkvProcessor(MkvProcessor& proc, const string& filepath, int deviceIndex,
-                       k4abt_tracker_configuration_t trackerConfig)
+                       k4abt_tracker_configuration_t trackerConfig, float smoothingFactor = 0.0f)
 {
     proc.filepath = filepath;
     proc.deviceIndex = deviceIndex;
@@ -1006,6 +1006,7 @@ bool InitMkvProcessor(MkvProcessor& proc, const string& filepath, int deviceInde
             k4a_playback_close(proc.playback);
             return false;
         }
+        k4abt_tracker_set_temporal_smoothing(proc.tracker, smoothingFactor);
 
         // Create transformation handle for depth→color (needed for ego-view checkerboard detection)
         proc.transformation = k4a_transformation_create(&proc.calibration);
@@ -1198,6 +1199,9 @@ void PrintUsage()
          << "  --helmet-cb-cols N       - Checkerboard inner cols (default: 5)\n"
          << "  --helmet-cb-square N     - Square size in mm (default: 30)\n"
          << "  --ego-output DIR         - Output directory for ego-view data (default: ego_output/)\n\n"
+         << "BODY TRACKING:\n"
+         << "  --sensor-orientation ORI - Sensor orientation: default, cw90, ccw90, flip180\n"
+         << "  --smoothing FACTOR       - Temporal smoothing factor 0.0-1.0 (default: 0.0)\n\n"
          << "EXAMPLE (standard):\n"
          << "  multi_device_offline_processor.exe --calibration calib.json \\\n"
          << "      --output skeleton.csv recording_cam0.mkv recording_cam1.mkv\n\n"
@@ -1220,6 +1224,8 @@ int main(int argc, char** argv)
     string outputPath = "output.csv";
     vector<string> mkvPaths;
     k4abt_tracker_processing_mode_t processingMode = K4ABT_TRACKER_PROCESSING_MODE_GPU_DIRECTML;
+    k4abt_sensor_orientation_t sensorOrientation = K4ABT_SENSOR_ORIENTATION_DEFAULT;
+    float smoothingFactor = 0.0f;
     uint64_t syncThresholdUs = 33000; // 33ms default
 
     // Ego-view arguments
@@ -1264,6 +1270,25 @@ int main(int argc, char** argv)
         }
         else if (arg == "--ego-output" && i + 1 < argc) {
             egoOutputDir = argv[++i];
+        }
+        else if (arg == "--sensor-orientation" && i + 1 < argc) {
+            string ori(argv[++i]);
+            if (ori == "default") sensorOrientation = K4ABT_SENSOR_ORIENTATION_DEFAULT;
+            else if (ori == "cw90") sensorOrientation = K4ABT_SENSOR_ORIENTATION_CLOCKWISE90;
+            else if (ori == "ccw90") sensorOrientation = K4ABT_SENSOR_ORIENTATION_COUNTERCLOCKWISE90;
+            else if (ori == "flip180") sensorOrientation = K4ABT_SENSOR_ORIENTATION_FLIP180;
+            else {
+                cerr << "Unknown sensor orientation: " << ori << endl;
+                PrintUsage();
+                return -1;
+            }
+        }
+        else if (arg == "--smoothing" && i + 1 < argc) {
+            smoothingFactor = stof(argv[++i]);
+            if (smoothingFactor < 0.0f || smoothingFactor > 1.0f) {
+                cerr << "Smoothing factor must be between 0.0 and 1.0" << endl;
+                return -1;
+            }
         }
         else if (arg == "--help" || arg == "-h") {
             PrintUsage();
@@ -1346,6 +1371,7 @@ int main(int argc, char** argv)
     // Initialize processors — first pass to identify helmet camera
     k4abt_tracker_configuration_t trackerConfig = K4ABT_TRACKER_CONFIG_DEFAULT;
     trackerConfig.processing_mode = processingMode;
+    trackerConfig.sensor_orientation = sensorOrientation;
 
     vector<MkvProcessor> processors(mkvPaths.size());
 
@@ -1393,7 +1419,7 @@ int main(int argc, char** argv)
     }
 
     for (size_t i = 0; i < mkvPaths.size(); i++) {
-        if (!InitMkvProcessor(processors[i], mkvPaths[i], (int)i, trackerConfig)) {
+        if (!InitMkvProcessor(processors[i], mkvPaths[i], (int)i, trackerConfig, smoothingFactor)) {
             cerr << "Failed to initialize processor " << i << endl;
             return -1;
         }
@@ -1428,83 +1454,99 @@ int main(int argc, char** argv)
     bool hasPrevPose = false;
     uint64_t prevPoseTimestamp = 0;
 
+    // Latest fused body data (updated when fixed cameras produce new fusion)
+    vector<FusedBody> latestFused;
+    uint64_t latestFusedTimestamp = 0;
+    uint64_t lastCsvTimestamp = 0;
+
+    // Seed all processors with their first frame
+    for (auto& proc : processors) {
+        if (!proc.isEOF) {
+            ProcessNextFrame(proc);
+        }
+    }
+
     while (!allEOF) {
-        // Advance each processor
-        for (auto& proc : processors) {
-            if (!proc.isEOF) {
-                ProcessNextFrame(proc);
+        // Find the processor with the OLDEST timestamp (most behind)
+        int nextIdx = -1;
+        uint64_t oldestTs = UINT64_MAX;
+        for (size_t i = 0; i < processors.size(); i++) {
+            if (!processors[i].isEOF && processors[i].lastTimestamp < oldestTs) {
+                oldestTs = processors[i].lastTimestamp;
+                nextIdx = (int)i;
             }
         }
 
-        // Check if all are EOF
-        allEOF = true;
-        for (const auto& proc : processors) {
-            if (!proc.isEOF) allEOF = false;
-        }
+        if (nextIdx < 0) break; // all EOF
 
-        if (allEOF) break;
+        bool isHelmetFrame = processors[nextIdx].isHelmet;
 
-        // Find minimum timestamp among non-EOF, non-helmet processors
-        uint64_t minTimestamp = UINT64_MAX;
-        for (const auto& proc : processors) {
-            if (!proc.isEOF && !proc.isHelmet && proc.lastTimestamp < minTimestamp) {
-                minTimestamp = proc.lastTimestamp;
-            }
-        }
-
-        // If all fixed cameras are EOF but helmet isn't, we're done with useful processing
-        if (minTimestamp == UINT64_MAX) break;
-
-        // Collect frames within sync threshold (fixed cameras only)
-        vector<FrameData> syncFrames;
-        for (auto& proc : processors) {
-            if (proc.isEOF || proc.isHelmet) continue;
-
-            // Check if within sync threshold
-            if (proc.lastTimestamp <= minTimestamp + syncThresholdUs) {
-                FrameData fd;
-                fd.timestamp_usec = proc.lastTimestamp;
-                fd.deviceIndex = proc.deviceIndex;
-                fd.bodies = proc.lastBodies;
-                syncFrames.push_back(fd);
-            }
-        }
-
-        // Fuse bodies
-        vector<FusedBody> fused;
-        if (!syncFrames.empty()) {
-            if (g_calibration.isLoaded && syncFrames.size() > 1) {
-                fused = FuseBodiesAtTimestamp(syncFrames);
-            } else {
-                // No fusion - just use bodies from first frame
-                for (const auto& body : syncFrames[0].bodies) {
-                    FusedBody fb;
-                    fb.id = body.id;
-                    for (int j = 0; j < K4ABT_JOINT_COUNT; j++) {
-                        fb.joints[j].position = body.skeleton.joints[j].position;
-                        fb.joints[j].orientation = body.skeleton.joints[j].orientation;
-                        fb.joints[j].confidence = body.skeleton.joints[j].confidence_level;
-                        fb.joints[j].sourceDeviceIndex = syncFrames[0].deviceIndex;
-                    }
-                    fused.push_back(fb);
+        // ================================================================
+        // Fixed camera frame: update fusion
+        // ================================================================
+        if (!isHelmetFrame) {
+            // Find minimum timestamp among fixed cameras
+            uint64_t minTimestamp = UINT64_MAX;
+            for (const auto& proc : processors) {
+                if (!proc.isEOF && !proc.isHelmet && proc.lastTimestamp < minTimestamp) {
+                    minTimestamp = proc.lastTimestamp;
                 }
             }
 
-            // Write to CSV
-            for (const auto& body : fused) {
-                WriteFusedBodyToCSV(csvFile, minTimestamp, body);
+            if (minTimestamp == UINT64_MAX) break;
+
+            // Collect frames within sync threshold (fixed cameras only)
+            vector<FrameData> syncFrames;
+            for (auto& proc : processors) {
+                if (proc.isEOF || proc.isHelmet) continue;
+                if (proc.lastTimestamp <= minTimestamp + syncThresholdUs) {
+                    FrameData fd;
+                    fd.timestamp_usec = proc.lastTimestamp;
+                    fd.deviceIndex = proc.deviceIndex;
+                    fd.bodies = proc.lastBodies;
+                    syncFrames.push_back(fd);
+                }
             }
 
-            frameCount++;
-            if (frameCount % 100 == 0) {
-                cout << "Processed " << frameCount << " frames..." << endl;
+            // Fuse bodies and update latest result
+            if (!syncFrames.empty() && minTimestamp != lastCsvTimestamp) {
+                vector<FusedBody> fused;
+                if (g_calibration.isLoaded && syncFrames.size() > 1) {
+                    fused = FuseBodiesAtTimestamp(syncFrames);
+                } else {
+                    for (const auto& body : syncFrames[0].bodies) {
+                        FusedBody fb;
+                        fb.id = body.id;
+                        for (int j = 0; j < K4ABT_JOINT_COUNT; j++) {
+                            fb.joints[j].position = body.skeleton.joints[j].position;
+                            fb.joints[j].orientation = body.skeleton.joints[j].orientation;
+                            fb.joints[j].confidence = body.skeleton.joints[j].confidence_level;
+                            fb.joints[j].sourceDeviceIndex = syncFrames[0].deviceIndex;
+                        }
+                        fused.push_back(fb);
+                    }
+                }
+
+                latestFused = fused;
+                latestFusedTimestamp = minTimestamp;
+
+                // Write to CSV
+                for (const auto& body : fused) {
+                    WriteFusedBodyToCSV(csvFile, minTimestamp, body);
+                }
+                lastCsvTimestamp = minTimestamp;
+
+                frameCount++;
+                if (frameCount % 100 == 0) {
+                    cout << "Processed " << frameCount << " frames..." << endl;
+                }
             }
         }
 
         // ================================================================
-        // Ego-view processing
+        // Helmet camera frame: generate ego-view output
         // ================================================================
-        if (egoMode && processors[helmetIdx].hasNewFrame) {
+        if (isHelmetFrame && egoMode && processors[helmetIdx].hasNewFrame) {
             cv::Size patternSize = helmetCBConfig.patternSize();
 
             // 1. Detect checkerboard on ALL fixed cameras, fuse weighted poses
@@ -1599,13 +1641,13 @@ int main(int argc, char** argv)
                 cv::imwrite(imagePath, outputImage, jpegParams);
             }
 
-            // Compute 3D/2D joints if we have pose and bodies
+            // Compute 3D/2D joints using latest fused skeleton (closest in time)
             vector<Joint3D> joints3D;
             vector<Joint2D> joints2D;
-            int numBodies = (int)fused.size();
+            int numBodies = (int)latestFused.size();
 
-            if (detectionSuccess && !fused.empty()) {
-                joints3D = TransformSkeletonToCamera(fused, helmetPose);
+            if (detectionSuccess && !latestFused.empty()) {
+                joints3D = TransformSkeletonToCamera(latestFused, helmetPose);
                 joints2D = ProjectSkeleton(joints3D, helmetCalibration);
             }
 
@@ -1619,6 +1661,15 @@ int main(int argc, char** argv)
 
             if (detectionSuccess) cbDetectedCount++;
             egoFrameCount++;
+        }
+
+        // Advance the most-behind processor to its next frame
+        ProcessNextFrame(processors[nextIdx]);
+
+        // Check if all are EOF
+        allEOF = true;
+        for (const auto& proc : processors) {
+            if (!proc.isEOF) allEOF = false;
         }
     }
 

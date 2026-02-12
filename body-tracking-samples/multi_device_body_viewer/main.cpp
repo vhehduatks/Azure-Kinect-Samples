@@ -842,6 +842,11 @@ void HelmetDetectorThread()
         bool detected = false;
         cv::Size patternSize = g_helmetCB.patternSize();
 
+        // Try all fixed cameras, pick the detection with closest checkerboard
+        // (closer = more accurate depth measurements)
+        Transform bestHelmetPose;
+        float bestAvgDepth = FLT_MAX;
+
         for (size_t i = 0; i < frames.size(); i++)
         {
             if (!frames[i].hasNewData || frames[i].colorImage.empty() || frames[i].depthImage.empty())
@@ -868,6 +873,13 @@ void HelmetDetectorThread()
             if (!HelmetConvert2DTo3D(camInfo->calibration, camInfo->transformation,
                                       frames[i].depthImage, corners, points3D))
                 continue;
+
+            // Compute average depth for quality ranking (closer = better)
+            float avgDepth = 0.0f;
+            for (const auto& p : points3D) {
+                avgDepth += std::sqrt(p.x * p.x + p.y * p.y + p.z * p.z);
+            }
+            avgDepth /= static_cast<float>(points3D.size());
 
             // Transform 3D points to world frame using calibration extrinsics
             // Match by serial number (device indices shift when cameras are added)
@@ -899,16 +911,20 @@ void HelmetDetectorThread()
                                    + checkerPose.translation;
             helmetPose.valid = true;
 
-            // Write to shared state
-            {
-                std::lock_guard<std::mutex> lock(g_helmetPoseMutex);
-                g_helmetPose = helmetPose;
-                g_helmetPoseValid = true;
-                g_helmetPoseTimestamp = std::chrono::steady_clock::now();
+            // Keep the detection from the camera closest to the checkerboard
+            if (avgDepth < bestAvgDepth) {
+                bestHelmetPose = helmetPose;
+                bestAvgDepth = avgDepth;
+                detected = true;
             }
+        }
 
-            detected = true;
-            break;  // Use first successful detection
+        if (detected)
+        {
+            std::lock_guard<std::mutex> lock(g_helmetPoseMutex);
+            g_helmetPose = bestHelmetPose;
+            g_helmetPoseValid = true;
+            g_helmetPoseTimestamp = std::chrono::steady_clock::now();
         }
 
         if (!detected)

@@ -82,6 +82,12 @@ struct Transform {
     bool valid = false;
 };
 
+struct WeightedPose {
+    Transform pose;
+    float weight;
+    int cameraIndex;
+};
+
 struct HelmetCBConfig {
     int rows = 4;
     int cols = 5;
@@ -820,11 +826,142 @@ void TransformPointsToWorld(std::vector<cv::Point3f>& points,
 }
 
 // ============================================================================
+// Weighted Multi-Camera Helmet Pose Fusion
+// ============================================================================
+Transform FuseHelmetPoses(const std::vector<WeightedPose>& candidates)
+{
+    if (candidates.empty()) {
+        Transform t;
+        return t;
+    }
+    if (candidates.size() == 1) {
+        return candidates[0].pose;
+    }
+
+    // --- Outlier rejection: median-based filtering (3+ candidates) ---
+    std::vector<WeightedPose> filtered = candidates;
+    if (filtered.size() >= 3) {
+        const double OUTLIER_THRESHOLD_MM = 100.0;
+
+        // Compute per-axis median of translations
+        std::vector<double> xs, ys, zs;
+        for (const auto& c : filtered) {
+            xs.push_back(c.pose.translation.at<double>(0));
+            ys.push_back(c.pose.translation.at<double>(1));
+            zs.push_back(c.pose.translation.at<double>(2));
+        }
+        std::sort(xs.begin(), xs.end());
+        std::sort(ys.begin(), ys.end());
+        std::sort(zs.begin(), zs.end());
+        size_t mid = xs.size() / 2;
+        double medX = xs[mid], medY = ys[mid], medZ = zs[mid];
+
+        // Compute distance from median and reject outliers
+        double minDist = (std::numeric_limits<double>::max)();
+        int closestIdx = 0;
+        for (size_t i = 0; i < filtered.size(); i++) {
+            double dx = filtered[i].pose.translation.at<double>(0) - medX;
+            double dy = filtered[i].pose.translation.at<double>(1) - medY;
+            double dz = filtered[i].pose.translation.at<double>(2) - medZ;
+            double dist = std::sqrt(dx*dx + dy*dy + dz*dz);
+            if (dist < minDist) { minDist = dist; closestIdx = static_cast<int>(i); }
+            if (dist > OUTLIER_THRESHOLD_MM) {
+                filtered[i].weight = 0.0f;
+            }
+        }
+
+        // If all rejected, fall back to closest to median
+        bool anyValid = false;
+        for (const auto& c : filtered) {
+            if (c.weight > 0.0f) { anyValid = true; break; }
+        }
+        if (!anyValid) {
+            filtered[closestIdx].weight = 1.0f;
+        }
+
+        // Remove zero-weight candidates
+        std::vector<WeightedPose> survivors;
+        for (const auto& c : filtered) {
+            if (c.weight > 0.0f) survivors.push_back(c);
+        }
+        filtered = survivors;
+    }
+
+    if (filtered.size() == 1) {
+        return filtered[0].pose;
+    }
+
+    // Weighted average of translations and rotation matrices
+    float totalWeight = 0.0f;
+    cv::Mat tFused = cv::Mat::zeros(3, 1, CV_64F);
+    cv::Mat mSum = cv::Mat::zeros(3, 3, CV_64F);
+
+    for (const auto& c : filtered) {
+        double w = static_cast<double>(c.weight);
+        totalWeight += c.weight;
+        tFused += w * c.pose.translation;
+        mSum += w * c.pose.rotation;
+    }
+
+    tFused /= static_cast<double>(totalWeight);
+    mSum /= static_cast<double>(totalWeight);
+
+    // SVD re-orthogonalization of the averaged rotation matrix
+    cv::SVD svd(mSum, cv::SVD::FULL_UV);
+    cv::Mat rFused = svd.u * svd.vt;
+
+    // Ensure proper rotation (det = +1, not reflection)
+    if (cv::determinant(rFused) < 0) {
+        cv::Mat uFixed = svd.u.clone();
+        uFixed.col(2) *= -1.0;
+        rFused = uFixed * svd.vt;
+    }
+
+    Transform result;
+    result.rotation = rFused;
+    result.translation = tFused;
+    result.valid = true;
+    return result;
+}
+
+// ============================================================================
+// EMA Temporal Smoothing for Helmet Pose
+// ============================================================================
+Transform SmoothPose(const Transform& curr, const Transform& prev, double alpha)
+{
+    // Blend translations
+    cv::Mat tSmooth = alpha * curr.translation + (1.0 - alpha) * prev.translation;
+
+    // Blend rotations via weighted sum + SVD re-orthogonalization
+    cv::Mat mBlend = alpha * curr.rotation + (1.0 - alpha) * prev.rotation;
+    cv::SVD svd(mBlend, cv::SVD::FULL_UV);
+    cv::Mat rSmooth = svd.u * svd.vt;
+    if (cv::determinant(rSmooth) < 0) {
+        cv::Mat uFixed = svd.u.clone();
+        uFixed.col(2) *= -1.0;
+        rSmooth = uFixed * svd.vt;
+    }
+
+    Transform result;
+    result.rotation = rSmooth;
+    result.translation = tSmooth;
+    result.valid = true;
+    return result;
+}
+
+// ============================================================================
 // Helmet Detector Thread
 // ============================================================================
 void HelmetDetectorThread()
 {
     std::cout << "[Helmet] Detector thread started" << std::endl;
+
+    // EMA temporal smoothing state
+    const double EMA_ALPHA = 0.75;
+    const auto STALENESS_THRESHOLD = std::chrono::milliseconds(200);
+    Transform prevSmoothedPose;
+    bool hasPrevPose = false;
+    auto prevPoseTime = std::chrono::steady_clock::now();
 
     while (g_detectorRunning)
     {
@@ -839,13 +976,10 @@ void HelmetDetectorThread()
             }
         }
 
-        bool detected = false;
         cv::Size patternSize = g_helmetCB.patternSize();
 
-        // Try all fixed cameras, pick the detection with closest checkerboard
-        // (closer = more accurate depth measurements)
-        Transform bestHelmetPose;
-        float bestAvgDepth = FLT_MAX;
+        // Collect helmet pose candidates from all fixed cameras
+        std::vector<WeightedPose> candidates;
 
         for (size_t i = 0; i < frames.size(); i++)
         {
@@ -874,7 +1008,7 @@ void HelmetDetectorThread()
                                       frames[i].depthImage, corners, points3D))
                 continue;
 
-            // Compute average depth for quality ranking (closer = better)
+            // Compute average depth for confidence weighting
             float avgDepth = 0.0f;
             for (const auto& p : points3D) {
                 avgDepth += std::sqrt(p.x * p.x + p.y * p.y + p.z * p.z);
@@ -903,38 +1037,39 @@ void HelmetDetectorThread()
             if (!checkerPose.valid) continue;
 
             // Compose with T_checker_to_A to get helmet camera pose in world
-            // helmetR = checkerR * tCheckerToA.R
-            // helmetT = checkerR * tCheckerToA.t + checkerT
             Transform helmetPose;
             helmetPose.rotation = checkerPose.rotation * g_tCheckerToA.rotation;
             helmetPose.translation = checkerPose.rotation * g_tCheckerToA.translation
                                    + checkerPose.translation;
             helmetPose.valid = true;
 
-            // Keep the detection from the camera closest to the checkerboard
-            if (avgDepth < bestAvgDepth) {
-                bestHelmetPose = helmetPose;
-                bestAvgDepth = avgDepth;
-                detected = true;
+            // Weight: inverse-square distance (depth noise scales with distance²)
+            candidates.push_back({helmetPose, 1.0f / (avgDepth * avgDepth), devIdx});
+        }
+
+        if (!candidates.empty())
+        {
+            Transform fused = FuseHelmetPoses(candidates);
+
+            // EMA temporal smoothing
+            auto now = std::chrono::steady_clock::now();
+            Transform smoothed;
+            if (hasPrevPose && (now - prevPoseTime) < STALENESS_THRESHOLD) {
+                smoothed = SmoothPose(fused, prevSmoothedPose, EMA_ALPHA);
+            } else {
+                smoothed = fused;
             }
-        }
+            prevSmoothedPose = smoothed;
+            hasPrevPose = true;
+            prevPoseTime = now;
 
-        if (detected)
-        {
             std::lock_guard<std::mutex> lock(g_helmetPoseMutex);
-            g_helmetPose = bestHelmetPose;
+            g_helmetPose = smoothed;
             g_helmetPoseValid = true;
-            g_helmetPoseTimestamp = std::chrono::steady_clock::now();
+            g_helmetPoseTimestamp = now;
         }
 
-        if (!detected)
-        {
-            std::this_thread::sleep_for(std::chrono::milliseconds(5));
-        }
-        else
-        {
-            std::this_thread::sleep_for(std::chrono::milliseconds(5));
-        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
 
     std::cout << "[Helmet] Detector thread stopped" << std::endl;

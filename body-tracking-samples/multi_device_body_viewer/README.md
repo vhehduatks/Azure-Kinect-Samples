@@ -269,9 +269,12 @@ Helmet Camera ──► Color Image ──► Project skeleton ──► cv::ims
 ```
 
 1. **Fixed cameras** detect the checkerboard on the helmet and compute its 3D pose in the world frame
-2. The checkerboard pose is composed with `T_checker_to_A` to get the helmet camera's pose
-3. Fused skeleton joints are transformed from world to helmet camera coordinates
-4. Joints are projected to 2D using `k4a_calibration_3d_to_2d` and drawn on the color image
+2. **Multi-camera fusion**: When multiple fixed cameras see the checkerboard, their pose estimates are fused using inverse-square-distance weighting
+3. **Outlier rejection**: With 3+ detections, candidates >100mm from the median translation are rejected before fusion
+4. **EMA smoothing**: Fused pose is temporally smoothed (α=0.75) to reduce frame-to-frame jitter, with a 200ms staleness guard to avoid ghost positions after detection gaps
+5. The checkerboard pose is composed with `T_checker_to_A` to get the helmet camera's pose
+6. Fused skeleton joints are transformed from world to helmet camera coordinates
+7. Joints are projected to 2D using `k4a_calibration_3d_to_2d` and drawn on the color image
 
 ### Runtime Controls
 

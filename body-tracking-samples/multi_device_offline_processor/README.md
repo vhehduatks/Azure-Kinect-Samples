@@ -57,7 +57,7 @@ The helmet camera MKV is identified by its serial number. The processor:
 1. Runs body tracking on fixed cameras only (not the helmet camera)
 2. Fuses skeletons from fixed cameras into world coordinates
 3. Detects the checkerboard (attached to helmet) in fixed camera images
-4. Computes helmet camera pose via checkerboard detection + T_checker_to_A
+4. Fuses helmet pose from multiple camera detections with outlier rejection and EMA smoothing
 5. Transforms fused 3D joints into helmet camera frame
 6. Projects 3D joints to 2D on helmet camera images
 7. Saves ego-view images and per-frame JSON annotations
@@ -228,7 +228,12 @@ Fixed MKV 2 ──► Color+Depth ──► Detect Checkerboard ───┘
                                         │
                           Convert2DTo3D → TransformToWorld → ComputeCheckerboardPose
                                         │
-                          helmetPose = checkerPose × T_checker_to_A
+                          candidatePose = checkerPose × T_checker_to_A
+                                        │
+                          FuseHelmetPoses() ──► Outlier rejection (median, 100mm)
+                                        │      Weighted fusion (1/depth²)
+                                        │
+                          SmoothPose() ──► EMA (α=0.75, 200ms staleness guard)
                                         │
                                         ▼
 Helmet MKV ──► Color Frame    3D joints: R^T × (P_world - t) → ego 3D
@@ -237,6 +242,14 @@ Helmet MKV ──► Color Frame    3D joints: R^T × (P_world - t) → ego 3D
               Save image                ▼
                    └──────── Save annotation JSON
 ```
+
+### Helmet Pose Processing
+
+When multiple fixed cameras detect the checkerboard simultaneously, their pose estimates are combined for robustness:
+
+1. **Weighted fusion** — Each detection is weighted by `1/depth²` (closer cameras have less depth noise)
+2. **Outlier rejection** — With 3+ detections, candidates whose translation is >100mm from the per-axis median are rejected before fusion. If all are rejected, the closest to the median is kept as fallback
+3. **EMA temporal smoothing** — The fused pose is blended with the previous frame's pose using an exponential moving average (α=0.75: 75% current, 25% previous). A 200ms staleness guard prevents ghost positions after detection gaps — if more than 200ms has elapsed since the last detection, the new pose snaps directly without blending
 
 ### Transform Math
 

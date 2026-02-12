@@ -1370,10 +1370,11 @@ int main(int argc, char** argv)
         if (egoMode && processors[helmetIdx].hasNewFrame) {
             cv::Size patternSize = helmetCBConfig.patternSize();
 
-            // 1. Detect checkerboard on fixed cameras
+            // 1. Detect checkerboard on ALL fixed cameras, pick closest
             Transform helmetPose;
             bool detectionSuccess = false;
             int detectionCamera = -1;
+            float bestAvgDepth = FLT_MAX;
 
             for (auto& proc : processors) {
                 if (proc.isHelmet || proc.isEOF) continue;
@@ -1390,6 +1391,13 @@ int main(int argc, char** argv)
                     continue;
                 }
 
+                // Compute average depth for quality ranking (closer = better)
+                float avgDepth = 0.0f;
+                for (const auto& p : points3D_cam) {
+                    avgDepth += sqrt(p.x * p.x + p.y * p.y + p.z * p.z);
+                }
+                avgDepth /= (float)points3D_cam.size();
+
                 // Transform corners from camera space to world space
                 if (proc.deviceIndex < (int)g_calibration.cameras.size()) {
                     TransformPointsToWorld(points3D_cam, g_calibration.cameras[proc.deviceIndex]);
@@ -1400,14 +1408,19 @@ int main(int argc, char** argv)
                 if (!checkerPose.valid) continue;
 
                 // Compose: helmetPose = checkerPose × T_checker_to_A
-                helmetPose.rotation = checkerPose.rotation * tCheckerToA.rotation;
-                helmetPose.translation = checkerPose.rotation * tCheckerToA.translation
-                                        + checkerPose.translation;
-                helmetPose.valid = true;
+                Transform candidatePose;
+                candidatePose.rotation = checkerPose.rotation * tCheckerToA.rotation;
+                candidatePose.translation = checkerPose.rotation * tCheckerToA.translation
+                                           + checkerPose.translation;
+                candidatePose.valid = true;
 
-                detectionSuccess = true;
-                detectionCamera = proc.deviceIndex;
-                break; // Use first successful detection
+                // Keep detection from closest camera (lower depth noise)
+                if (avgDepth < bestAvgDepth) {
+                    helmetPose = candidatePose;
+                    bestAvgDepth = avgDepth;
+                    detectionCamera = proc.deviceIndex;
+                    detectionSuccess = true;
+                }
             }
 
             // 2. Generate ego-view output

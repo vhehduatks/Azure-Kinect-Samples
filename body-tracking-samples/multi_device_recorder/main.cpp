@@ -38,13 +38,14 @@ std::atomic<bool> g_isRecording{false};
 std::string g_outputDir = ".";
 std::string g_sessionName = "";
 
-std::vector<std::string> g_lastFiles;   // StartReccording ¿¡¼­ ¸¸µç mkv °æ·Î
+std::vector<std::string> g_lastFiles;   // StartReccording ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ mkv ï¿½ï¿½ï¿½
 
 bool g_enableColor = true;  // RGB recording enabled by default
 
 // Recording handles (one per device)
 std::vector<k4a_record_t> g_recordings;
 std::mutex g_recordMutex;
+int g_recordSubordinateCount = 1;  // Tracks subordinate delay assignment across recordings
 
 // Device info
 struct DeviceInfo {
@@ -235,7 +236,7 @@ void StartRecording()
         return;
     }
 
-    // output dir º¸Àå
+    // output dir ï¿½ï¿½ï¿½ï¿½
     try { fs::create_directories(fs::path(g_outputDir)); }
     catch (...) {}
 
@@ -244,6 +245,7 @@ void StartRecording()
 
     g_recordings.resize(g_devices.size());
     g_lastFiles.assign(g_devices.size(), "");
+    g_recordSubordinateCount = 1;
 
     for (size_t i = 0; i < g_devices.size(); i++)
     {
@@ -269,9 +271,13 @@ void StartRecording()
         }
 
         if (g_devices.size() > 1) {
-            config.wired_sync_mode = g_devices[i].isPrimary
-                ? K4A_WIRED_SYNC_MODE_MASTER
-                : K4A_WIRED_SYNC_MODE_SUBORDINATE;
+            if (g_devices[i].isPrimary) {
+                config.wired_sync_mode = K4A_WIRED_SYNC_MODE_MASTER;
+            } else {
+                config.wired_sync_mode = K4A_WIRED_SYNC_MODE_SUBORDINATE;
+                config.subordinate_delay_off_master_usec = 160 * g_recordSubordinateCount;
+                g_recordSubordinateCount++;
+            }
         }
 
         k4a_result_t result = k4a_record_create(
@@ -358,7 +364,7 @@ void RenameLastFilesAsReset()
         std::string dir = (slash == std::string::npos) ? "" : path.substr(0, slash + 1);
         std::string name = (slash == std::string::npos) ? path : path.substr(slash + 1);
 
-        // ÀÌ¹Ì reset_ÀÌ¸é ½ºÅµ
+        // ï¿½Ì¹ï¿½ reset_ï¿½Ì¸ï¿½ ï¿½ï¿½Åµ
         if (name.rfind("RESET_", 0) == 0) continue;
 
         std::string newPath = dir + "RESET_" + name;
@@ -366,7 +372,7 @@ void RenameLastFilesAsReset()
         if (std::rename(path.c_str(), newPath.c_str()) == 0)
         {
             std::cout << "[RESET] Renamed: " << path << " -> " << newPath << std::endl;
-            path = newPath; // °»½Å
+            path = newPath; // ï¿½ï¿½ï¿½ï¿½
         }
         else
         {
@@ -411,8 +417,8 @@ void ProcessUdpCommands()
 
             // parts[0] = "START_RECORD"
             // parts[1] = sessionName
-            // parts[2] = participantID (¼±ÅÃÀûÀ¸·Î ÆÄÀÏ¸í¿¡ ¾²°í ½ÍÀ¸¸é »ç¿ë)
-            // parts[3] = outputDir (mkv ÀúÀå Æú´õ)
+            // parts[2] = participantID (ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½Ï¸ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½)
+            // parts[3] = outputDir (mkv ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½)
 
             if (parts.size() >= 2) {
                 g_sessionName = parts[1];
@@ -423,7 +429,7 @@ void ProcessUdpCommands()
                 g_outputDir = parts[3];
                 std::cout << "[UDP] OutputDir set to: " << g_outputDir << std::endl;
 
-                // Æú´õ ¾øÀ¸¸é »ý¼º
+                // ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½
                 try {
                     fs::create_directories(fs::path(g_outputDir));
                 }
@@ -623,6 +629,7 @@ int main(int argc, char** argv)
     // Configure and start cameras (secondary first)
     std::cout << "\nConfiguring devices..." << std::endl;
 
+    int subordinateCount = 1;
     for (int i = (int)deviceCount - 1; i >= 0; i--)
     {
         k4a_device_configuration_t config = K4A_DEVICE_CONFIG_INIT_DISABLE_ALL;
@@ -643,7 +650,8 @@ int main(int argc, char** argv)
                 config.wired_sync_mode = K4A_WIRED_SYNC_MODE_MASTER;
             } else {
                 config.wired_sync_mode = K4A_WIRED_SYNC_MODE_SUBORDINATE;
-                config.subordinate_delay_off_master_usec = 160 * g_devices[i].index;
+                config.subordinate_delay_off_master_usec = 160 * subordinateCount;
+                subordinateCount++;
             }
         } else {
             config.wired_sync_mode = K4A_WIRED_SYNC_MODE_STANDALONE;

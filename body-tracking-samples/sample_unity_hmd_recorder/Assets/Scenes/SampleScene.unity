@@ -1427,8 +1427,8 @@ Camera:
   m_GameObject: {fileID: 224706724}
   m_Enabled: 1
   serializedVersion: 2
-  m_ClearFlags: 1
-  m_BackGroundColor: {r: 0, g: 0, b: 0, a: 0}
+  m_ClearFlags: 2
+  m_BackGroundColor: {r: 0.7056604, g: 0.7056604, b: 0.7056604, a: 0}
   m_projectionMatrixMode: 1
   m_GateFitMode: 2
   m_FOVAxisMode: 0
@@ -3034,6 +3034,7 @@ GameObject:
   - component: {fileID: 476763454}
   - component: {fileID: 476763453}
   - component: {fileID: 476763455}
+  - component: {fileID: 476763456}
   m_Layer: 0
   m_Name: hmddatamanager
   m_TagString: Untagged
@@ -3086,26 +3087,98 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   items:
-  - text: HI
-    video: {fileID: 32900000, guid: 92f24e96347e9a643a43f0e1a92ecdd9, type: 3}
-  - text: Micho
-    video: {fileID: 32900000, guid: f0de467f4ecbbbb4cbf355794f6b2520, type: 3}
-  - text: Next
-    video: {fileID: 32900000, guid: ad216cb7be7bd7d4993dff5003115c68, type: 3}
-  recorder: {fileID: 476763453}
-  UDPcontrol: {fileID: 555143476}
-  videoPlayer: {fileID: 970341246}
-  ActionName_Control: {fileID: 0}
-  ActionName_Panel: {fileID: 537321768}
-  countdownText: {fileID: 841846104}
+  - text: Gaming-Boxing
+    video: {fileID: 32900000, guid: c5fba4c6fcd63264c8000920f8c7838a, type: 3}
+  - text: Gaming-Shooting
+    video: {fileID: 32900000, guid: 1abe817ae99dca843966216aaca26c79, type: 3}
+  - text: Gaming-Archery
+    video: {fileID: 32900000, guid: 4b628bb9c5485e045bfca756c353a20c, type: 3}
+  - text: Gaming-Golf
+    video: {fileID: 32900000, guid: 82646d0b3767e5c4ea3cd3fb97c36f3d, type: 3}
+  - text: Gaming-Baseball
+    video: {fileID: 32900000, guid: ba58b201a0a600843877380f62958770, type: 3}
+  - text: Workout-BicepCurl
+    video: {fileID: 32900000, guid: 32f17bc782e0fc0489cc0116cbfb1987, type: 3}
+  - text: Workout-KettleBell
+    video: {fileID: 32900000, guid: fb3a75797de59634f840d1af1edc3bab, type: 3}
+  - text: Workout-FrontRaise
+    video: {fileID: 32900000, guid: 7fb14abaa519a5f448cd84992a7c0634, type: 3}
+  - text: Greeting-WavingHand
+    video: {fileID: 32900000, guid: 5ae859bd397fa1041b247f3a9e060ecb, type: 3}
+  - text: Greeting-ShakingHand
+    video: {fileID: 32900000, guid: 41a7d4ac6489b11478201ece19985246, type: 3}
+  - text: Patting
+    video: {fileID: 32900000, guid: 2028daddc5c4db94ab8b4f2bf9bb5471, type: 3}
+  - text: Reacting-Cheering
+    video: {fileID: 32900000, guid: 40de3d982c98fec4fa9f66f8a7aac821, type: 3}
+  - text: Reacting-Clapping
+    video: {fileID: 32900000, guid: 60b43827208de6f4086a4b5963ed3dcc, type: 3}
+  - text: Reacting-Yelling
+    video: {fileID: 32900000, guid: 21b4fc03836946740a109cf01bc714a3, type: 3}
+  - text: Talking
+    video: {fileID: 32900000, guid: 5a90d860c7e38ee43be69e17ce4f3ceb, type: 3}
+  - text: UpperStrectching
+    video: {fileID: 32900000, guid: 5ce3fb47437db2f4aa5337e7935594bc, type: 3}
+  - text: Walking
+    video: {fileID: 32900000, guid: 87c20a23d42a28e42bb04e9f06db58a6, type: 3}
+  - text: Dancing-1
+    video: {fileID: 32900000, guid: 7cc7da7f8f957f44084701618873f085, type: 3}
+  - text: Dancing-2
+    video: {fileID: 32900000, guid: 23e729ee570415d4c8a111ad5a3f7b60, type: 3}
+  - text: Dancing-3
+    video: {fileID: 32900000, guid: ba12a629a1e560b4ca282dc7583eff4d, type: 3}
   countdownSeconds: 3
+  stopAtRecordFrame: 250
   startPos: {x: 20, y: 20}
-  buttonSize: {x: 200, y: 50}
-  spacing: 12
+  showHeaderText: 1
+  columns: 5
+  buttonSize: {x: 350, y: 50}
+  spacing: 20
+  spacingwithHeader: 380
   showResetButton: 1
   resetLabel: Reset
-  resetButtonSize: {x: 160, y: 40}
-  resetGapY: 12
+  resetButtonSize: {x: 180, y: 50}
+  recorder: {fileID: 476763453}
+  UDPcontrol: {fileID: 555143476}
+  videoPlayer: {fileID: 476763456}
+  ActionName_Panel: {fileID: 537321768}
+  countdownText: {fileID: 841846104}
+--- !u!328 &476763456
+VideoPlayer:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 476763452}
+  m_Enabled: 1
+  m_VideoClip: {fileID: 0}
+  m_TargetCameraAlpha: 1
+  m_TargetCamera3DLayout: 0
+  m_TargetCamera: {fileID: 0}
+  m_TargetTexture: {fileID: 8400000, guid: 5db1e327dfb8bb9469d584d3d14bc006, type: 2}
+  m_TimeReference: 0
+  m_TargetMaterialRenderer: {fileID: 0}
+  m_TargetMaterialProperty: <noninit>
+  m_RenderMode: 2
+  m_AspectRatio: 2
+  m_DataSource: 0
+  m_TimeUpdateMode: 2
+  m_PlaybackSpeed: 1
+  m_AudioOutputMode: 2
+  m_TargetAudioSources:
+  - {fileID: 0}
+  m_DirectAudioVolumes:
+  - 1
+  m_Url: 
+  m_EnabledAudioTracks: 01
+  m_DirectAudioMutes: 00
+  m_ControlledAudioTrackCount: 1
+  m_PlayOnAwake: 1
+  m_SkipOnDrop: 1
+  m_Looping: 0
+  m_WaitForFirstFrame: 1
+  m_FrameReadyEventEnabled: 0
+  m_VideoShaders: []
 --- !u!1 &499976197
 GameObject:
   m_ObjectHideFlags: 0
@@ -6502,7 +6575,7 @@ GameObject:
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
   m_StaticEditorFlags: 0
-  m_IsActive: 1
+  m_IsActive: 0
 --- !u!328 &970341246
 VideoPlayer:
   m_ObjectHideFlags: 0

@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 // Multi-device offline body tracking processor
 // Processes MKV recordings from multiple cameras with skeleton fusion
+// Supports ego-view processing with helmet-mounted camera
 
 #include <iostream>
 #include <fstream>
@@ -12,17 +13,22 @@
 #include <iomanip>
 #include <cmath>
 #include <algorithm>
+#include <filesystem>
 
 #include <k4a/k4a.h>
 #include <k4arecord/playback.h>
 #include <k4abt.h>
 #include <nlohmann/json.hpp>
 
+#include <opencv2/opencv.hpp>
+#include <opencv2/calib3d.hpp>
+
 #include <BodyTrackingHelpers.h>
 #include <Utilities.h>
 
 using namespace std;
 using json = nlohmann::json;
+namespace fs = std::filesystem;
 
 // ============================================================================
 // Calibration Data Structures
@@ -60,6 +66,41 @@ struct FrameData {
     uint64_t timestamp_usec;
     int deviceIndex;
     vector<k4abt_body_t> bodies;
+};
+
+// ============================================================================
+// Ego-View Data Structures
+// ============================================================================
+struct Transform {
+    cv::Mat rotation;       // 3x3 CV_64F
+    cv::Mat translation;    // 3x1 CV_64F
+    bool valid = false;
+};
+
+struct WeightedPose {
+    Transform pose;
+    float weight;
+    int cameraIndex;
+};
+
+struct HelmetCBConfig {
+    int rows = 4;
+    int cols = 5;
+    float squareMm = 30.0f;
+    cv::Size patternSize() const { return cv::Size(cols, rows); }
+};
+
+struct Joint3D {
+    float x, y, z;
+    int confidence;
+    string name;
+};
+
+struct Joint2D {
+    float u, v;
+    int confidence;
+    bool visible;
+    string name;
 };
 
 // ============================================================================
@@ -203,6 +244,507 @@ bool LoadCalibration(const string& path, CalibrationData& cal)
         cerr << "Error parsing calibration JSON: " << e.what() << endl;
         return false;
     }
+}
+
+// ============================================================================
+// Ego-View: Transform Loading
+// ============================================================================
+bool LoadTransform(const string& path, Transform& t)
+{
+    ifstream file(path);
+    if (!file.is_open()) {
+        cerr << "Failed to open transform: " << path << endl;
+        return false;
+    }
+
+    try {
+        json j;
+        file >> j;
+
+        t.rotation = cv::Mat(3, 3, CV_64F);
+        t.translation = cv::Mat(3, 1, CV_64F);
+
+        for (int r = 0; r < 3; r++) {
+            for (int c = 0; c < 3; c++) {
+                t.rotation.at<double>(r, c) = j["rotation"][r][c];
+            }
+        }
+
+        for (int i = 0; i < 3; i++) {
+            t.translation.at<double>(i, 0) = j["translation"][i];
+        }
+
+        t.valid = true;
+        return true;
+    }
+    catch (const exception& e) {
+        cerr << "Error parsing transform: " << e.what() << endl;
+        return false;
+    }
+}
+
+// ============================================================================
+// Ego-View: Checkerboard Detection
+// ============================================================================
+bool DetectCheckerboardCorners(const cv::Mat& colorImage,
+                                vector<cv::Point2f>& corners,
+                                cv::Size patternSize)
+{
+    cv::Mat gray;
+    if (colorImage.channels() == 4) {
+        cv::cvtColor(colorImage, gray, cv::COLOR_BGRA2GRAY);
+    } else if (colorImage.channels() == 3) {
+        cv::cvtColor(colorImage, gray, cv::COLOR_BGR2GRAY);
+    } else {
+        gray = colorImage;
+    }
+
+    bool found = cv::findChessboardCorners(gray, patternSize, corners,
+        cv::CALIB_CB_ADAPTIVE_THRESH |
+        cv::CALIB_CB_NORMALIZE_IMAGE);
+
+    if (found) {
+        cv::cornerSubPix(gray, corners, cv::Size(11, 11), cv::Size(-1, -1),
+            cv::TermCriteria(cv::TermCriteria::EPS + cv::TermCriteria::COUNT, 30, 0.001));
+    }
+
+    return found;
+}
+
+// Convert 2D corners to 3D using depth image
+bool Convert2DTo3DOffline(const k4a_calibration_t& calibration,
+                           k4a_transformation_t transformation,
+                           const cv::Mat& depthImage,
+                           const vector<cv::Point2f>& corners2D,
+                           vector<cv::Point3f>& points3D)
+{
+    points3D.clear();
+
+    int colorWidth = calibration.color_camera_calibration.resolution_width;
+    int colorHeight = calibration.color_camera_calibration.resolution_height;
+
+    // Transform depth to color space
+    k4a_image_t depthK4a = nullptr;
+    k4a_image_create(K4A_IMAGE_FORMAT_DEPTH16,
+        depthImage.cols, depthImage.rows,
+        depthImage.cols * (int)sizeof(uint16_t), &depthK4a);
+    memcpy(k4a_image_get_buffer(depthK4a), depthImage.data,
+        depthImage.total() * sizeof(uint16_t));
+
+    k4a_image_t transformedDepth = nullptr;
+    k4a_image_create(K4A_IMAGE_FORMAT_DEPTH16,
+        colorWidth, colorHeight,
+        colorWidth * (int)sizeof(uint16_t), &transformedDepth);
+
+    k4a_result_t result = k4a_transformation_depth_image_to_color_camera(
+        transformation, depthK4a, transformedDepth);
+
+    if (result != K4A_RESULT_SUCCEEDED) {
+        k4a_image_release(depthK4a);
+        k4a_image_release(transformedDepth);
+        return false;
+    }
+
+    uint16_t* depthBuffer = reinterpret_cast<uint16_t*>(
+        k4a_image_get_buffer(transformedDepth));
+
+    for (const auto& corner : corners2D) {
+        int x = static_cast<int>(round(corner.x));
+        int y = static_cast<int>(round(corner.y));
+
+        // Sample 3x3 neighborhood for robustness
+        float depthSum = 0;
+        int validCount = 0;
+
+        for (int dy = -1; dy <= 1; dy++) {
+            for (int dx = -1; dx <= 1; dx++) {
+                int nx = x + dx;
+                int ny = y + dy;
+
+                if (nx >= 0 && nx < colorWidth && ny >= 0 && ny < colorHeight) {
+                    uint16_t d = depthBuffer[ny * colorWidth + nx];
+                    if (d > 0) {
+                        depthSum += d;
+                        validCount++;
+                    }
+                }
+            }
+        }
+
+        if (validCount == 0) {
+            k4a_image_release(depthK4a);
+            k4a_image_release(transformedDepth);
+            return false;
+        }
+
+        float depthMm = depthSum / validCount;
+
+        k4a_float2_t point2d = { corner.x, corner.y };
+        k4a_float3_t point3d;
+        int valid = 0;
+
+        k4a_calibration_2d_to_3d(&calibration, &point2d, depthMm,
+            K4A_CALIBRATION_TYPE_COLOR, K4A_CALIBRATION_TYPE_COLOR,
+            &point3d, &valid);
+
+        if (!valid) {
+            k4a_image_release(depthK4a);
+            k4a_image_release(transformedDepth);
+            return false;
+        }
+
+        points3D.push_back(cv::Point3f(point3d.xyz.x, point3d.xyz.y, point3d.xyz.z));
+    }
+
+    k4a_image_release(depthK4a);
+    k4a_image_release(transformedDepth);
+    return true;
+}
+
+// Transform 3D points from camera space to world space
+void TransformPointsToWorld(vector<cv::Point3f>& points, const CameraExtrinsics& ext)
+{
+    cv::Mat R(3, 3, CV_32F);
+    cv::Mat t(3, 1, CV_32F);
+
+    for (int r = 0; r < 3; r++) {
+        for (int c = 0; c < 3; c++) {
+            R.at<float>(r, c) = ext.rotation[r][c];
+        }
+        t.at<float>(r, 0) = ext.translation[r];
+    }
+
+    for (auto& p : points) {
+        cv::Mat pt = (cv::Mat_<float>(3, 1) << p.x, p.y, p.z);
+        cv::Mat result = R * pt + t;
+        p.x = result.at<float>(0);
+        p.y = result.at<float>(1);
+        p.z = result.at<float>(2);
+    }
+}
+
+// Compute checkerboard pose from 3D points in world space
+Transform ComputeCheckerboardPose(const vector<cv::Point3f>& points3D,
+                                   cv::Size patternSize)
+{
+    Transform result;
+
+    if ((int)points3D.size() < patternSize.width * patternSize.height) return result;
+
+    // Compute centroid
+    cv::Point3f centroid(0, 0, 0);
+    for (const auto& p : points3D) {
+        centroid += p;
+    }
+    centroid *= (1.0f / points3D.size());
+
+    // Use first row direction as X axis
+    cv::Point3f x_axis = points3D[patternSize.width - 1] - points3D[0];
+    float x_norm = (float)cv::norm(x_axis);
+    if (x_norm < 1e-6f) return result;
+    x_axis /= x_norm;
+
+    // Use first column direction as Y axis
+    cv::Point3f y_axis = points3D[(patternSize.height - 1) * patternSize.width] - points3D[0];
+    float y_norm = (float)cv::norm(y_axis);
+    if (y_norm < 1e-6f) return result;
+    y_axis /= y_norm;
+
+    // Z axis from cross product
+    cv::Point3f z_axis = x_axis.cross(y_axis);
+    float z_norm = (float)cv::norm(z_axis);
+    if (z_norm < 1e-6f) return result;
+    z_axis /= z_norm;
+
+    // Re-orthogonalize Y
+    y_axis = z_axis.cross(x_axis);
+    y_axis /= (float)cv::norm(y_axis);
+
+    result.rotation = cv::Mat(3, 3, CV_64F);
+    result.rotation.at<double>(0, 0) = x_axis.x;
+    result.rotation.at<double>(1, 0) = x_axis.y;
+    result.rotation.at<double>(2, 0) = x_axis.z;
+    result.rotation.at<double>(0, 1) = y_axis.x;
+    result.rotation.at<double>(1, 1) = y_axis.y;
+    result.rotation.at<double>(2, 1) = y_axis.z;
+    result.rotation.at<double>(0, 2) = z_axis.x;
+    result.rotation.at<double>(1, 2) = z_axis.y;
+    result.rotation.at<double>(2, 2) = z_axis.z;
+
+    result.translation = cv::Mat(3, 1, CV_64F);
+    result.translation.at<double>(0, 0) = centroid.x;
+    result.translation.at<double>(1, 0) = centroid.y;
+    result.translation.at<double>(2, 0) = centroid.z;
+
+    result.valid = true;
+    return result;
+}
+
+// ============================================================================
+// Weighted Multi-Camera Helmet Pose Fusion
+// ============================================================================
+Transform FuseHelmetPoses(const vector<WeightedPose>& candidates)
+{
+    if (candidates.empty()) {
+        Transform t;
+        return t;
+    }
+    if (candidates.size() == 1) {
+        return candidates[0].pose;
+    }
+
+    // --- Outlier rejection: median-based filtering (3+ candidates) ---
+    vector<WeightedPose> filtered = candidates;
+    if (filtered.size() >= 3) {
+        const double OUTLIER_THRESHOLD_MM = 100.0;
+
+        // Compute per-axis median of translations
+        vector<double> xs, ys, zs;
+        for (const auto& c : filtered) {
+            xs.push_back(c.pose.translation.at<double>(0));
+            ys.push_back(c.pose.translation.at<double>(1));
+            zs.push_back(c.pose.translation.at<double>(2));
+        }
+        sort(xs.begin(), xs.end());
+        sort(ys.begin(), ys.end());
+        sort(zs.begin(), zs.end());
+        size_t mid = xs.size() / 2;
+        double medX = xs[mid], medY = ys[mid], medZ = zs[mid];
+
+        // Compute distance from median and reject outliers
+        double minDist = numeric_limits<double>::max();
+        int closestIdx = 0;
+        for (size_t i = 0; i < filtered.size(); i++) {
+            double dx = filtered[i].pose.translation.at<double>(0) - medX;
+            double dy = filtered[i].pose.translation.at<double>(1) - medY;
+            double dz = filtered[i].pose.translation.at<double>(2) - medZ;
+            double dist = sqrt(dx*dx + dy*dy + dz*dz);
+            if (dist < minDist) { minDist = dist; closestIdx = static_cast<int>(i); }
+            if (dist > OUTLIER_THRESHOLD_MM) {
+                filtered[i].weight = 0.0f;
+            }
+        }
+
+        // If all rejected, fall back to closest to median
+        bool anyValid = false;
+        for (const auto& c : filtered) {
+            if (c.weight > 0.0f) { anyValid = true; break; }
+        }
+        if (!anyValid) {
+            filtered[closestIdx].weight = 1.0f;
+        }
+
+        // Remove zero-weight candidates
+        vector<WeightedPose> survivors;
+        for (const auto& c : filtered) {
+            if (c.weight > 0.0f) survivors.push_back(c);
+        }
+        filtered = survivors;
+    }
+
+    if (filtered.size() == 1) {
+        return filtered[0].pose;
+    }
+
+    // Weighted average of translations and rotation matrices
+    float totalWeight = 0.0f;
+    cv::Mat tFused = cv::Mat::zeros(3, 1, CV_64F);
+    cv::Mat mSum = cv::Mat::zeros(3, 3, CV_64F);
+
+    for (const auto& c : filtered) {
+        double w = static_cast<double>(c.weight);
+        totalWeight += c.weight;
+        tFused += w * c.pose.translation;
+        mSum += w * c.pose.rotation;
+    }
+
+    tFused /= static_cast<double>(totalWeight);
+    mSum /= static_cast<double>(totalWeight);
+
+    // SVD re-orthogonalization of the averaged rotation matrix
+    cv::SVD svd(mSum, cv::SVD::FULL_UV);
+    cv::Mat rFused = svd.u * svd.vt;
+
+    // Ensure proper rotation (det = +1, not reflection)
+    if (cv::determinant(rFused) < 0) {
+        cv::Mat uFixed = svd.u.clone();
+        uFixed.col(2) *= -1.0;
+        rFused = uFixed * svd.vt;
+    }
+
+    Transform result;
+    result.rotation = rFused;
+    result.translation = tFused;
+    result.valid = true;
+    return result;
+}
+
+// ============================================================================
+// EMA Temporal Smoothing for Helmet Pose
+// ============================================================================
+Transform SmoothPose(const Transform& curr, const Transform& prev, double alpha)
+{
+    // Blend translations
+    cv::Mat tSmooth = alpha * curr.translation + (1.0 - alpha) * prev.translation;
+
+    // Blend rotations via weighted sum + SVD re-orthogonalization
+    cv::Mat mBlend = alpha * curr.rotation + (1.0 - alpha) * prev.rotation;
+    cv::SVD svd(mBlend, cv::SVD::FULL_UV);
+    cv::Mat rSmooth = svd.u * svd.vt;
+    if (cv::determinant(rSmooth) < 0) {
+        cv::Mat uFixed = svd.u.clone();
+        uFixed.col(2) *= -1.0;
+        rSmooth = uFixed * svd.vt;
+    }
+
+    Transform result;
+    result.rotation = rSmooth;
+    result.translation = tSmooth;
+    result.valid = true;
+    return result;
+}
+
+// Transform fused skeleton joints from world to helmet camera frame
+vector<Joint3D> TransformSkeletonToCamera(const vector<FusedBody>& fusedBodies,
+                                           const Transform& helmetPose)
+{
+    vector<Joint3D> result;
+    if (fusedBodies.empty()) return result;
+
+    // Use first body
+    const FusedBody& body = fusedBodies[0];
+
+    cv::Mat R_inv = helmetPose.rotation.t();
+
+    for (int j = 0; j < K4ABT_JOINT_COUNT; j++) {
+        cv::Mat p_world = (cv::Mat_<double>(3, 1) <<
+            (double)body.joints[j].position.xyz.x,
+            (double)body.joints[j].position.xyz.y,
+            (double)body.joints[j].position.xyz.z);
+
+        cv::Mat p_offset = p_world - helmetPose.translation;
+        cv::Mat p_cam = R_inv * p_offset;
+
+        Joint3D jt;
+        jt.x = (float)p_cam.at<double>(0);
+        jt.y = (float)p_cam.at<double>(1);
+        jt.z = (float)p_cam.at<double>(2);
+        jt.confidence = (int)body.joints[j].confidence;
+
+        auto it = g_jointNames.find(static_cast<k4abt_joint_id_t>(j));
+        jt.name = (it != g_jointNames.end()) ? it->second : "UNKNOWN";
+
+        result.push_back(jt);
+    }
+
+    return result;
+}
+
+// Project 3D joints (in helmet camera frame) to 2D image coordinates
+vector<Joint2D> ProjectSkeleton(const vector<Joint3D>& skeleton3D,
+                                 const k4a_calibration_t& calibration)
+{
+    vector<Joint2D> result(skeleton3D.size());
+
+    int width = calibration.color_camera_calibration.resolution_width;
+    int height = calibration.color_camera_calibration.resolution_height;
+
+    for (size_t i = 0; i < skeleton3D.size(); i++) {
+        const auto& joint = skeleton3D[i];
+        result[i].name = joint.name;
+        result[i].confidence = joint.confidence;
+
+        if (joint.z <= 0) {
+            result[i].u = 0;
+            result[i].v = 0;
+            result[i].visible = false;
+            continue;
+        }
+
+        k4a_float3_t point3d = { joint.x, joint.y, joint.z };
+        k4a_float2_t point2d;
+        int valid = 0;
+
+        k4a_calibration_3d_to_2d(&calibration, &point3d,
+            K4A_CALIBRATION_TYPE_COLOR, K4A_CALIBRATION_TYPE_COLOR,
+            &point2d, &valid);
+
+        if (valid) {
+            result[i].u = point2d.xy.x;
+            result[i].v = point2d.xy.y;
+            result[i].visible = (point2d.xy.x >= 0 && point2d.xy.x < width &&
+                                  point2d.xy.y >= 0 && point2d.xy.y < height);
+        } else {
+            result[i].u = 0;
+            result[i].v = 0;
+            result[i].visible = false;
+        }
+    }
+
+    return result;
+}
+
+// ============================================================================
+// Ego-View: Output Writers
+// ============================================================================
+void WriteEgoFrameJson(const string& path, int frameId, uint64_t timestamp,
+                       bool checkerboardDetected, int detectionCamera,
+                       const Transform& helmetPose,
+                       const vector<Joint3D>& joints3D,
+                       const vector<Joint2D>& joints2D,
+                       const string& imageFile,
+                       int numBodies)
+{
+    json j;
+    j["frame_id"] = frameId;
+    j["timestamp_usec"] = timestamp;
+    j["image_file"] = imageFile;
+    j["checkerboard_detected"] = checkerboardDetected;
+    j["detection_camera"] = detectionCamera;
+    j["num_bodies"] = numBodies;
+
+    if (helmetPose.valid) {
+        j["camera_pose"]["R"] = json::array();
+        for (int r = 0; r < 3; r++) {
+            j["camera_pose"]["R"].push_back({
+                helmetPose.rotation.at<double>(r, 0),
+                helmetPose.rotation.at<double>(r, 1),
+                helmetPose.rotation.at<double>(r, 2)
+            });
+        }
+        j["camera_pose"]["t"] = {
+            helmetPose.translation.at<double>(0),
+            helmetPose.translation.at<double>(1),
+            helmetPose.translation.at<double>(2)
+        };
+    }
+
+    j["skeleton_3d"] = json::array();
+    for (size_t i = 0; i < joints3D.size(); i++) {
+        j["skeleton_3d"].push_back({
+            {"joint_id", i},
+            {"name", joints3D[i].name},
+            {"x", joints3D[i].x},
+            {"y", joints3D[i].y},
+            {"z", joints3D[i].z},
+            {"confidence", joints3D[i].confidence}
+        });
+    }
+
+    j["skeleton_2d"] = json::array();
+    for (size_t i = 0; i < joints2D.size(); i++) {
+        j["skeleton_2d"].push_back({
+            {"joint_id", i},
+            {"name", joints2D[i].name},
+            {"u", joints2D[i].u},
+            {"v", joints2D[i].v},
+            {"confidence", joints2D[i].confidence},
+            {"visible", joints2D[i].visible}
+        });
+    }
+
+    ofstream file(path);
+    file << setw(2) << j << endl;
 }
 
 // ============================================================================
@@ -412,6 +954,14 @@ struct MkvProcessor {
     bool isEOF = false;
     uint64_t lastTimestamp = 0;
     vector<k4abt_body_t> lastBodies;
+
+    // Ego-view fields
+    bool isHelmet = false;
+    k4a_calibration_t calibration = {};
+    k4a_transformation_t transformation = nullptr;
+    cv::Mat lastColorImage;
+    cv::Mat lastDepthImage;
+    bool hasNewFrame = false;
 };
 
 bool InitMkvProcessor(MkvProcessor& proc, const string& filepath, int deviceIndex,
@@ -427,19 +977,10 @@ bool InitMkvProcessor(MkvProcessor& proc, const string& filepath, int deviceInde
         return false;
     }
 
-    // Get calibration
-    k4a_calibration_t calibration;
-    result = k4a_playback_get_calibration(proc.playback, &calibration);
+    // Get calibration (always stored for ego-view)
+    result = k4a_playback_get_calibration(proc.playback, &proc.calibration);
     if (result != K4A_RESULT_SUCCEEDED) {
         cerr << "Failed to get calibration from: " << filepath << endl;
-        k4a_playback_close(proc.playback);
-        return false;
-    }
-
-    // Create body tracker
-    result = k4abt_tracker_create(&calibration, trackerConfig, &proc.tracker);
-    if (result != K4A_RESULT_SUCCEEDED) {
-        cerr << "Failed to create tracker for: " << filepath << endl;
         k4a_playback_close(proc.playback);
         return false;
     }
@@ -453,8 +994,25 @@ bool InitMkvProcessor(MkvProcessor& proc, const string& filepath, int deviceInde
         proc.serialNumber = "unknown_" + to_string(deviceIndex);
     }
 
-    cout << "Initialized processor for device " << deviceIndex
-         << " (SN: " << proc.serialNumber << "): " << filepath << endl;
+    if (proc.isHelmet) {
+        // Helmet camera: no body tracker, no depth→color transformation needed
+        cout << "Initialized HELMET processor for device " << deviceIndex
+             << " (SN: " << proc.serialNumber << "): " << filepath << endl;
+    } else {
+        // Fixed camera: create body tracker and depth→color transformation
+        result = k4abt_tracker_create(&proc.calibration, trackerConfig, &proc.tracker);
+        if (result != K4A_RESULT_SUCCEEDED) {
+            cerr << "Failed to create tracker for: " << filepath << endl;
+            k4a_playback_close(proc.playback);
+            return false;
+        }
+
+        // Create transformation handle for depth→color (needed for ego-view checkerboard detection)
+        proc.transformation = k4a_transformation_create(&proc.calibration);
+
+        cout << "Initialized processor for device " << deviceIndex
+             << " (SN: " << proc.serialNumber << "): " << filepath << endl;
+    }
 
     return true;
 }
@@ -462,6 +1020,8 @@ bool InitMkvProcessor(MkvProcessor& proc, const string& filepath, int deviceInde
 bool ProcessNextFrame(MkvProcessor& proc)
 {
     if (proc.isEOF) return false;
+
+    proc.hasNewFrame = false;
 
     k4a_capture_t capture = nullptr;
     k4a_stream_result_t streamResult = k4a_playback_get_next_capture(proc.playback, &capture);
@@ -477,14 +1037,66 @@ bool ProcessNextFrame(MkvProcessor& proc)
         return false;
     }
 
-    // Check if capture has depth image
+    if (proc.isHelmet) {
+        // Helmet camera: extract color image only (no body tracking)
+        k4a_image_t color = k4a_capture_get_color_image(capture);
+        if (color) {
+            proc.lastTimestamp = k4a_image_get_device_timestamp_usec(color);
+
+            int width = k4a_image_get_width_pixels(color);
+            int height = k4a_image_get_height_pixels(color);
+            k4a_image_format_t format = k4a_image_get_format(color);
+
+            if (format == K4A_IMAGE_FORMAT_COLOR_BGRA32) {
+                proc.lastColorImage = cv::Mat(height, width, CV_8UC4,
+                    k4a_image_get_buffer(color)).clone();
+            } else if (format == K4A_IMAGE_FORMAT_COLOR_MJPG) {
+                vector<uint8_t> buffer(k4a_image_get_buffer(color),
+                    k4a_image_get_buffer(color) + k4a_image_get_size(color));
+                proc.lastColorImage = cv::imdecode(buffer, cv::IMREAD_COLOR);
+            }
+
+            k4a_image_release(color);
+            proc.hasNewFrame = true;
+        }
+
+        k4a_capture_release(capture);
+        return proc.hasNewFrame;
+    }
+
+    // Fixed camera: body tracking + image extraction
     k4a_image_t depth = k4a_capture_get_depth_image(capture);
     if (depth == nullptr) {
         k4a_capture_release(capture);
         return true; // Skip frame, but continue processing
     }
 
-    // Enqueue capture
+    // Extract color and depth images for ego-view checkerboard detection
+    k4a_image_t color = k4a_capture_get_color_image(capture);
+    if (color) {
+        int width = k4a_image_get_width_pixels(color);
+        int height = k4a_image_get_height_pixels(color);
+        k4a_image_format_t format = k4a_image_get_format(color);
+
+        if (format == K4A_IMAGE_FORMAT_COLOR_BGRA32) {
+            proc.lastColorImage = cv::Mat(height, width, CV_8UC4,
+                k4a_image_get_buffer(color)).clone();
+        } else if (format == K4A_IMAGE_FORMAT_COLOR_MJPG) {
+            vector<uint8_t> buffer(k4a_image_get_buffer(color),
+                k4a_image_get_buffer(color) + k4a_image_get_size(color));
+            proc.lastColorImage = cv::imdecode(buffer, cv::IMREAD_COLOR);
+        }
+        k4a_image_release(color);
+    }
+
+    {
+        int dw = k4a_image_get_width_pixels(depth);
+        int dh = k4a_image_get_height_pixels(depth);
+        proc.lastDepthImage = cv::Mat(dh, dw, CV_16UC1,
+            k4a_image_get_buffer(depth)).clone();
+    }
+
+    // Enqueue capture for body tracking
     k4a_wait_result_t queueResult = k4abt_tracker_enqueue_capture(proc.tracker, capture, K4A_WAIT_INFINITE);
     k4a_image_release(depth);
     k4a_capture_release(capture);
@@ -517,6 +1129,7 @@ bool ProcessNextFrame(MkvProcessor& proc)
     }
 
     k4abt_frame_release(bodyFrame);
+    proc.hasNewFrame = true;
     return true;
 }
 
@@ -526,6 +1139,10 @@ void CloseMkvProcessor(MkvProcessor& proc)
         k4abt_tracker_shutdown(proc.tracker);
         k4abt_tracker_destroy(proc.tracker);
         proc.tracker = nullptr;
+    }
+    if (proc.transformation) {
+        k4a_transformation_destroy(proc.transformation);
+        proc.transformation = nullptr;
     }
     if (proc.playback) {
         k4a_playback_close(proc.playback);
@@ -564,18 +1181,31 @@ void WriteFusedBodyToCSV(ofstream& file, uint64_t timestamp, const FusedBody& bo
 void PrintUsage()
 {
     cout << "\n=== Multi-Device Offline Body Tracking Processor ===\n"
-         << "Processes MKV recordings from multiple cameras with skeleton fusion.\n\n"
+         << "Processes MKV recordings from multiple cameras with skeleton fusion.\n"
+         << "Supports ego-view processing with helmet-mounted camera.\n\n"
          << "USAGE:\n"
          << "  multi_device_offline_processor.exe [OPTIONS] <mkv1> <mkv2> ...\n\n"
          << "OPTIONS:\n"
-         << "  --calibration FILE   - Calibration JSON file (required for fusion)\n"
-         << "  --output FILE        - Output CSV file (default: output.csv)\n"
-         << "  --mode MODE          - Processing mode: CPU, CUDA, DirectML (default), TensorRT\n"
-         << "  --sync-threshold MS  - Max timestamp difference for sync (default: 33ms)\n"
-         << "  --help               - Show this help\n\n"
-         << "EXAMPLE:\n"
+         << "  --calibration FILE       - Calibration JSON file (required for fusion)\n"
+         << "  --output FILE            - Output CSV file (default: output.csv)\n"
+         << "  --mode MODE              - Processing mode: CPU, CUDA, DirectML (default), TensorRT\n"
+         << "  --sync-threshold MS      - Max timestamp difference for sync (default: 33ms)\n"
+         << "  --help                   - Show this help\n\n"
+         << "EGO-VIEW OPTIONS:\n"
+         << "  --helmet-serial SERIAL   - Serial number of helmet camera MKV\n"
+         << "  --t-checker-to-a PATH    - Path to T_checker_to_A.json\n"
+         << "  --helmet-cb-rows N       - Checkerboard inner rows (default: 4)\n"
+         << "  --helmet-cb-cols N       - Checkerboard inner cols (default: 5)\n"
+         << "  --helmet-cb-square N     - Square size in mm (default: 30)\n"
+         << "  --ego-output DIR         - Output directory for ego-view data (default: ego_output/)\n\n"
+         << "EXAMPLE (standard):\n"
          << "  multi_device_offline_processor.exe --calibration calib.json \\\n"
-         << "      --output skeleton.csv recording_cam0.mkv recording_cam1.mkv\n"
+         << "      --output skeleton.csv recording_cam0.mkv recording_cam1.mkv\n\n"
+         << "EXAMPLE (ego-view):\n"
+         << "  multi_device_offline_processor.exe --calibration calib.json \\\n"
+         << "      --helmet-serial CL3FC3100HN --t-checker-to-a T_checker_to_A.json \\\n"
+         << "      --ego-output ego_dataset/ \\\n"
+         << "      cam0.mkv cam1.mkv cam2.mkv helmet.mkv\n"
          << endl;
 }
 
@@ -591,6 +1221,12 @@ int main(int argc, char** argv)
     vector<string> mkvPaths;
     k4abt_tracker_processing_mode_t processingMode = K4ABT_TRACKER_PROCESSING_MODE_GPU_DIRECTML;
     uint64_t syncThresholdUs = 33000; // 33ms default
+
+    // Ego-view arguments
+    string helmetSerial;
+    string tCheckerToAPath;
+    string egoOutputDir = "ego_output";
+    HelmetCBConfig helmetCBConfig;
 
     for (int i = 1; i < argc; i++) {
         string arg(argv[i]);
@@ -610,6 +1246,24 @@ int main(int argc, char** argv)
         }
         else if (arg == "--sync-threshold" && i + 1 < argc) {
             syncThresholdUs = (uint64_t)(stod(argv[++i]) * 1000);
+        }
+        else if (arg == "--helmet-serial" && i + 1 < argc) {
+            helmetSerial = argv[++i];
+        }
+        else if (arg == "--t-checker-to-a" && i + 1 < argc) {
+            tCheckerToAPath = argv[++i];
+        }
+        else if (arg == "--helmet-cb-rows" && i + 1 < argc) {
+            helmetCBConfig.rows = stoi(argv[++i]);
+        }
+        else if (arg == "--helmet-cb-cols" && i + 1 < argc) {
+            helmetCBConfig.cols = stoi(argv[++i]);
+        }
+        else if (arg == "--helmet-cb-square" && i + 1 < argc) {
+            helmetCBConfig.squareMm = stof(argv[++i]);
+        }
+        else if (arg == "--ego-output" && i + 1 < argc) {
+            egoOutputDir = argv[++i];
         }
         else if (arg == "--help" || arg == "-h") {
             PrintUsage();
@@ -631,15 +1285,41 @@ int main(int argc, char** argv)
         return -1;
     }
 
+    bool egoMode = !helmetSerial.empty();
+
+    if (egoMode) {
+        if (tCheckerToAPath.empty()) {
+            cerr << "Error: --t-checker-to-a is required for ego-view mode!" << endl;
+            return -1;
+        }
+        if (calibrationPath.empty()) {
+            cerr << "Error: --calibration is required for ego-view mode!" << endl;
+            return -1;
+        }
+    }
+
     cout << "Input MKV files: " << mkvPaths.size() << endl;
     for (size_t i = 0; i < mkvPaths.size(); i++) {
         cout << "  [" << i << "] " << mkvPaths[i] << endl;
+    }
+
+    if (egoMode) {
+        cout << "\nEgo-view mode ENABLED" << endl;
+        cout << "  Helmet serial: " << helmetSerial << endl;
+        cout << "  T_checker_to_A: " << tCheckerToAPath << endl;
+        cout << "  Checkerboard: " << helmetCBConfig.rows << "x" << helmetCBConfig.cols
+             << " (" << helmetCBConfig.squareMm << "mm)" << endl;
+        cout << "  Ego output: " << egoOutputDir << endl;
     }
 
     // Load calibration
     if (!calibrationPath.empty()) {
         cout << "\nLoading calibration: " << calibrationPath << endl;
         if (!LoadCalibration(calibrationPath, g_calibration)) {
+            if (egoMode) {
+                cerr << "Error: Calibration required for ego-view mode!" << endl;
+                return -1;
+            }
             cerr << "Warning: Failed to load calibration, fusion disabled" << endl;
         }
     } else if (mkvPaths.size() > 1) {
@@ -647,16 +1327,82 @@ int main(int argc, char** argv)
         cout << "Bodies will NOT be fused. Use --calibration for fusion." << endl;
     }
 
-    // Initialize processors
+    // Load T_checker_to_A for ego-view
+    Transform tCheckerToA;
+    if (egoMode) {
+        cout << "Loading T_checker_to_A: " << tCheckerToAPath << endl;
+        if (!LoadTransform(tCheckerToAPath, tCheckerToA)) {
+            cerr << "Error: Failed to load T_checker_to_A!" << endl;
+            return -1;
+        }
+        cout << "Loaded T_checker_to_A transform" << endl;
+
+        // Create output directories
+        fs::create_directories(egoOutputDir + "/images");
+        fs::create_directories(egoOutputDir + "/annotations");
+        cout << "Created ego output directories: " << egoOutputDir << endl;
+    }
+
+    // Initialize processors — first pass to identify helmet camera
     k4abt_tracker_configuration_t trackerConfig = K4ABT_TRACKER_CONFIG_DEFAULT;
     trackerConfig.processing_mode = processingMode;
 
     vector<MkvProcessor> processors(mkvPaths.size());
+
+    // If ego mode, we need to identify the helmet camera before initialization.
+    // We do a preliminary open to read serial numbers, then close and re-open properly.
+    int helmetIdx = -1;
+    if (egoMode) {
+        for (size_t i = 0; i < mkvPaths.size(); i++) {
+            k4a_playback_t tempPlayback = nullptr;
+            if (k4a_playback_open(mkvPaths[i].c_str(), &tempPlayback) == K4A_RESULT_SUCCEEDED) {
+                char serial[64] = {0};
+                size_t serialSize = sizeof(serial);
+                if (k4a_playback_get_tag(tempPlayback, "K4A_DEVICE_SERIAL_NUMBER", serial, &serialSize)
+                    == K4A_BUFFER_RESULT_SUCCEEDED) {
+                    if (string(serial) == helmetSerial) {
+                        helmetIdx = (int)i;
+                    }
+                }
+                k4a_playback_close(tempPlayback);
+            }
+
+            if (helmetIdx >= 0) break;
+        }
+
+        if (helmetIdx < 0) {
+            cerr << "Error: Helmet serial '" << helmetSerial << "' not found in any MKV file!" << endl;
+            cerr << "Available serials:" << endl;
+            for (size_t i = 0; i < mkvPaths.size(); i++) {
+                k4a_playback_t tempPlayback = nullptr;
+                if (k4a_playback_open(mkvPaths[i].c_str(), &tempPlayback) == K4A_RESULT_SUCCEEDED) {
+                    char serial[64] = {0};
+                    size_t serialSize = sizeof(serial);
+                    if (k4a_playback_get_tag(tempPlayback, "K4A_DEVICE_SERIAL_NUMBER", serial, &serialSize)
+                        == K4A_BUFFER_RESULT_SUCCEEDED) {
+                        cerr << "  [" << i << "] " << serial << " (" << mkvPaths[i] << ")" << endl;
+                    }
+                    k4a_playback_close(tempPlayback);
+                }
+            }
+            return -1;
+        }
+
+        cout << "Helmet camera found at index " << helmetIdx << endl;
+        processors[helmetIdx].isHelmet = true;
+    }
+
     for (size_t i = 0; i < mkvPaths.size(); i++) {
         if (!InitMkvProcessor(processors[i], mkvPaths[i], (int)i, trackerConfig)) {
             cerr << "Failed to initialize processor " << i << endl;
             return -1;
         }
+    }
+
+    // Store helmet calibration for 3D→2D projection
+    k4a_calibration_t helmetCalibration = {};
+    if (egoMode) {
+        helmetCalibration = processors[helmetIdx].calibration;
     }
 
     // Open output file
@@ -672,6 +1418,15 @@ int main(int argc, char** argv)
 
     uint64_t frameCount = 0;
     bool allEOF = false;
+    int egoFrameCount = 0;
+    int cbDetectedCount = 0;
+
+    // EMA temporal smoothing state for helmet pose
+    const double EMA_ALPHA = 0.75;
+    const uint64_t STALENESS_THRESHOLD_US = 200000; // 200ms in microseconds
+    Transform prevHelmetPose;
+    bool hasPrevPose = false;
+    uint64_t prevPoseTimestamp = 0;
 
     while (!allEOF) {
         // Advance each processor
@@ -689,18 +1444,21 @@ int main(int argc, char** argv)
 
         if (allEOF) break;
 
-        // Find minimum timestamp among non-EOF processors
+        // Find minimum timestamp among non-EOF, non-helmet processors
         uint64_t minTimestamp = UINT64_MAX;
         for (const auto& proc : processors) {
-            if (!proc.isEOF && proc.lastTimestamp < minTimestamp) {
+            if (!proc.isEOF && !proc.isHelmet && proc.lastTimestamp < minTimestamp) {
                 minTimestamp = proc.lastTimestamp;
             }
         }
 
-        // Collect frames within sync threshold
+        // If all fixed cameras are EOF but helmet isn't, we're done with useful processing
+        if (minTimestamp == UINT64_MAX) break;
+
+        // Collect frames within sync threshold (fixed cameras only)
         vector<FrameData> syncFrames;
         for (auto& proc : processors) {
-            if (proc.isEOF) continue;
+            if (proc.isEOF || proc.isHelmet) continue;
 
             // Check if within sync threshold
             if (proc.lastTimestamp <= minTimestamp + syncThresholdUs) {
@@ -713,9 +1471,8 @@ int main(int argc, char** argv)
         }
 
         // Fuse bodies
+        vector<FusedBody> fused;
         if (!syncFrames.empty()) {
-            vector<FusedBody> fused;
-
             if (g_calibration.isLoaded && syncFrames.size() > 1) {
                 fused = FuseBodiesAtTimestamp(syncFrames);
             } else {
@@ -743,6 +1500,152 @@ int main(int argc, char** argv)
                 cout << "Processed " << frameCount << " frames..." << endl;
             }
         }
+
+        // ================================================================
+        // Ego-view processing
+        // ================================================================
+        if (egoMode && processors[helmetIdx].hasNewFrame) {
+            cv::Size patternSize = helmetCBConfig.patternSize();
+
+            // 1. Detect checkerboard on ALL fixed cameras, fuse weighted poses
+            Transform helmetPose;
+            bool detectionSuccess = false;
+            int detectionCamera = -1;
+
+            vector<WeightedPose> candidates;
+
+            for (auto& proc : processors) {
+                if (proc.isHelmet || proc.isEOF) continue;
+                if (proc.lastColorImage.empty() || proc.lastDepthImage.empty()) continue;
+
+                vector<cv::Point2f> corners;
+                if (!DetectCheckerboardCorners(proc.lastColorImage, corners, patternSize)) {
+                    continue;
+                }
+
+                vector<cv::Point3f> points3D_cam;
+                if (!Convert2DTo3DOffline(proc.calibration, proc.transformation,
+                                           proc.lastDepthImage, corners, points3D_cam)) {
+                    continue;
+                }
+
+                // Compute average depth for confidence weighting
+                float avgDepth = 0.0f;
+                for (const auto& p : points3D_cam) {
+                    avgDepth += sqrt(p.x * p.x + p.y * p.y + p.z * p.z);
+                }
+                avgDepth /= (float)points3D_cam.size();
+
+                // Transform corners from camera space to world space
+                if (proc.deviceIndex < (int)g_calibration.cameras.size()) {
+                    TransformPointsToWorld(points3D_cam, g_calibration.cameras[proc.deviceIndex]);
+                }
+
+                // Compute checkerboard pose in world
+                Transform checkerPose = ComputeCheckerboardPose(points3D_cam, patternSize);
+                if (!checkerPose.valid) continue;
+
+                // Compose: helmetPose = checkerPose × T_checker_to_A
+                Transform candidatePose;
+                candidatePose.rotation = checkerPose.rotation * tCheckerToA.rotation;
+                candidatePose.translation = checkerPose.rotation * tCheckerToA.translation
+                                           + checkerPose.translation;
+                candidatePose.valid = true;
+
+                // Weight: inverse-square distance (depth noise scales with distance²)
+                candidates.push_back({candidatePose, 1.0f / (avgDepth * avgDepth), proc.deviceIndex});
+            }
+
+            if (!candidates.empty()) {
+                helmetPose = FuseHelmetPoses(candidates);
+                detectionSuccess = true;
+
+                // EMA temporal smoothing
+                uint64_t curTs = processors[helmetIdx].lastTimestamp;
+                if (hasPrevPose && (curTs - prevPoseTimestamp) < STALENESS_THRESHOLD_US) {
+                    helmetPose = SmoothPose(helmetPose, prevHelmetPose, EMA_ALPHA);
+                }
+                prevHelmetPose = helmetPose;
+                hasPrevPose = true;
+                prevPoseTimestamp = curTs;
+
+                // Use camera with highest weight for JSON metadata
+                float bestWeight = 0.0f;
+                for (const auto& c : candidates) {
+                    if (c.weight > bestWeight) {
+                        bestWeight = c.weight;
+                        detectionCamera = c.cameraIndex;
+                    }
+                }
+            }
+
+            // 2. Generate ego-view output
+            ostringstream filename;
+            filename << "frame_" << setw(6) << setfill('0') << egoFrameCount;
+
+            string imagePath = egoOutputDir + "/images/" + filename.str() + ".jpg";
+            string jsonPath = egoOutputDir + "/annotations/" + filename.str() + ".json";
+
+            // Save ego-view image
+            cv::Mat outputImage;
+            if (processors[helmetIdx].lastColorImage.channels() == 4) {
+                cv::cvtColor(processors[helmetIdx].lastColorImage, outputImage, cv::COLOR_BGRA2BGR);
+            } else {
+                outputImage = processors[helmetIdx].lastColorImage;
+            }
+
+            if (!outputImage.empty()) {
+                vector<int> jpegParams = {cv::IMWRITE_JPEG_QUALITY, 95};
+                cv::imwrite(imagePath, outputImage, jpegParams);
+            }
+
+            // Compute 3D/2D joints if we have pose and bodies
+            vector<Joint3D> joints3D;
+            vector<Joint2D> joints2D;
+            int numBodies = (int)fused.size();
+
+            if (detectionSuccess && !fused.empty()) {
+                joints3D = TransformSkeletonToCamera(fused, helmetPose);
+                joints2D = ProjectSkeleton(joints3D, helmetCalibration);
+            }
+
+            // Save annotation JSON
+            WriteEgoFrameJson(jsonPath, egoFrameCount,
+                              processors[helmetIdx].lastTimestamp,
+                              detectionSuccess, detectionCamera,
+                              helmetPose, joints3D, joints2D,
+                              filename.str() + ".jpg",
+                              numBodies);
+
+            if (detectionSuccess) cbDetectedCount++;
+            egoFrameCount++;
+        }
+    }
+
+    // Write ego metadata
+    if (egoMode) {
+        json metadata;
+        metadata["total_frames"] = egoFrameCount;
+        metadata["checkerboard_detected_frames"] = cbDetectedCount;
+        metadata["helmet_serial"] = helmetSerial;
+        metadata["checkerboard_size"] = {helmetCBConfig.rows, helmetCBConfig.cols};
+        metadata["checkerboard_square_mm"] = helmetCBConfig.squareMm;
+        metadata["t_checker_to_a_path"] = tCheckerToAPath;
+        metadata["calibration_path"] = calibrationPath;
+
+        json mkvList = json::array();
+        for (size_t i = 0; i < mkvPaths.size(); i++) {
+            mkvList.push_back({
+                {"index", i},
+                {"path", mkvPaths[i]},
+                {"serial", processors[i].serialNumber},
+                {"is_helmet", processors[i].isHelmet}
+            });
+        }
+        metadata["mkv_files"] = mkvList;
+
+        ofstream metaFile(egoOutputDir + "/metadata.json");
+        metaFile << setw(2) << metadata << endl;
     }
 
     // Cleanup
@@ -756,6 +1659,13 @@ int main(int argc, char** argv)
     cout << "Processing complete!" << endl;
     cout << "Total frames: " << frameCount << endl;
     cout << "Output: " << outputPath << endl;
+
+    if (egoMode) {
+        cout << "Ego frames: " << egoFrameCount << endl;
+        cout << "Checkerboard detected: " << cbDetectedCount << " / " << egoFrameCount << " frames" << endl;
+        cout << "Ego output: " << egoOutputDir << endl;
+    }
+
     cout << "========================================" << endl;
 
     return 0;

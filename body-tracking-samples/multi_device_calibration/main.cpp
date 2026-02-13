@@ -27,6 +27,11 @@ const int CHECKERBOARD_ROWS = 6;      // Inner corners (rows)
 const int CHECKERBOARD_COLS = 9;      // Inner corners (cols)
 const float SQUARE_SIZE_MM = 25.0f;   // Checkerboard square size in mm
 
+// HMD Calibration defaults (two-checkerboard method)
+const int HEAD_CB_ROWS = 4;           // Head-checkerboard inner corners (rows)
+const int HEAD_CB_COLS = 5;           // Head-checkerboard inner corners (cols)
+const float HEAD_CB_SQUARE_MM = 30.0f; // Head-checkerboard square size in mm
+
 // ============================================================================
 // Device Info Structure
 // ============================================================================
@@ -52,6 +57,44 @@ struct ExtrinsicCalibration {
     std::string serialNumber;
     int deviceIndex;
     bool isValid = false;
+    int numCaptures = 0;
+    int numUsed = 0;
+    double translationStdDev = 0.0;
+    double rotationStdDev = 0.0;
+    double maxTranslationError = 0.0;
+    double maxRotationError = 0.0;
+};
+
+// ============================================================================
+// Per-capture storage for Mode 1 multi-capture accumulation
+// ============================================================================
+struct Mode1Capture {
+    // SVD method results
+    std::vector<cv::Mat> rotations;     // [deviceCount] 3x3 (relative to primary)
+    std::vector<cv::Mat> translations;  // [deviceCount] 3x1 (relative to primary)
+    std::vector<bool> isValid;          // [deviceCount]
+    // Horn's method results
+    std::vector<cv::Mat> hornRotations;
+    std::vector<cv::Mat> hornTranslations;
+    std::vector<bool> hornIsValid;
+    std::vector<double> hornRMS;        // per-device RMS residual
+};
+
+// ============================================================================
+// HMD Calibration Result (T_checker_to_A)
+// ============================================================================
+struct HMDCalibration {
+    cv::Mat rotation;       // 3x3 rotation matrix (checkerboard to camera)
+    cv::Mat translation;    // 3x1 translation vector (mm)
+    cv::Mat rvec;           // Rodrigues rotation vector
+    bool isValid = false;
+    int numCaptures = 0;
+    int numUsed = 0;        // Captures used after outlier removal
+    double translationStdDev = 0.0;  // ||t|| std dev across captures (mm)
+    double rotationStdDev = 0.0;     // Rotation angle std dev across captures (degrees)
+    double maxTranslationError = 0.0; // Max ||t|| deviation from mean (mm)
+    double maxRotationError = 0.0;    // Max rotation angle deviation from mean (degrees)
+    std::string method = "solvePnP";  // "solvePnP" or "horn_3d_depth"
 };
 
 // ============================================================================
@@ -227,35 +270,49 @@ bool Convert2DTo3D(DeviceInfo& device,
             return false;
         }
 
-        // Get depth value at corner location (sample 3x3 region for robustness)
-        float depthSum = 0;
-        int validCount = 0;
-        for (int dy = -1; dy <= 1; dy++)
+        // Get depth value at corner using expanding ring search.
+        // Transformed depth (640x576 → 1920x1080) has holes; search outward
+        // from the corner pixel until valid depth is found.
+        const int maxSearchRadius = 25;
+        float depthMm = 0;
+        for (int r = 0; r <= maxSearchRadius; r++)
         {
-            for (int dx = -1; dx <= 1; dx++)
+            float depthSum = 0;
+            int validCount = 0;
+            for (int dy = -r; dy <= r; dy++)
             {
-                int nx = x + dx;
-                int ny = y + dy;
-                if (nx >= 0 && nx < device.colorWidth && ny >= 0 && ny < device.colorHeight)
+                for (int dx = -r; dx <= r; dx++)
                 {
-                    uint16_t d = depthBuffer[ny * depthStride + nx];
-                    if (d > 0)
+                    // Only check the outermost ring (interior already checked)
+                    if (r > 0 && std::abs(dx) < r && std::abs(dy) < r) continue;
+
+                    int nx = x + dx;
+                    int ny = y + dy;
+                    if (nx >= 0 && nx < device.colorWidth && ny >= 0 && ny < device.colorHeight)
                     {
-                        depthSum += d;
-                        validCount++;
+                        uint16_t d = depthBuffer[ny * depthStride + nx];
+                        if (d > 0)
+                        {
+                            depthSum += d;
+                            validCount++;
+                        }
                     }
                 }
             }
+            if (validCount > 0)
+            {
+                depthMm = depthSum / validCount;
+                break;
+            }
         }
 
-        if (validCount == 0)
+        if (depthMm == 0)
         {
-            std::cerr << "No valid depth at corner (" << x << ", " << y << ")" << std::endl;
+            std::cerr << "No valid depth within " << maxSearchRadius
+                      << "px of corner (" << x << ", " << y << ")" << std::endl;
             k4a_image_release(transformedDepth);
             return false;
         }
-
-        float depthMm = depthSum / validCount;
 
         // Convert 2D color + depth to 3D
         k4a_float2_t sourcePoint2D = { corner.x, corner.y };
@@ -348,14 +405,105 @@ ExtrinsicCalibration ComputeExtrinsicSVD(const std::vector<cv::Point3f>& points3
         result.rotation.col(2) *= -1.0;
     }
 
-    // Step 6: Translation is negative centroid
-    result.translation = cv::Mat(3, 1, CV_64F);
-    result.translation.at<double>(0, 0) = -centroid.x;
-    result.translation.at<double>(1, 0) = -centroid.y;
-    result.translation.at<double>(2, 0) = -centroid.z;
+    // Step 6: Translation = -R * centroid
+    // The SVD normalization is P_norm = R * (P_cam - centroid) = R * P_cam + t
+    // where t = -R * centroid (NOT just -centroid)
+    cv::Mat centroidMat = (cv::Mat_<double>(3, 1) << centroid.x, centroid.y, centroid.z);
+    result.translation = -result.rotation * centroidMat;
 
     result.isValid = true;
     return result;
+}
+
+// ============================================================================
+// Compute 3D-to-3D pose using Horn's method (closed-form point registration)
+// Input: objectPoints (known checkerboard geometry), cameraPoints (measured via depth)
+// Output: 4x4 T_object_to_camera (same convention as solvePnP)
+// Algorithm: centroids → center → cross-covariance H = P^T * Q → SVD(H) → R, t
+// ============================================================================
+bool ComputePose3DTo3D(const std::vector<cv::Point3f>& objectPoints,
+                       const std::vector<cv::Point3f>& cameraPoints,
+                       cv::Mat& T_out,
+                       double& rmsResidual)
+{
+    if (objectPoints.size() != cameraPoints.size() || objectPoints.size() < 3)
+    {
+        std::cerr << "ComputePose3DTo3D: need >= 3 matching point pairs" << std::endl;
+        return false;
+    }
+
+    int N = static_cast<int>(objectPoints.size());
+
+    // Step 1: Compute centroids
+    cv::Point3d centroidObj(0, 0, 0), centroidCam(0, 0, 0);
+    for (int i = 0; i < N; i++)
+    {
+        centroidObj.x += objectPoints[i].x;
+        centroidObj.y += objectPoints[i].y;
+        centroidObj.z += objectPoints[i].z;
+        centroidCam.x += cameraPoints[i].x;
+        centroidCam.y += cameraPoints[i].y;
+        centroidCam.z += cameraPoints[i].z;
+    }
+    centroidObj *= (1.0 / N);
+    centroidCam *= (1.0 / N);
+
+    // Step 2: Center points
+    cv::Mat P(N, 3, CV_64F);  // centered object points
+    cv::Mat Q(N, 3, CV_64F);  // centered camera points
+    for (int i = 0; i < N; i++)
+    {
+        P.at<double>(i, 0) = objectPoints[i].x - centroidObj.x;
+        P.at<double>(i, 1) = objectPoints[i].y - centroidObj.y;
+        P.at<double>(i, 2) = objectPoints[i].z - centroidObj.z;
+        Q.at<double>(i, 0) = cameraPoints[i].x - centroidCam.x;
+        Q.at<double>(i, 1) = cameraPoints[i].y - centroidCam.y;
+        Q.at<double>(i, 2) = cameraPoints[i].z - centroidCam.z;
+    }
+
+    // Step 3: Cross-covariance matrix H = P^T * Q (3x3)
+    cv::Mat H = P.t() * Q;
+
+    // Step 4: SVD(H) = U * S * V^T
+    cv::Mat U, S, Vt;
+    cv::SVD::compute(H, S, U, Vt);
+
+    // Step 5: R = V * U^T
+    cv::Mat R = Vt.t() * U.t();
+
+    // Ensure proper rotation (det = +1, not reflection)
+    if (cv::determinant(R) < 0)
+    {
+        // Flip sign of last column of Vt (i.e., last row before transpose)
+        Vt.row(2) *= -1.0;
+        R = Vt.t() * U.t();
+    }
+
+    // Step 6: t = centroid_cam - R * centroid_obj
+    cv::Mat centObjMat = (cv::Mat_<double>(3, 1) << centroidObj.x, centroidObj.y, centroidObj.z);
+    cv::Mat centCamMat = (cv::Mat_<double>(3, 1) << centroidCam.x, centroidCam.y, centroidCam.z);
+    cv::Mat t = centCamMat - R * centObjMat;
+
+    // Build 4x4 homogeneous transform
+    T_out = cv::Mat::eye(4, 4, CV_64F);
+    R.copyTo(T_out(cv::Rect(0, 0, 3, 3)));
+    t.copyTo(T_out(cv::Rect(3, 0, 1, 3)));
+
+    // Compute RMS residual
+    double sumSqErr = 0.0;
+    for (int i = 0; i < N; i++)
+    {
+        cv::Mat objPt = (cv::Mat_<double>(3, 1) <<
+            objectPoints[i].x, objectPoints[i].y, objectPoints[i].z);
+        cv::Mat predicted = R * objPt + t;
+        double dx = predicted.at<double>(0) - cameraPoints[i].x;
+        double dy = predicted.at<double>(1) - cameraPoints[i].y;
+        double dz = predicted.at<double>(2) - cameraPoints[i].z;
+        sumSqErr += dx * dx + dy * dy + dz * dz;
+    }
+    rmsResidual = std::sqrt(sumSqErr / N);
+
+    return true;
 }
 
 // ============================================================================
@@ -465,7 +613,32 @@ void SaveCalibrationJSON(const std::vector<ExtrinsicCalibration>& calibrations,
             file << "      \"translation\": ["
                  << calib.translation.at<double>(0, 0) << ", "
                  << calib.translation.at<double>(1, 0) << ", "
-                 << calib.translation.at<double>(2, 0) << "]\n";
+                 << calib.translation.at<double>(2, 0) << "]";
+
+            if (calib.numCaptures > 0)
+            {
+                file << ",\n";
+                file << "      \"num_captures\": " << calib.numCaptures << ",\n";
+                file << "      \"num_used\": " << calib.numUsed;
+                if (calib.translationStdDev > 0.0 || calib.rotationStdDev > 0.0)
+                {
+                    file << ",\n";
+                    file << "      \"consistency\": {\n";
+                    file << "        \"translation_std_dev_mm\": " << calib.translationStdDev << ",\n";
+                    file << "        \"rotation_std_dev_deg\": " << calib.rotationStdDev << ",\n";
+                    file << "        \"max_translation_error_mm\": " << calib.maxTranslationError << ",\n";
+                    file << "        \"max_rotation_error_deg\": " << calib.maxRotationError << "\n";
+                    file << "      }\n";
+                }
+                else
+                {
+                    file << "\n";
+                }
+            }
+            else
+            {
+                file << "\n";
+            }
         }
         else
         {
@@ -543,12 +716,891 @@ void CaptureThread(DeviceInfo* device, CaptureData* captureData, cv::Size patter
 }
 
 // ============================================================================
+// Generate 3D object points for checkerboard
+// ============================================================================
+std::vector<cv::Point3f> GenerateCheckerboardPoints(int rows, int cols, float squareSize)
+{
+    std::vector<cv::Point3f> points;
+    for (int r = 0; r < rows; r++)
+    {
+        for (int c = 0; c < cols; c++)
+        {
+            points.push_back(cv::Point3f(c * squareSize, r * squareSize, 0.0f));
+        }
+    }
+    return points;
+}
+
+// ============================================================================
+// Save HMD Calibration to JSON (T_checker_to_A.json)
+// ============================================================================
+void SaveHMDCalibrationJSON(const HMDCalibration& calib, const std::string& filename)
+{
+    std::ofstream file(filename);
+    if (!file.is_open())
+    {
+        std::cerr << "Failed to open " << filename << " for writing" << std::endl;
+        return;
+    }
+
+    file << std::fixed << std::setprecision(9);
+    file << "{\n";
+    file << "  \"description\": \"Checkerboard to Helmet Camera (A) transformation\",\n";
+    file << "  \"method\": \"" << calib.method << "\",\n";
+    file << "  \"num_captures\": " << calib.numCaptures << ",\n";
+    file << "  \"num_used\": " << calib.numUsed << ",\n";
+    file << "  \"consistency\": {\n";
+    file << "    \"translation_std_dev_mm\": " << calib.translationStdDev << ",\n";
+    file << "    \"rotation_std_dev_deg\": " << calib.rotationStdDev << ",\n";
+    file << "    \"max_translation_error_mm\": " << calib.maxTranslationError << ",\n";
+    file << "    \"max_rotation_error_deg\": " << calib.maxRotationError << "\n";
+    file << "  },\n";
+    file << "  \"rotation\": [\n";
+    for (int r = 0; r < 3; r++)
+    {
+        file << "    [";
+        for (int c = 0; c < 3; c++)
+        {
+            file << calib.rotation.at<double>(r, c);
+            if (c < 2) file << ", ";
+        }
+        file << "]";
+        if (r < 2) file << ",";
+        file << "\n";
+    }
+    file << "  ],\n";
+    file << "  \"translation\": ["
+         << calib.translation.at<double>(0, 0) << ", "
+         << calib.translation.at<double>(1, 0) << ", "
+         << calib.translation.at<double>(2, 0) << "],\n";
+    file << "  \"rvec\": ["
+         << calib.rvec.at<double>(0, 0) << ", "
+         << calib.rvec.at<double>(1, 0) << ", "
+         << calib.rvec.at<double>(2, 0) << "]\n";
+    file << "}\n";
+    file.close();
+
+    std::cout << "Saved HMD calibration to: " << filename << std::endl;
+}
+
+
+// ============================================================================
+// HMD Calibration Mode - Method 3: Bridge Mode (Simultaneous Observation)
+// Uses two checkerboards: Ground board (visible to all) and Helmet board (external only)
+// Computes T_checker_to_A by bridging the spatial relationships
+// ============================================================================
+struct BridgeCaptureData {
+    cv::Mat colorImage;
+    k4a_image_t depthImage = nullptr;
+    std::vector<cv::Point2f> groundCorners;
+    std::vector<cv::Point2f> helmetCorners;
+    bool groundFound = false;
+    bool helmetFound = false;
+    bool hasNewData = false;
+    std::mutex mutex;
+};
+
+// Capture thread for bridge mode (detects both checkerboards)
+void BridgeCaptureThread(DeviceInfo* device, BridgeCaptureData* captureData,
+                          cv::Size groundPatternSize, cv::Size helmetPatternSize)
+{
+    std::cout << "[Device " << device->index << "] Bridge capture thread started" << std::endl;
+
+    while (g_captureRunning)
+    {
+        k4a_capture_t capture = nullptr;
+        k4a_wait_result_t result = k4a_device_get_capture(device->device, &capture, 100);
+
+        if (result == K4A_WAIT_RESULT_SUCCEEDED)
+        {
+            k4a_image_t colorImage = k4a_capture_get_color_image(capture);
+            k4a_image_t depthImage = k4a_capture_get_depth_image(capture);
+
+            if (colorImage && depthImage)
+            {
+                cv::Mat colorMat = K4AImageToMat(colorImage);
+
+                std::vector<cv::Point2f> groundCorners, helmetCorners;
+                bool groundFound = DetectCheckerboardCorners(colorMat, groundCorners, groundPatternSize);
+                bool helmetFound = DetectCheckerboardCorners(colorMat, helmetCorners, helmetPatternSize);
+
+                // Update capture data (thread-safe)
+                {
+                    std::lock_guard<std::mutex> lock(captureData->mutex);
+
+                    if (captureData->depthImage)
+                    {
+                        k4a_image_release(captureData->depthImage);
+                    }
+
+                    captureData->colorImage = colorMat;
+                    captureData->depthImage = depthImage;
+                    k4a_image_reference(depthImage);
+                    captureData->groundCorners = groundCorners;
+                    captureData->helmetCorners = helmetCorners;
+                    captureData->groundFound = groundFound;
+                    captureData->helmetFound = helmetFound;
+                    captureData->hasNewData = true;
+                }
+            }
+
+            if (colorImage) k4a_image_release(colorImage);
+            if (depthImage) k4a_image_release(depthImage);
+            k4a_capture_release(capture);
+        }
+    }
+
+    std::cout << "[Device " << device->index << "] Bridge capture thread stopped" << std::endl;
+}
+
+int RunHMDCalibrationBridge(
+    // Ground checkerboard (visible to external + helmet cameras)
+    int groundRows, int groundCols, float groundSquare,
+    // Helmet checkerboard (visible to external cameras only)
+    int helmetRows, int helmetCols, float helmetSquare,
+    // Camera serial numbers
+    const std::string& helmetSerial,
+    const std::string& primarySerial,
+    // Output
+    const std::string& outputFile,
+    // Use depth-based Horn's method instead of solvePnP
+    bool useDepth = false)
+{
+    std::cout << "\n========================================" << std::endl;
+    std::cout << "HMD Calibration Mode (Bridge Method)" << std::endl;
+    std::cout << "========================================\n" << std::endl;
+
+    std::cout << "Ground Checkerboard: " << groundCols << "x" << groundRows
+              << " inner corners, " << groundSquare << "mm squares" << std::endl;
+    std::cout << "Helmet Checkerboard: " << helmetCols << "x" << helmetRows
+              << " inner corners, " << helmetSquare << "mm squares" << std::endl;
+    std::cout << "Pose estimation: " << (useDepth ? "Horn's method (depth-based 3D-to-3D)" : "solvePnP (2D-to-3D)") << std::endl;
+
+    cv::Size groundPatternSize(groundCols, groundRows);
+    cv::Size helmetPatternSize(helmetCols, helmetRows);
+
+    std::vector<cv::Point3f> groundObjPoints = GenerateCheckerboardPoints(groundRows, groundCols, groundSquare);
+    std::vector<cv::Point3f> helmetObjPoints = GenerateCheckerboardPoints(helmetRows, helmetCols, helmetSquare);
+
+    // Find devices
+    uint32_t deviceCount = k4a_device_get_installed_count();
+    if (deviceCount < 2)
+    {
+        std::cerr << "Bridge mode requires at least 2 cameras (helmet + external)" << std::endl;
+        return -1;
+    }
+
+    std::vector<DeviceInfo> devices;
+    int helmetDeviceIdx = -1;
+    int externalDeviceIdx = -1;
+
+    for (uint32_t i = 0; i < deviceCount; i++)
+    {
+        k4a_device_t tempDevice = nullptr;
+        if (k4a_device_open(i, &tempDevice) != K4A_RESULT_SUCCEEDED)
+        {
+            std::cerr << "Failed to open device " << i << std::endl;
+            continue;
+        }
+
+        DeviceInfo info;
+        info.device = tempDevice;
+        info.serialNumber = GetDeviceSerialNumber(tempDevice);
+        info.index = static_cast<int>(devices.size());
+
+        std::cout << "Device " << info.index << ": " << info.serialNumber;
+
+        if (info.serialNumber == helmetSerial)
+        {
+            helmetDeviceIdx = info.index;
+            std::cout << " (HELMET)";
+        }
+        else if (primarySerial.empty() || info.serialNumber == primarySerial)
+        {
+            if (externalDeviceIdx < 0)
+            {
+                externalDeviceIdx = info.index;
+                info.isPrimary = true;
+                std::cout << " (EXTERNAL/PRIMARY)";
+            }
+        }
+        std::cout << std::endl;
+
+        devices.push_back(info);
+    }
+
+    if (helmetDeviceIdx < 0)
+    {
+        std::cerr << "Helmet camera not found! Specify with --helmet-serial" << std::endl;
+        for (auto& dev : devices) { k4a_device_close(dev.device); }
+        return -1;
+    }
+
+    if (externalDeviceIdx < 0)
+    {
+        // Use first non-helmet camera
+        for (size_t i = 0; i < devices.size(); i++)
+        {
+            if (static_cast<int>(i) != helmetDeviceIdx)
+            {
+                externalDeviceIdx = static_cast<int>(i);
+                devices[i].isPrimary = true;
+                break;
+            }
+        }
+    }
+
+    // Close unused cameras (bridge mode only needs helmet + external)
+    for (int i = static_cast<int>(devices.size()) - 1; i >= 0; i--)
+    {
+        if (i != helmetDeviceIdx && i != externalDeviceIdx)
+        {
+            std::cout << "Closing unused device " << i << " (" << devices[i].serialNumber << ")" << std::endl;
+            k4a_device_close(devices[i].device);
+            devices.erase(devices.begin() + i);
+            // Adjust indices after removal
+            if (helmetDeviceIdx > i) helmetDeviceIdx--;
+            if (externalDeviceIdx > i) externalDeviceIdx--;
+        }
+    }
+
+    std::cout << "\nHelmet camera: Device " << helmetDeviceIdx << std::endl;
+    std::cout << "External camera: Device " << externalDeviceIdx << std::endl;
+
+    // Configure and start cameras
+    std::cout << "\nStarting cameras..." << std::endl;
+
+    int subordinateCount = 1;  // First subordinate gets 160*1, second gets 160*2, etc.
+    for (int i = static_cast<int>(devices.size()) - 1; i >= 0; i--)
+    {
+        k4a_device_configuration_t config = K4A_DEVICE_CONFIG_INIT_DISABLE_ALL;
+        config.depth_mode = K4A_DEPTH_MODE_NFOV_UNBINNED;
+        config.color_resolution = K4A_COLOR_RESOLUTION_1080P;
+        config.color_format = K4A_IMAGE_FORMAT_COLOR_BGRA32;
+        config.camera_fps = K4A_FRAMES_PER_SECOND_30;
+        config.synchronized_images_only = true;
+
+        // Subordinate delay prevents IR interference between depth cameras.
+        // Each subordinate offsets by 160us * N (N=1,2,...) from master.
+        // Reference: Orbbec Femto Bolt multi-device sync documentation
+        if (devices.size() > 1)
+        {
+            if (devices[i].isPrimary)
+            {
+                config.wired_sync_mode = K4A_WIRED_SYNC_MODE_MASTER;
+            }
+            else
+            {
+                config.wired_sync_mode = K4A_WIRED_SYNC_MODE_SUBORDINATE;
+                config.subordinate_delay_off_master_usec = 160 * subordinateCount;
+                subordinateCount++;
+            }
+        }
+        else
+        {
+            config.wired_sync_mode = K4A_WIRED_SYNC_MODE_STANDALONE;
+        }
+
+        if (k4a_device_start_cameras(devices[i].device, &config) != K4A_RESULT_SUCCEEDED)
+        {
+            std::cerr << "Failed to start cameras on device " << i << std::endl;
+            return -1;
+        }
+
+        if (k4a_device_get_calibration(devices[i].device, config.depth_mode,
+                                        config.color_resolution, &devices[i].calibration) != K4A_RESULT_SUCCEEDED)
+        {
+            std::cerr << "Failed to get calibration for device " << i << std::endl;
+            return -1;
+        }
+
+        devices[i].colorWidth = devices[i].calibration.color_camera_calibration.resolution_width;
+        devices[i].colorHeight = devices[i].calibration.color_camera_calibration.resolution_height;
+        devices[i].transformation = k4a_transformation_create(&devices[i].calibration);
+
+        if (i > 0)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        }
+    }
+
+    // Extract camera intrinsics
+    auto GetCameraMatrix = [](const k4a_calibration_t& calib) -> cv::Mat {
+        auto& intrinsics = calib.color_camera_calibration.intrinsics.parameters.param;
+        return (cv::Mat_<double>(3, 3) <<
+            intrinsics.fx, 0, intrinsics.cx,
+            0, intrinsics.fy, intrinsics.cy,
+            0, 0, 1);
+    };
+
+    auto GetDistCoeffs = [](const k4a_calibration_t& calib) -> cv::Mat {
+        auto& intrinsics = calib.color_camera_calibration.intrinsics.parameters.param;
+        return (cv::Mat_<double>(8, 1) <<
+            intrinsics.k1, intrinsics.k2, intrinsics.p1, intrinsics.p2,
+            intrinsics.k3, intrinsics.k4, intrinsics.k5, intrinsics.k6);
+    };
+
+    cv::Mat helmetCamMatrix = GetCameraMatrix(devices[helmetDeviceIdx].calibration);
+    cv::Mat helmetDistCoeffs = GetDistCoeffs(devices[helmetDeviceIdx].calibration);
+    cv::Mat externalCamMatrix = GetCameraMatrix(devices[externalDeviceIdx].calibration);
+    cv::Mat externalDistCoeffs = GetDistCoeffs(devices[externalDeviceIdx].calibration);
+
+    // Start capture threads
+    std::vector<BridgeCaptureData> captureData(devices.size());
+    std::vector<std::thread> captureThreads;
+    g_captureRunning = true;
+
+    for (size_t i = 0; i < devices.size(); i++)
+    {
+        captureThreads.emplace_back(BridgeCaptureThread, &devices[i], &captureData[i],
+                                     groundPatternSize, helmetPatternSize);
+    }
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
+    // Create display windows
+    cv::namedWindow("Helmet Camera", cv::WINDOW_NORMAL);
+    cv::namedWindow("External Camera", cv::WINDOW_NORMAL);
+    cv::resizeWindow("Helmet Camera", 800, 450);
+    cv::resizeWindow("External Camera", 800, 450);
+
+    std::cout << "\n=== Bridge Calibration Instructions ===" << std::endl;
+    std::cout << "1. Place GROUND checkerboard (" << groundCols << "x" << groundRows << ") on floor" << std::endl;
+    std::cout << "2. Attach HELMET checkerboard (" << helmetCols << "x" << helmetRows << ") to helmet" << std::endl;
+    std::cout << "3. Ensure GROUND board is visible to BOTH cameras" << std::endl;
+    std::cout << "4. Ensure HELMET board is visible to EXTERNAL camera" << std::endl;
+    std::cout << "5. Press SPACE to capture when all boards detected" << std::endl;
+    std::cout << "6. Press 'C' to compute calibration" << std::endl;
+    std::cout << "7. Press 'S' to save" << std::endl;
+    std::cout << "8. Press ESC to quit" << std::endl;
+
+    // Storage for captures
+    struct BridgeCapture {
+        cv::Mat T_ground_to_external;   // Ground board pose in external camera
+        cv::Mat T_helmet_to_external;   // Helmet board pose in external camera
+        cv::Mat T_ground_to_helmet;     // Ground board pose in helmet camera
+    };
+    std::vector<BridgeCapture> captures;
+    HMDCalibration hmdCalib;
+
+    bool running = true;
+    while (running)
+    {
+        cv::Mat helmetColorImg, externalColorImg;
+        k4a_image_t helmetDepthImg = nullptr, externalDepthImg = nullptr;
+        std::vector<cv::Point2f> helmetGroundCorners, externalGroundCorners, externalHelmetCorners;
+        bool helmetGroundFound = false, externalGroundFound = false, externalHelmetFound = false;
+
+        // Get latest data from cameras
+        {
+            std::lock_guard<std::mutex> lock(captureData[helmetDeviceIdx].mutex);
+            if (captureData[helmetDeviceIdx].hasNewData)
+            {
+                helmetColorImg = captureData[helmetDeviceIdx].colorImage.clone();
+                if (captureData[helmetDeviceIdx].depthImage)
+                {
+                    helmetDepthImg = captureData[helmetDeviceIdx].depthImage;
+                    k4a_image_reference(helmetDepthImg);
+                }
+                helmetGroundCorners = captureData[helmetDeviceIdx].groundCorners;
+                helmetGroundFound = captureData[helmetDeviceIdx].groundFound;
+            }
+        }
+        {
+            std::lock_guard<std::mutex> lock(captureData[externalDeviceIdx].mutex);
+            if (captureData[externalDeviceIdx].hasNewData)
+            {
+                externalColorImg = captureData[externalDeviceIdx].colorImage.clone();
+                if (captureData[externalDeviceIdx].depthImage)
+                {
+                    externalDepthImg = captureData[externalDeviceIdx].depthImage;
+                    k4a_image_reference(externalDepthImg);
+                }
+                externalGroundCorners = captureData[externalDeviceIdx].groundCorners;
+                externalHelmetCorners = captureData[externalDeviceIdx].helmetCorners;
+                externalGroundFound = captureData[externalDeviceIdx].groundFound;
+                externalHelmetFound = captureData[externalDeviceIdx].helmetFound;
+            }
+        }
+
+        // Display helmet camera
+        if (!helmetColorImg.empty())
+        {
+            cv::Mat display;
+            cv::cvtColor(helmetColorImg, display, cv::COLOR_BGRA2BGR);
+
+            if (helmetGroundFound)
+            {
+                cv::drawChessboardCorners(display, groundPatternSize, helmetGroundCorners, true);
+                cv::putText(display, "GROUND BOARD FOUND", cv::Point(10, 30),
+                            cv::FONT_HERSHEY_SIMPLEX, 0.8, cv::Scalar(0, 255, 0), 2);
+            }
+            else
+            {
+                cv::putText(display, "Ground board NOT found", cv::Point(10, 30),
+                            cv::FONT_HERSHEY_SIMPLEX, 0.8, cv::Scalar(0, 0, 255), 2);
+            }
+
+            int hYPos = 60;
+            if (useDepth)
+            {
+                if (helmetDepthImg)
+                    cv::putText(display, "DEPTH OK", cv::Point(10, hYPos),
+                                cv::FONT_HERSHEY_SIMPLEX, 0.8, cv::Scalar(0, 255, 0), 2);
+                else
+                    cv::putText(display, "NO DEPTH", cv::Point(10, hYPos),
+                                cv::FONT_HERSHEY_SIMPLEX, 0.8, cv::Scalar(0, 0, 255), 2);
+                hYPos += 30;
+            }
+
+            cv::putText(display, "Captures: " + std::to_string(captures.size()),
+                        cv::Point(10, hYPos), cv::FONT_HERSHEY_SIMPLEX, 0.8, cv::Scalar(255, 255, 0), 2);
+
+            cv::imshow("Helmet Camera", display);
+        }
+
+        // Display external camera
+        if (!externalColorImg.empty())
+        {
+            cv::Mat display;
+            cv::cvtColor(externalColorImg, display, cv::COLOR_BGRA2BGR);
+
+            int yPos = 30;
+            if (externalGroundFound)
+            {
+                cv::drawChessboardCorners(display, groundPatternSize, externalGroundCorners, true);
+                cv::putText(display, "GROUND BOARD FOUND", cv::Point(10, yPos),
+                            cv::FONT_HERSHEY_SIMPLEX, 0.8, cv::Scalar(0, 255, 0), 2);
+            }
+            else
+            {
+                cv::putText(display, "Ground board NOT found", cv::Point(10, yPos),
+                            cv::FONT_HERSHEY_SIMPLEX, 0.8, cv::Scalar(0, 0, 255), 2);
+            }
+            yPos += 30;
+
+            if (externalHelmetFound)
+            {
+                cv::drawChessboardCorners(display, helmetPatternSize, externalHelmetCorners, true);
+                cv::putText(display, "HELMET BOARD FOUND", cv::Point(10, yPos),
+                            cv::FONT_HERSHEY_SIMPLEX, 0.8, cv::Scalar(0, 255, 0), 2);
+            }
+            else
+            {
+                cv::putText(display, "Helmet board NOT found", cv::Point(10, yPos),
+                            cv::FONT_HERSHEY_SIMPLEX, 0.8, cv::Scalar(0, 128, 255), 2);
+            }
+            yPos += 30;
+
+            if (useDepth)
+            {
+                if (externalDepthImg)
+                    cv::putText(display, "DEPTH OK", cv::Point(10, yPos),
+                                cv::FONT_HERSHEY_SIMPLEX, 0.8, cv::Scalar(0, 255, 0), 2);
+                else
+                    cv::putText(display, "NO DEPTH", cv::Point(10, yPos),
+                                cv::FONT_HERSHEY_SIMPLEX, 0.8, cv::Scalar(0, 0, 255), 2);
+                yPos += 30;
+            }
+
+            // Ready to capture?
+            bool canCapture = helmetGroundFound && externalGroundFound && externalHelmetFound;
+            if (canCapture)
+            {
+                cv::putText(display, "READY - Press SPACE", cv::Point(10, yPos),
+                            cv::FONT_HERSHEY_SIMPLEX, 0.8, cv::Scalar(0, 255, 255), 2);
+            }
+
+            if (hmdCalib.isValid)
+            {
+                yPos += 30;
+                cv::putText(display, "CALIBRATED - Press S to save", cv::Point(10, yPos),
+                            cv::FONT_HERSHEY_SIMPLEX, 0.8, cv::Scalar(0, 255, 0), 2);
+            }
+
+            cv::imshow("External Camera", display);
+        }
+
+        int key = cv::waitKey(30);
+
+        if (key == 27)  // ESC
+        {
+            running = false;
+        }
+        else if (key == ' ')  // SPACE - Capture
+        {
+            bool canCapture = helmetGroundFound && externalGroundFound && externalHelmetFound;
+            if (canCapture)
+            {
+                BridgeCapture cap;
+                bool captureOk = false;
+
+                if (useDepth)
+                {
+                    // Depth-based Horn's method: Convert 2D corners to 3D via depth,
+                    // then compute pose using 3D-to-3D registration
+                    do {
+                        if (!externalDepthImg || !helmetDepthImg)
+                        {
+                            std::cout << "No depth images available for depth-based pose" << std::endl;
+                            break;
+                        }
+
+                        double rms = 0.0;
+
+                        // T_ground_to_external: Ground board 3D points in external camera
+                        std::vector<cv::Point3f> extGroundPts3D;
+                        if (!Convert2DTo3D(devices[externalDeviceIdx], externalDepthImg, nullptr,
+                                           externalGroundCorners, extGroundPts3D))
+                        {
+                            std::cout << "Failed to convert ground corners to 3D (external)" << std::endl;
+                            break;
+                        }
+                        if (!ComputePose3DTo3D(groundObjPoints, extGroundPts3D,
+                                              cap.T_ground_to_external, rms))
+                        {
+                            std::cout << "Failed Horn's method for ground->external" << std::endl;
+                            break;
+                        }
+                        std::cout << "  Ground->External RMS: " << std::fixed << std::setprecision(2) << rms << " mm" << std::endl;
+
+                        // T_helmet_to_external: Helmet board 3D points in external camera
+                        std::vector<cv::Point3f> extHelmetPts3D;
+                        if (!Convert2DTo3D(devices[externalDeviceIdx], externalDepthImg, nullptr,
+                                           externalHelmetCorners, extHelmetPts3D))
+                        {
+                            std::cout << "Failed to convert helmet corners to 3D (external)" << std::endl;
+                            break;
+                        }
+                        if (!ComputePose3DTo3D(helmetObjPoints, extHelmetPts3D,
+                                              cap.T_helmet_to_external, rms))
+                        {
+                            std::cout << "Failed Horn's method for helmet->external" << std::endl;
+                            break;
+                        }
+                        std::cout << "  Helmet->External RMS: " << std::fixed << std::setprecision(2) << rms << " mm" << std::endl;
+
+                        // T_ground_to_helmet: Ground board 3D points in helmet camera
+                        std::vector<cv::Point3f> helGroundPts3D;
+                        if (!Convert2DTo3D(devices[helmetDeviceIdx], helmetDepthImg, nullptr,
+                                           helmetGroundCorners, helGroundPts3D))
+                        {
+                            std::cout << "Failed to convert ground corners to 3D (helmet)" << std::endl;
+                            break;
+                        }
+                        if (!ComputePose3DTo3D(groundObjPoints, helGroundPts3D,
+                                              cap.T_ground_to_helmet, rms))
+                        {
+                            std::cout << "Failed Horn's method for ground->helmet" << std::endl;
+                            break;
+                        }
+                        std::cout << "  Ground->Helmet RMS: " << std::fixed << std::setprecision(2) << rms << " mm" << std::endl;
+
+                        captureOk = true;
+                    } while (false);
+                }
+                else
+                {
+                    // solvePnP: 2D corners + known geometry + camera intrinsics
+                    cv::Mat rvec, tvec;
+
+                    // T_ground_to_external: Ground board in external camera frame
+                    cv::solvePnP(groundObjPoints, externalGroundCorners,
+                                 externalCamMatrix, externalDistCoeffs, rvec, tvec);
+                    cv::Mat R;
+                    cv::Rodrigues(rvec, R);
+                    cap.T_ground_to_external = cv::Mat::eye(4, 4, CV_64F);
+                    R.copyTo(cap.T_ground_to_external(cv::Rect(0, 0, 3, 3)));
+                    tvec.copyTo(cap.T_ground_to_external(cv::Rect(3, 0, 1, 3)));
+
+                    // T_helmet_to_external: Helmet board in external camera frame
+                    cv::solvePnP(helmetObjPoints, externalHelmetCorners,
+                                 externalCamMatrix, externalDistCoeffs, rvec, tvec);
+                    cv::Rodrigues(rvec, R);
+                    cap.T_helmet_to_external = cv::Mat::eye(4, 4, CV_64F);
+                    R.copyTo(cap.T_helmet_to_external(cv::Rect(0, 0, 3, 3)));
+                    tvec.copyTo(cap.T_helmet_to_external(cv::Rect(3, 0, 1, 3)));
+
+                    // T_ground_to_helmet: Ground board in helmet camera frame
+                    cv::solvePnP(groundObjPoints, helmetGroundCorners,
+                                 helmetCamMatrix, helmetDistCoeffs, rvec, tvec);
+                    cv::Rodrigues(rvec, R);
+                    cap.T_ground_to_helmet = cv::Mat::eye(4, 4, CV_64F);
+                    R.copyTo(cap.T_ground_to_helmet(cv::Rect(0, 0, 3, 3)));
+                    tvec.copyTo(cap.T_ground_to_helmet(cv::Rect(3, 0, 1, 3)));
+
+                    captureOk = true;
+                }
+
+                if (captureOk)
+                {
+                    captures.push_back(cap);
+                    std::cout << "Capture " << captures.size() << " recorded" << std::endl;
+                }
+            }
+            else
+            {
+                std::cout << "Cannot capture: not all boards detected" << std::endl;
+            }
+        }
+        else if ((key == 'c' || key == 'C') && !captures.empty())  // Compute
+        {
+            std::cout << "\n=== Computing Bridge Calibration ===" << std::endl;
+            std::cout << "Total captures: " << captures.size() << std::endl;
+
+            // Step 1: Compute T_checker_to_A independently for each capture
+            struct PerCaptureResult {
+                cv::Mat R;          // 3x3 rotation
+                cv::Mat t;          // 3x1 translation
+                double tNorm;       // ||t|| in mm
+                double angle;       // rotation angle in degrees
+                bool isOutlier = false;
+            };
+
+            std::vector<PerCaptureResult> results;
+            results.reserve(captures.size());
+
+            for (const auto& cap : captures)
+            {
+                cv::Mat T_ext_to_helmet = cap.T_helmet_to_external.inv();
+                cv::Mat T_helmet_to_ground = cap.T_ground_to_helmet.inv();
+                cv::Mat T_result = T_ext_to_helmet * cap.T_ground_to_external * T_helmet_to_ground;
+
+                PerCaptureResult res;
+                res.R = T_result(cv::Rect(0, 0, 3, 3)).clone();
+                res.t = T_result(cv::Rect(3, 0, 1, 3)).clone();
+                res.tNorm = cv::norm(res.t);
+
+                // Rotation angle from axis-angle representation
+                cv::Mat rvec;
+                cv::Rodrigues(res.R, rvec);
+                res.angle = cv::norm(rvec) * 180.0 / CV_PI;
+
+                results.push_back(res);
+            }
+
+            // Step 2: Compute per-capture statistics
+            double meanTNorm = 0.0, meanAngle = 0.0;
+            for (const auto& res : results)
+            {
+                meanTNorm += res.tNorm;
+                meanAngle += res.angle;
+            }
+            meanTNorm /= results.size();
+            meanAngle /= results.size();
+
+            double varTNorm = 0.0, varAngle = 0.0;
+            for (const auto& res : results)
+            {
+                varTNorm += (res.tNorm - meanTNorm) * (res.tNorm - meanTNorm);
+                varAngle += (res.angle - meanAngle) * (res.angle - meanAngle);
+            }
+            double stdTNorm = std::sqrt(varTNorm / results.size());
+            double stdAngle = std::sqrt(varAngle / results.size());
+
+            // Step 3: Print per-capture results
+            std::cout << "\n--- Per-Capture Results ---" << std::endl;
+            std::cout << std::fixed << std::setprecision(2);
+            std::cout << "  #   ||t|| (mm)   angle (deg)   status" << std::endl;
+            std::cout << "  --  ----------   -----------   ------" << std::endl;
+
+            // Step 4: Flag outliers (>2 sigma from mean in either translation or rotation)
+            const double outlierSigma = 2.0;
+            for (size_t i = 0; i < results.size(); i++)
+            {
+                auto& res = results[i];
+                double tDev = std::abs(res.tNorm - meanTNorm);
+                double aDev = std::abs(res.angle - meanAngle);
+
+                // Only flag outliers if we have enough captures and nonzero std dev
+                if (results.size() >= 4)
+                {
+                    if ((stdTNorm > 0.01 && tDev > outlierSigma * stdTNorm) ||
+                        (stdAngle > 0.01 && aDev > outlierSigma * stdAngle))
+                    {
+                        res.isOutlier = true;
+                    }
+                }
+
+                std::cout << "  " << std::setw(2) << (i + 1)
+                          << "  " << std::setw(10) << res.tNorm
+                          << "   " << std::setw(11) << res.angle
+                          << "   " << (res.isOutlier ? "OUTLIER" : "OK") << std::endl;
+            }
+
+            std::cout << "  --  ----------   -----------" << std::endl;
+            std::cout << "  Mean: " << std::setw(8) << meanTNorm
+                      << "   " << std::setw(11) << meanAngle << std::endl;
+            std::cout << "  StdDev: " << std::setw(6) << stdTNorm
+                      << "   " << std::setw(11) << stdAngle << std::endl;
+
+            // Step 5: Average only non-outlier captures
+            cv::Mat avgR = cv::Mat::zeros(3, 3, CV_64F);
+            cv::Mat avgT = cv::Mat::zeros(3, 1, CV_64F);
+            int usedCount = 0;
+
+            for (const auto& res : results)
+            {
+                if (!res.isOutlier)
+                {
+                    avgR += res.R;
+                    avgT += res.t;
+                    usedCount++;
+                }
+            }
+
+            if (usedCount == 0)
+            {
+                std::cout << "\nWARNING: All captures flagged as outliers. Using all captures." << std::endl;
+                for (const auto& res : results)
+                {
+                    avgR += res.R;
+                    avgT += res.t;
+                }
+                usedCount = static_cast<int>(results.size());
+            }
+
+            int outlierCount = static_cast<int>(results.size()) - usedCount;
+            if (outlierCount > 0)
+            {
+                std::cout << "\nRemoved " << outlierCount << " outlier(s), using "
+                          << usedCount << "/" << results.size() << " captures" << std::endl;
+            }
+
+            avgR /= static_cast<double>(usedCount);
+            avgT /= static_cast<double>(usedCount);
+
+            // Step 6: Recompute std dev on used captures only
+            double finalMeanTNorm = 0.0, finalMeanAngle = 0.0;
+            double maxTErr = 0.0, maxAErr = 0.0;
+            int finalCount = 0;
+            for (const auto& res : results)
+            {
+                if (!res.isOutlier)
+                {
+                    finalMeanTNorm += res.tNorm;
+                    finalMeanAngle += res.angle;
+                    finalCount++;
+                }
+            }
+            finalMeanTNorm /= finalCount;
+            finalMeanAngle /= finalCount;
+
+            double finalVarT = 0.0, finalVarA = 0.0;
+            for (const auto& res : results)
+            {
+                if (!res.isOutlier)
+                {
+                    double tErr = std::abs(res.tNorm - finalMeanTNorm);
+                    double aErr = std::abs(res.angle - finalMeanAngle);
+                    finalVarT += tErr * tErr;
+                    finalVarA += aErr * aErr;
+                    if (tErr > maxTErr) maxTErr = tErr;
+                    if (aErr > maxAErr) maxAErr = aErr;
+                }
+            }
+            double finalStdT = std::sqrt(finalVarT / finalCount);
+            double finalStdA = std::sqrt(finalVarA / finalCount);
+
+            // Re-orthogonalize R using SVD
+            cv::Mat U, S, Vt;
+            cv::SVD::compute(avgR, S, U, Vt);
+            cv::Mat finalR = U * Vt;
+
+            // Ensure proper rotation (det = +1)
+            if (cv::determinant(finalR) < 0)
+            {
+                finalR.col(2) *= -1.0;
+            }
+
+            cv::Mat rvec;
+            cv::Rodrigues(finalR, rvec);
+
+            hmdCalib.rotation = finalR;
+            hmdCalib.translation = avgT;
+            hmdCalib.rvec = rvec;
+            hmdCalib.numCaptures = static_cast<int>(captures.size());
+            hmdCalib.numUsed = usedCount;
+            hmdCalib.translationStdDev = finalStdT;
+            hmdCalib.rotationStdDev = finalStdA;
+            hmdCalib.maxTranslationError = maxTErr;
+            hmdCalib.maxRotationError = maxAErr;
+            hmdCalib.method = useDepth ? "horn_3d_depth" : "solvePnP";
+            hmdCalib.isValid = true;
+
+            // Step 7: Print final results with quality assessment
+            std::cout << "\n=== Bridge Calibration Complete ===" << std::endl;
+            std::cout << "Rotation matrix:\n" << finalR << std::endl;
+            std::cout << "Translation (mm): " << avgT.t() << std::endl;
+            std::cout << "||t|| = " << cv::norm(avgT) << " mm" << std::endl;
+
+            std::cout << "\n--- Consistency Metrics (after outlier removal) ---" << std::endl;
+            std::cout << "  Captures used:      " << usedCount << "/" << results.size() << std::endl;
+            std::cout << "  ||t|| std dev:      " << finalStdT << " mm" << std::endl;
+            std::cout << "  ||t|| max error:    " << maxTErr << " mm" << std::endl;
+            std::cout << "  Angle std dev:      " << finalStdA << " deg" << std::endl;
+            std::cout << "  Angle max error:    " << maxAErr << " deg" << std::endl;
+
+            // Quality assessment
+            std::cout << "\n--- Quality Assessment ---" << std::endl;
+            if (finalStdT < 2.0 && finalStdA < 1.0)
+                std::cout << "  EXCELLENT: Very consistent across captures" << std::endl;
+            else if (finalStdT < 5.0 && finalStdA < 2.0)
+                std::cout << "  GOOD: Reasonably consistent" << std::endl;
+            else if (finalStdT < 10.0 && finalStdA < 5.0)
+                std::cout << "  FAIR: Consider recapturing with better poses" << std::endl;
+            else
+                std::cout << "  POOR: High variance, recapture recommended" << std::endl;
+
+            std::cout << "  TIP: Physically measure checkerboard-to-lens distance and compare to ||t|| = "
+                      << std::setprecision(1) << cv::norm(avgT) << " mm" << std::endl;
+        }
+        else if ((key == 's' || key == 'S') && hmdCalib.isValid)  // Save
+        {
+            SaveHMDCalibrationJSON(hmdCalib, outputFile);
+        }
+
+        // Release depth images acquired this iteration
+        if (helmetDepthImg) k4a_image_release(helmetDepthImg);
+        if (externalDepthImg) k4a_image_release(externalDepthImg);
+    }
+
+    // Cleanup
+    g_captureRunning = false;
+    for (auto& thread : captureThreads)
+    {
+        if (thread.joinable()) thread.join();
+    }
+
+    for (auto& data : captureData)
+    {
+        if (data.depthImage) k4a_image_release(data.depthImage);
+    }
+
+    cv::destroyAllWindows();
+
+    for (auto& device : devices)
+    {
+        if (device.transformation) k4a_transformation_destroy(device.transformation);
+        if (device.device)
+        {
+            k4a_device_stop_cameras(device.device);
+            k4a_device_close(device.device);
+        }
+    }
+
+    return 0;
+}
+
+// ============================================================================
 // Print Usage
 // ============================================================================
 void PrintUsage()
 {
     std::cout << "\n=== Multi-Device Extrinsic Calibration Tool ===\n"
               << "USAGE: multi_device_calibration.exe [OPTIONS]\n\n"
+              << "=== Mode 1: Multi-Camera Calibration (default) ===\n"
+              << "Calibrates extrinsics between multiple fixed cameras.\n\n"
               << "Options:\n"
               << "  --rows N         Checkerboard inner corners (rows), default: " << CHECKERBOARD_ROWS << "\n"
               << "  --cols N         Checkerboard inner corners (cols), default: " << CHECKERBOARD_COLS << "\n"
@@ -556,15 +1608,41 @@ void PrintUsage()
               << "  --output FILE    Output filename prefix, default: calibration\n"
               << "  --primary SERIAL Serial number of PRIMARY camera (sync hub master port)\n"
               << "  --exclude SERIAL Exclude camera by serial number (can be used multiple times)\n"
-              << "\nInstructions:\n"
+              << "\n=== Mode 2: HMD Bridge Calibration (T_checker_to_A) ===\n"
+              << "Calibrates helmet camera using two checkerboards (bridge method).\n"
+              << "Ground board: visible to BOTH external and helmet cameras\n"
+              << "Helmet board: visible ONLY to external camera (attached to helmet)\n\n"
+              << "Options:\n"
+              << "  --hmd-bridge              Enable HMD bridge calibration mode\n"
+              << "  --bridge-depth            Use depth-based Horn's method instead of solvePnP\n"
+              << "  --helmet-serial SERIAL    Helmet camera serial number (required)\n"
+              << "  --ground-rows N           Ground checkerboard rows (default: " << CHECKERBOARD_ROWS << ")\n"
+              << "  --ground-cols N           Ground checkerboard cols (default: " << CHECKERBOARD_COLS << ")\n"
+              << "  --ground-square N         Ground square size in mm (default: " << SQUARE_SIZE_MM << ")\n"
+              << "  --helmet-rows N           Helmet checkerboard rows (default: " << HEAD_CB_ROWS << ")\n"
+              << "  --helmet-cols N           Helmet checkerboard cols (default: " << HEAD_CB_COLS << ")\n"
+              << "  --helmet-square N         Helmet square size in mm (default: " << HEAD_CB_SQUARE_MM << ")\n"
+              << "\nInstructions (Multi-Camera):\n"
               << "  1. Place checkerboard visible to ALL cameras\n"
-              << "  2. Press SPACE to capture and calibrate\n"
-              << "  3. Press 'S' to save calibration\n"
-              << "  4. Press ESC to quit\n"
+              << "  2. Press SPACE to capture (take 5-10 from different positions)\n"
+              << "  3. Press 'C' to compute averaged calibration\n"
+              << "  4. Press 'S' to save calibration\n"
+              << "  5. Press ESC to quit\n"
+              << "\nInstructions (HMD Bridge Calibration):\n"
+              << "  1. Place GROUND checkerboard on floor (visible to all cameras)\n"
+              << "  2. Attach HELMET checkerboard to helmet (visible to external camera)\n"
+              << "  3. Position so external camera sees BOTH boards, helmet camera sees GROUND board\n"
+              << "  4. Press SPACE to capture when all boards detected\n"
+              << "  5. Press 'C' to compute calibration\n"
+              << "  6. Press 'S' to save T_checker_to_A.json\n"
               << "\nExamples:\n"
-              << "  multi_device_calibration.exe --primary CL8T75400DC --rows 4 --cols 5\n"
+              << "  # Multi-camera calibration (exclude helmet camera)\n"
               << "  multi_device_calibration.exe --primary CL8T75400DC --exclude CL8T75400GD\n"
-              << "  multi_device_calibration.exe --exclude CAM1 --exclude CAM2\n"
+              << "\n  # HMD bridge calibration\n"
+              << "  multi_device_calibration.exe --hmd-bridge --helmet-serial CL8T75400GD \\\n"
+              << "      --ground-rows 6 --ground-cols 9 --ground-square 25 \\\n"
+              << "      --helmet-rows 4 --helmet-cols 5 --helmet-square 30 \\\n"
+              << "      --output T_checker_to_A\n"
               << std::endl;
 }
 
@@ -586,19 +1664,56 @@ int main(int argc, char** argv)
     std::string primarySerial = "";  // Serial number of PRIMARY camera (sync hub master port)
     std::vector<std::string> excludeSerials;  // Serial numbers to exclude from calibration
 
+    // HMD bridge calibration options
+    bool hmdBridgeMode = false;
+    bool bridgeDepth = false;
+    std::string helmetSerial = "";
+    int groundRows = CHECKERBOARD_ROWS;
+    int groundCols = CHECKERBOARD_COLS;
+    float groundSquare = SQUARE_SIZE_MM;
+    int helmetRows = HEAD_CB_ROWS;
+    int helmetCols = HEAD_CB_COLS;
+    float helmetSquare = HEAD_CB_SQUARE_MM;
+
     for (int i = 1; i < argc; i++)
     {
         std::string arg(argv[i]);
         if (arg == "--rows" && i + 1 < argc) checkerboardRows = std::atoi(argv[++i]);
         else if (arg == "--cols" && i + 1 < argc) checkerboardCols = std::atoi(argv[++i]);
-        else if (arg == "--square" && i + 1 < argc) squareSize = std::atof(argv[++i]);
+        else if (arg == "--square" && i + 1 < argc) squareSize = static_cast<float>(std::atof(argv[++i]));
         else if (arg == "--output" && i + 1 < argc) outputPrefix = argv[++i];
         else if (arg == "--primary" && i + 1 < argc) primarySerial = argv[++i];
         else if (arg == "--exclude" && i + 1 < argc) excludeSerials.push_back(argv[++i]);
+        // HMD bridge mode options
+        else if (arg == "--hmd-bridge") hmdBridgeMode = true;
+        else if (arg == "--bridge-depth") bridgeDepth = true;
+        else if (arg == "--helmet-serial" && i + 1 < argc) helmetSerial = argv[++i];
+        else if (arg == "--ground-rows" && i + 1 < argc) groundRows = std::atoi(argv[++i]);
+        else if (arg == "--ground-cols" && i + 1 < argc) groundCols = std::atoi(argv[++i]);
+        else if (arg == "--ground-square" && i + 1 < argc) groundSquare = static_cast<float>(std::atof(argv[++i]));
+        else if (arg == "--helmet-rows" && i + 1 < argc) helmetRows = std::atoi(argv[++i]);
+        else if (arg == "--helmet-cols" && i + 1 < argc) helmetCols = std::atoi(argv[++i]);
+        else if (arg == "--helmet-square" && i + 1 < argc) helmetSquare = static_cast<float>(std::atof(argv[++i]));
         else if (arg == "--help" || arg == "-h") {
             PrintUsage();
             return 0;
         }
+    }
+
+    // Dispatch to HMD bridge calibration mode if requested
+    if (hmdBridgeMode)
+    {
+        std::string hmdOutputFile = outputPrefix;
+        if (hmdOutputFile.find(".json") == std::string::npos)
+        {
+            hmdOutputFile += ".json";
+        }
+
+        return RunHMDCalibrationBridge(
+            groundRows, groundCols, groundSquare,
+            helmetRows, helmetCols, helmetSquare,
+            helmetSerial, primarySerial,
+            hmdOutputFile, bridgeDepth);
     }
 
     cv::Size patternSize(checkerboardCols, checkerboardRows);
@@ -719,41 +1834,35 @@ int main(int argc, char** argv)
     // Need COLOR for checkerboard detection, DEPTH for 3D conversion
     std::cout << "\nStarting cameras..." << std::endl;
 
+    int mode1SubordinateCount = 1;  // First subordinate gets 160*1, second gets 160*2, etc.
     for (int i = deviceCount - 1; i >= 0; i--)
     {
         k4a_device_configuration_t config = K4A_DEVICE_CONFIG_INIT_DISABLE_ALL;
         config.depth_mode = K4A_DEPTH_MODE_NFOV_UNBINNED;
-        config.color_resolution = K4A_COLOR_RESOLUTION_720P;
+        config.color_resolution = K4A_COLOR_RESOLUTION_1080P;
         config.color_format = K4A_IMAGE_FORMAT_COLOR_BGRA32;
         config.camera_fps = K4A_FRAMES_PER_SECOND_30;
         config.synchronized_images_only = true;
 
-        // Set sync mode for multi-device
-        // Depth delay prevents IR interference between cameras
-        // Reference: green_screen example from OrbbecSDK-K4A-Wrapper
-        constexpr int32_t MIN_TIME_BETWEEN_DEPTH_USEC = 160;
-
+        // Subordinate delay prevents IR interference between depth cameras.
+        // Each subordinate offsets by 160us * N (N=1,2,...) from master.
+        // Reference: Orbbec Femto Bolt multi-device sync documentation
         if (deviceCount > 1)
         {
             if (devices[i].isPrimary)
             {
                 config.wired_sync_mode = K4A_WIRED_SYNC_MODE_MASTER;
-                config.subordinate_delay_off_master_usec = 0;
-                // Master: capture depth slightly BEFORE color (-80μs)
-                config.depth_delay_off_color_usec = -(MIN_TIME_BETWEEN_DEPTH_USEC / 2);
             }
             else
             {
                 config.wired_sync_mode = K4A_WIRED_SYNC_MODE_SUBORDINATE;
-                config.subordinate_delay_off_master_usec = MIN_TIME_BETWEEN_DEPTH_USEC * devices[i].index;
-                // Subordinate: capture depth slightly AFTER color (+80μs)
-                config.depth_delay_off_color_usec = MIN_TIME_BETWEEN_DEPTH_USEC / 2;
+                config.subordinate_delay_off_master_usec = 160 * mode1SubordinateCount;
+                mode1SubordinateCount++;
             }
         }
         else
         {
             config.wired_sync_mode = K4A_WIRED_SYNC_MODE_STANDALONE;
-            config.depth_delay_off_color_usec = 0;
         }
 
         std::cout << "Starting device " << i << " ("
@@ -795,7 +1904,8 @@ int main(int argc, char** argv)
     std::cout << "\nAll devices started successfully!" << std::endl;
     std::cout << "\nInstructions:" << std::endl;
     std::cout << "  - Hold checkerboard visible to ALL cameras" << std::endl;
-    std::cout << "  - Press SPACE to capture and calibrate" << std::endl;
+    std::cout << "  - Press SPACE to capture (take 5-10 from different positions)" << std::endl;
+    std::cout << "  - Press 'C' to compute averaged calibration" << std::endl;
     std::cout << "  - Press 'S' to save calibration to file" << std::endl;
     std::cout << "  - Press ESC to quit" << std::endl;
 
@@ -805,7 +1915,7 @@ int main(int argc, char** argv)
         std::string windowName = "Device " + std::to_string(i) + " (" +
                                   (devices[i].isPrimary ? "PRIMARY" : "SECONDARY") + ")";
         cv::namedWindow(windowName, cv::WINDOW_NORMAL);
-        cv::resizeWindow(windowName, 640, 360);
+        cv::resizeWindow(windowName, 960, 540);
     }
 
     // Create capture data and start capture threads for each device
@@ -822,6 +1932,7 @@ int main(int argc, char** argv)
     std::this_thread::sleep_for(std::chrono::milliseconds(500));
 
     std::vector<ExtrinsicCalibration> calibrations(deviceCount);
+    std::vector<Mode1Capture> mode1Captures;
     bool calibrationDone = false;
     bool running = true;
 
@@ -870,9 +1981,17 @@ int main(int argc, char** argv)
                                 cv::FONT_HERSHEY_SIMPLEX, 1.0, cv::Scalar(0, 0, 255), 2);
                 }
 
+                if (!mode1Captures.empty())
+                {
+                    std::string capText = "Captures: " + std::to_string(mode1Captures.size());
+                    cv::putText(display, capText, cv::Point(10, 60),
+                                cv::FONT_HERSHEY_SIMPLEX, 1.0, cv::Scalar(255, 200, 0), 2);
+                }
+
                 if (calibrationDone && calibrations[i].isValid)
                 {
-                    cv::putText(display, "CALIBRATED", cv::Point(10, 60),
+                    int yPos = mode1Captures.empty() ? 60 : 90;
+                    cv::putText(display, "CALIBRATED", cv::Point(10, yPos),
                                 cv::FONT_HERSHEY_SIMPLEX, 1.0, cv::Scalar(0, 255, 0), 2);
                 }
 
@@ -889,7 +2008,7 @@ int main(int argc, char** argv)
         {
             running = false;
         }
-        else if (key == ' ')  // SPACE - Calibrate
+        else if (key == ' ')  // SPACE - Capture
         {
             // Check if all devices found checkerboard
             bool allFound = true;
@@ -904,7 +2023,7 @@ int main(int argc, char** argv)
 
             if (allFound)
             {
-                std::cout << "\n=== Computing Calibration ===" << std::endl;
+                std::cout << "\n=== Capturing ===" << std::endl;
 
                 // Find primary camera index
                 int primaryIdx = 0;
@@ -918,7 +2037,6 @@ int main(int argc, char** argv)
                 }
 
                 // Fix corner orientation for secondary cameras relative to primary
-                // This ensures consistent corner ordering even if checkerboard appears rotated
                 std::cout << "Checking corner orientation..." << std::endl;
                 for (uint32_t i = 0; i < deviceCount; i++)
                 {
@@ -931,6 +2049,16 @@ int main(int argc, char** argv)
                 // Convert 2D to 3D for each device
                 std::vector<std::vector<cv::Point3f>> allPoints3D(deviceCount);
                 bool allConverted = true;
+
+                // Known checkerboard geometry for Horn's method
+                std::vector<cv::Point3f> objectPoints = GenerateCheckerboardPoints(
+                    checkerboardRows, checkerboardCols, squareSize);
+
+                // Per-device results for both methods
+                std::vector<ExtrinsicCalibration> tempCalibs(deviceCount);  // SVD
+                std::vector<cv::Mat> T_obj_to_cam(deviceCount);            // Horn's
+                std::vector<double> hornRMS(deviceCount, 0.0);
+                bool hornOk = true;
 
                 for (uint32_t i = 0; i < deviceCount; i++)
                 {
@@ -946,42 +2074,605 @@ int main(int argc, char** argv)
 
                     std::cout << "  Converted " << allPoints3D[i].size() << " points to 3D" << std::endl;
 
-                    // Compute extrinsic calibration using SVD
-                    calibrations[i] = ComputeExtrinsicSVD(allPoints3D[i],
-                                                          devices[i].serialNumber,
-                                                          devices[i].index);
+                    // Method 1: SVD (principal axes)
+                    tempCalibs[i] = ComputeExtrinsicSVD(allPoints3D[i],
+                                                         devices[i].serialNumber,
+                                                         devices[i].index);
+
+                    // Method 2: Horn's method (3D-to-3D correspondence)
+                    if (!ComputePose3DTo3D(objectPoints, allPoints3D[i],
+                                           T_obj_to_cam[i], hornRMS[i]))
+                    {
+                        std::cerr << "  Horn's method failed" << std::endl;
+                        hornOk = false;
+                    }
+                    else
+                    {
+                        std::cout << "  Horn's RMS: " << std::fixed << std::setprecision(2)
+                                  << hornRMS[i] << " mm" << std::endl;
+                    }
                 }
 
-                if (allConverted)
+                if (allConverted && tempCalibs[primaryIdx].isValid)
                 {
-                    // Compute relative transforms (secondary cameras relative to primary)
-                    if (calibrations[0].isValid)
+                    // --- SVD relative transforms ---
+                    for (uint32_t i = 0; i < deviceCount; i++)
                     {
-                        for (uint32_t i = 1; i < deviceCount; i++)
+                        if (static_cast<int>(i) != primaryIdx && tempCalibs[i].isValid)
                         {
-                            if (calibrations[i].isValid)
+                            ComputeRelativeTransform(tempCalibs[primaryIdx], tempCalibs[i]);
+                        }
+                    }
+                    tempCalibs[primaryIdx].rotation = cv::Mat::eye(3, 3, CV_64F);
+                    tempCalibs[primaryIdx].translation = cv::Mat::zeros(3, 1, CV_64F);
+
+                    // --- Horn's relative transforms ---
+                    // T_s_to_p = T_obj_to_p * inv(T_obj_to_s)
+                    std::vector<cv::Mat> hornRelR(deviceCount);
+                    std::vector<cv::Mat> hornRelT(deviceCount);
+                    std::vector<bool> hornRelValid(deviceCount, false);
+
+                    if (hornOk)
+                    {
+                        cv::Mat R_p = T_obj_to_cam[primaryIdx](cv::Rect(0, 0, 3, 3));
+                        cv::Mat t_p = T_obj_to_cam[primaryIdx](cv::Rect(3, 0, 1, 3));
+
+                        hornRelR[primaryIdx] = cv::Mat::eye(3, 3, CV_64F);
+                        hornRelT[primaryIdx] = cv::Mat::zeros(3, 1, CV_64F);
+                        hornRelValid[primaryIdx] = true;
+
+                        for (uint32_t i = 0; i < deviceCount; i++)
+                        {
+                            if (static_cast<int>(i) != primaryIdx)
                             {
-                                ComputeRelativeTransform(calibrations[0], calibrations[i]);
-                                std::cout << "\nDevice " << i << " -> Device 0 transformation:" << std::endl;
-                                std::cout << "  Rotation:\n" << calibrations[i].rotation << std::endl;
-                                std::cout << "  Translation: " << calibrations[i].translation.t() << " mm" << std::endl;
+                                cv::Mat R_s = T_obj_to_cam[i](cv::Rect(0, 0, 3, 3));
+                                cv::Mat t_s = T_obj_to_cam[i](cv::Rect(3, 0, 1, 3));
+                                hornRelR[i] = R_p * R_s.t();
+                                hornRelT[i] = t_p - hornRelR[i] * t_s;
+                                hornRelValid[i] = true;
                             }
                         }
-
-                        // Primary camera is identity in its own coordinate system
-                        calibrations[0].rotation = cv::Mat::eye(3, 3, CV_64F);
-                        calibrations[0].translation = cv::Mat::zeros(3, 1, CV_64F);
                     }
 
-                    calibrationDone = true;
-                    std::cout << "\n=== Calibration Complete ===" << std::endl;
-                    std::cout << "Press 'S' to save, ESC to quit" << std::endl;
+                    // Store into Mode1Capture
+                    Mode1Capture cap;
+                    cap.rotations.resize(deviceCount);
+                    cap.translations.resize(deviceCount);
+                    cap.isValid.resize(deviceCount, false);
+                    cap.hornRotations.resize(deviceCount);
+                    cap.hornTranslations.resize(deviceCount);
+                    cap.hornIsValid.resize(deviceCount, false);
+                    cap.hornRMS.resize(deviceCount, 0.0);
+
+                    for (uint32_t i = 0; i < deviceCount; i++)
+                    {
+                        // SVD results
+                        if (tempCalibs[i].isValid)
+                        {
+                            cap.rotations[i] = tempCalibs[i].rotation.clone();
+                            cap.translations[i] = tempCalibs[i].translation.clone();
+                            cap.isValid[i] = true;
+                        }
+                        // Horn's results
+                        if (hornRelValid[i])
+                        {
+                            cap.hornRotations[i] = hornRelR[i].clone();
+                            cap.hornTranslations[i] = hornRelT[i].clone();
+                            cap.hornIsValid[i] = true;
+                            cap.hornRMS[i] = hornRMS[i];
+                        }
+                    }
+
+                    mode1Captures.push_back(cap);
+
+                    std::cout << "\nCapture " << mode1Captures.size() << " recorded" << std::endl;
+
+                    // Print per-device relative transform preview for secondary cameras
+                    std::cout << std::fixed;
+                    std::cout << "  Device     SVD ||t|| (mm)  angle (deg)    Horn ||t|| (mm)  angle (deg)  RMS (mm)" << std::endl;
+                    std::cout << "  ------     ---------------  -----------    ----------------  -----------  --------" << std::endl;
+                    for (uint32_t i = 0; i < deviceCount; i++)
+                    {
+                        if (static_cast<int>(i) == primaryIdx) continue;
+
+                        std::cout << "  " << std::setw(6) << i << "     ";
+
+                        if (cap.isValid[i])
+                        {
+                            double tNorm = cv::norm(cap.translations[i]);
+                            cv::Mat rvec;
+                            cv::Rodrigues(cap.rotations[i], rvec);
+                            double angle = cv::norm(rvec) * 180.0 / CV_PI;
+                            std::cout << std::setw(10) << std::setprecision(1) << tNorm
+                                      << "      " << std::setw(6) << std::setprecision(2) << angle;
+                        }
+                        else
+                        {
+                            std::cout << "     FAILED                ";
+                        }
+
+                        std::cout << "    ";
+
+                        if (cap.hornIsValid[i])
+                        {
+                            double hTNorm = cv::norm(cap.hornTranslations[i]);
+                            cv::Mat hRvec;
+                            cv::Rodrigues(cap.hornRotations[i], hRvec);
+                            double hAngle = cv::norm(hRvec) * 180.0 / CV_PI;
+                            std::cout << std::setw(11) << std::setprecision(1) << hTNorm
+                                      << "      " << std::setw(6) << std::setprecision(2) << hAngle
+                                      << "     " << std::setw(5) << std::setprecision(2) << cap.hornRMS[i];
+                        }
+                        else
+                        {
+                            std::cout << "      FAILED";
+                        }
+
+                        std::cout << std::endl;
+                    }
+
+                    std::cout << "Press SPACE for more captures, 'C' to compute, ESC to quit" << std::endl;
                 }
             }
             else
             {
-                std::cout << "Cannot calibrate: checkerboard not visible in all cameras" << std::endl;
+                std::cout << "Cannot capture: checkerboard not visible in all cameras" << std::endl;
             }
+        }
+        else if ((key == 'c' || key == 'C') && !mode1Captures.empty())  // Compute averaged calibration
+        {
+            std::cout << "\n=== Computing Averaged Calibration ===" << std::endl;
+            std::cout << "Total captures: " << mode1Captures.size() << std::endl;
+
+            // Find primary camera index
+            int primaryIdx = 0;
+            for (uint32_t i = 0; i < deviceCount; i++)
+            {
+                if (devices[i].isPrimary)
+                {
+                    primaryIdx = i;
+                    break;
+                }
+            }
+
+            // Primary camera: always identity
+            calibrations[primaryIdx].rotation = cv::Mat::eye(3, 3, CV_64F);
+            calibrations[primaryIdx].translation = cv::Mat::zeros(3, 1, CV_64F);
+            calibrations[primaryIdx].serialNumber = devices[primaryIdx].serialNumber;
+            calibrations[primaryIdx].deviceIndex = devices[primaryIdx].index;
+            calibrations[primaryIdx].isValid = true;
+            calibrations[primaryIdx].numCaptures = static_cast<int>(mode1Captures.size());
+            calibrations[primaryIdx].numUsed = static_cast<int>(mode1Captures.size());
+
+            // For each secondary camera independently
+            for (uint32_t camIdx = 0; camIdx < deviceCount; camIdx++)
+            {
+                if (static_cast<int>(camIdx) == primaryIdx) continue;
+
+                std::cout << "\n--- Device " << camIdx << " (" << devices[camIdx].serialNumber << ") ---" << std::endl;
+
+                // Collect per-capture R, t for this camera (both methods)
+                struct PerCaptureResult {
+                    cv::Mat R;
+                    cv::Mat t;
+                    double tNorm;
+                    double angle;
+                    bool isOutlier = false;
+                    // Horn's
+                    cv::Mat hornR;
+                    cv::Mat hornT;
+                    double hornTNorm = 0.0;
+                    double hornAngle = 0.0;
+                    double hornRMS = 0.0;
+                    bool hornValid = false;
+                    bool hornOutlier = false;
+                };
+
+                std::vector<PerCaptureResult> results;
+                results.reserve(mode1Captures.size());
+
+                for (const auto& cap : mode1Captures)
+                {
+                    if (!cap.isValid[camIdx]) continue;
+
+                    PerCaptureResult res;
+                    // SVD
+                    res.R = cap.rotations[camIdx].clone();
+                    res.t = cap.translations[camIdx].clone();
+                    res.tNorm = cv::norm(res.t);
+                    cv::Mat rvec;
+                    cv::Rodrigues(res.R, rvec);
+                    res.angle = cv::norm(rvec) * 180.0 / CV_PI;
+
+                    // Horn's
+                    if (camIdx < cap.hornIsValid.size() && cap.hornIsValid[camIdx])
+                    {
+                        res.hornR = cap.hornRotations[camIdx].clone();
+                        res.hornT = cap.hornTranslations[camIdx].clone();
+                        res.hornTNorm = cv::norm(res.hornT);
+                        cv::Mat hRvec;
+                        cv::Rodrigues(res.hornR, hRvec);
+                        res.hornAngle = cv::norm(hRvec) * 180.0 / CV_PI;
+                        res.hornRMS = cap.hornRMS[camIdx];
+                        res.hornValid = true;
+                    }
+
+                    results.push_back(res);
+                }
+
+                if (results.empty())
+                {
+                    std::cout << "  No valid captures for this device" << std::endl;
+                    calibrations[camIdx].isValid = false;
+                    continue;
+                }
+
+                // ===== SVD Statistics =====
+                double meanTNorm = 0.0, meanAngle = 0.0;
+                for (const auto& res : results)
+                {
+                    meanTNorm += res.tNorm;
+                    meanAngle += res.angle;
+                }
+                meanTNorm /= results.size();
+                meanAngle /= results.size();
+
+                double varTNorm = 0.0, varAngle = 0.0;
+                for (const auto& res : results)
+                {
+                    varTNorm += (res.tNorm - meanTNorm) * (res.tNorm - meanTNorm);
+                    varAngle += (res.angle - meanAngle) * (res.angle - meanAngle);
+                }
+                double stdTNorm = std::sqrt(varTNorm / results.size());
+                double stdAngle = std::sqrt(varAngle / results.size());
+
+                // ===== Horn's Statistics =====
+                int hornCount = 0;
+                double hornMeanTNorm = 0.0, hornMeanAngle = 0.0;
+                for (const auto& res : results)
+                {
+                    if (res.hornValid)
+                    {
+                        hornMeanTNorm += res.hornTNorm;
+                        hornMeanAngle += res.hornAngle;
+                        hornCount++;
+                    }
+                }
+                double hornStdTNorm = 0.0, hornStdAngle = 0.0;
+                if (hornCount > 0)
+                {
+                    hornMeanTNorm /= hornCount;
+                    hornMeanAngle /= hornCount;
+                    double hVarT = 0.0, hVarA = 0.0;
+                    for (const auto& res : results)
+                    {
+                        if (res.hornValid)
+                        {
+                            hVarT += (res.hornTNorm - hornMeanTNorm) * (res.hornTNorm - hornMeanTNorm);
+                            hVarA += (res.hornAngle - hornMeanAngle) * (res.hornAngle - hornMeanAngle);
+                        }
+                    }
+                    hornStdTNorm = std::sqrt(hVarT / hornCount);
+                    hornStdAngle = std::sqrt(hVarA / hornCount);
+                }
+
+                // Print per-capture table (both methods side by side)
+                std::cout << std::fixed << std::setprecision(2);
+                std::cout << "        --- SVD ---                    --- Horn's ---" << std::endl;
+                std::cout << "  #   ||t|| (mm)   angle (deg)  st    ||t|| (mm)   angle (deg)  RMS    st" << std::endl;
+                std::cout << "  --  ----------   -----------  --    ----------   -----------  -----  --" << std::endl;
+
+                // SVD outlier detection (>2 sigma, needs >=4 captures)
+                const double outlierSigma = 2.0;
+                for (size_t i = 0; i < results.size(); i++)
+                {
+                    auto& res = results[i];
+                    // SVD outlier
+                    double tDev = std::abs(res.tNorm - meanTNorm);
+                    double aDev = std::abs(res.angle - meanAngle);
+                    if (results.size() >= 4)
+                    {
+                        if ((stdTNorm > 0.01 && tDev > outlierSigma * stdTNorm) ||
+                            (stdAngle > 0.01 && aDev > outlierSigma * stdAngle))
+                        {
+                            res.isOutlier = true;
+                        }
+                    }
+
+                    // Horn's outlier
+                    if (res.hornValid && hornCount >= 4)
+                    {
+                        double hTDev = std::abs(res.hornTNorm - hornMeanTNorm);
+                        double hADev = std::abs(res.hornAngle - hornMeanAngle);
+                        if ((hornStdTNorm > 0.01 && hTDev > outlierSigma * hornStdTNorm) ||
+                            (hornStdAngle > 0.01 && hADev > outlierSigma * hornStdAngle))
+                        {
+                            res.hornOutlier = true;
+                        }
+                    }
+
+                    std::cout << "  " << std::setw(2) << (i + 1)
+                              << "  " << std::setw(10) << res.tNorm
+                              << "   " << std::setw(11) << res.angle
+                              << "  " << std::setw(2) << (res.isOutlier ? "X " : "OK");
+
+                    if (res.hornValid)
+                    {
+                        std::cout << "    " << std::setw(10) << res.hornTNorm
+                                  << "   " << std::setw(11) << res.hornAngle
+                                  << "  " << std::setw(5) << res.hornRMS
+                                  << "  " << std::setw(2) << (res.hornOutlier ? "X " : "OK");
+                    }
+                    std::cout << std::endl;
+                }
+
+                std::cout << "  --  ----------   -----------        ----------   -----------  -----" << std::endl;
+                std::cout << "  Mean: " << std::setw(8) << meanTNorm
+                          << "   " << std::setw(11) << meanAngle;
+                if (hornCount > 0)
+                    std::cout << "      " << std::setw(8) << hornMeanTNorm
+                              << "   " << std::setw(11) << hornMeanAngle;
+                std::cout << std::endl;
+                std::cout << "  StdD: " << std::setw(8) << stdTNorm
+                          << "   " << std::setw(11) << stdAngle;
+                if (hornCount > 0)
+                    std::cout << "      " << std::setw(8) << hornStdTNorm
+                              << "   " << std::setw(11) << hornStdAngle;
+                std::cout << std::endl;
+
+                // ===== SVD Averaging (non-outlier) =====
+                cv::Mat avgR = cv::Mat::zeros(3, 3, CV_64F);
+                cv::Mat avgT = cv::Mat::zeros(3, 1, CV_64F);
+                int usedCount = 0;
+
+                for (const auto& res : results)
+                {
+                    if (!res.isOutlier)
+                    {
+                        avgR += res.R;
+                        avgT += res.t;
+                        usedCount++;
+                    }
+                }
+
+                if (usedCount == 0)
+                {
+                    std::cout << "\n  SVD WARNING: All captures flagged as outliers. Using all." << std::endl;
+                    for (const auto& res : results)
+                    {
+                        avgR += res.R;
+                        avgT += res.t;
+                    }
+                    usedCount = static_cast<int>(results.size());
+                }
+
+                int outlierCount = static_cast<int>(results.size()) - usedCount;
+                avgR /= static_cast<double>(usedCount);
+                avgT /= static_cast<double>(usedCount);
+
+                // SVD: Recompute std dev on used captures only
+                double finalMeanTNorm = 0.0, finalMeanAngle = 0.0;
+                double maxTErr = 0.0, maxAErr = 0.0;
+                int finalCount = 0;
+                for (const auto& res : results)
+                {
+                    if (!res.isOutlier)
+                    {
+                        finalMeanTNorm += res.tNorm;
+                        finalMeanAngle += res.angle;
+                        finalCount++;
+                    }
+                }
+                finalMeanTNorm /= finalCount;
+                finalMeanAngle /= finalCount;
+
+                double finalVarT = 0.0, finalVarA = 0.0;
+                for (const auto& res : results)
+                {
+                    if (!res.isOutlier)
+                    {
+                        double tErr = std::abs(res.tNorm - finalMeanTNorm);
+                        double aErr = std::abs(res.angle - finalMeanAngle);
+                        finalVarT += tErr * tErr;
+                        finalVarA += aErr * aErr;
+                        if (tErr > maxTErr) maxTErr = tErr;
+                        if (aErr > maxAErr) maxAErr = aErr;
+                    }
+                }
+                double finalStdT = std::sqrt(finalVarT / finalCount);
+                double finalStdA = std::sqrt(finalVarA / finalCount);
+
+                // Re-orthogonalize averaged R via SVD
+                cv::Mat U, S, Vt;
+                cv::SVD::compute(avgR, S, U, Vt);
+                cv::Mat finalR = U * Vt;
+
+                if (cv::determinant(finalR) < 0)
+                {
+                    finalR.col(2) *= -1.0;
+                }
+
+                // ===== Horn's Averaging (non-outlier) =====
+                cv::Mat hornAvgR = cv::Mat::zeros(3, 3, CV_64F);
+                cv::Mat hornAvgT = cv::Mat::zeros(3, 1, CV_64F);
+                int hornUsedCount = 0;
+
+                for (const auto& res : results)
+                {
+                    if (res.hornValid && !res.hornOutlier)
+                    {
+                        hornAvgR += res.hornR;
+                        hornAvgT += res.hornT;
+                        hornUsedCount++;
+                    }
+                }
+
+                cv::Mat hornFinalR, hornFinalT;
+                double hFinalStdT = 0.0, hFinalStdA = 0.0;
+                double hMaxTErr = 0.0, hMaxAErr = 0.0;
+                int hornFinalCount = 0;
+
+                if (hornUsedCount == 0 && hornCount > 0)
+                {
+                    std::cout << "\n  Horn WARNING: All captures flagged as outliers. Using all." << std::endl;
+                    for (const auto& res : results)
+                    {
+                        if (res.hornValid)
+                        {
+                            hornAvgR += res.hornR;
+                            hornAvgT += res.hornT;
+                            hornUsedCount++;
+                        }
+                    }
+                }
+
+                if (hornUsedCount > 0)
+                {
+                    hornAvgR /= static_cast<double>(hornUsedCount);
+                    hornAvgT /= static_cast<double>(hornUsedCount);
+
+                    // Re-orthogonalize Horn's averaged R
+                    cv::Mat hU, hS, hVt;
+                    cv::SVD::compute(hornAvgR, hS, hU, hVt);
+                    hornFinalR = hU * hVt;
+                    if (cv::determinant(hornFinalR) < 0)
+                        hornFinalR.col(2) *= -1.0;
+                    hornFinalT = hornAvgT;
+
+                    // Horn's: Recompute std dev on used captures
+                    double hMeanT = 0.0, hMeanA = 0.0;
+                    for (const auto& res : results)
+                    {
+                        if (res.hornValid && !res.hornOutlier)
+                        {
+                            hMeanT += res.hornTNorm;
+                            hMeanA += res.hornAngle;
+                            hornFinalCount++;
+                        }
+                    }
+                    hMeanT /= hornFinalCount;
+                    hMeanA /= hornFinalCount;
+
+                    double hVarTF = 0.0, hVarAF = 0.0;
+                    for (const auto& res : results)
+                    {
+                        if (res.hornValid && !res.hornOutlier)
+                        {
+                            double tE = std::abs(res.hornTNorm - hMeanT);
+                            double aE = std::abs(res.hornAngle - hMeanA);
+                            hVarTF += tE * tE;
+                            hVarAF += aE * aE;
+                            if (tE > hMaxTErr) hMaxTErr = tE;
+                            if (aE > hMaxAErr) hMaxAErr = aE;
+                        }
+                    }
+                    hFinalStdT = std::sqrt(hVarTF / hornFinalCount);
+                    hFinalStdA = std::sqrt(hVarAF / hornFinalCount);
+                }
+
+                // Store SVD results in calibrations (primary output)
+                calibrations[camIdx].rotation = finalR;
+                calibrations[camIdx].translation = avgT;
+                calibrations[camIdx].serialNumber = devices[camIdx].serialNumber;
+                calibrations[camIdx].deviceIndex = devices[camIdx].index;
+                calibrations[camIdx].isValid = true;
+                calibrations[camIdx].numCaptures = static_cast<int>(results.size());
+                calibrations[camIdx].numUsed = usedCount;
+                calibrations[camIdx].translationStdDev = finalStdT;
+                calibrations[camIdx].rotationStdDev = finalStdA;
+                calibrations[camIdx].maxTranslationError = maxTErr;
+                calibrations[camIdx].maxRotationError = maxAErr;
+
+                // Print SVD results
+                std::cout << "\n  ===== SVD Method =====" << std::endl;
+                if (outlierCount > 0)
+                    std::cout << "  Removed " << outlierCount << " outlier(s), using "
+                              << usedCount << "/" << results.size() << " captures" << std::endl;
+                std::cout << "  Rotation matrix:\n" << finalR << std::endl;
+                std::cout << "  Translation (mm): " << avgT.t() << std::endl;
+                std::cout << "  ||t|| = " << std::setprecision(1) << cv::norm(avgT) << " mm" << std::endl;
+                std::cout << "  Consistency: stdT=" << std::setprecision(2) << finalStdT
+                          << " mm, stdA=" << finalStdA << " deg" << std::endl;
+
+                // Print Horn's results
+                if (hornUsedCount > 0)
+                {
+                    int hornOutlierCount = hornCount - hornUsedCount;
+                    std::cout << "\n  ===== Horn's Method =====" << std::endl;
+                    if (hornOutlierCount > 0)
+                        std::cout << "  Removed " << hornOutlierCount << " outlier(s), using "
+                                  << hornUsedCount << "/" << hornCount << " captures" << std::endl;
+                    std::cout << "  Rotation matrix:\n" << hornFinalR << std::endl;
+                    std::cout << "  Translation (mm): " << hornFinalT.t() << std::endl;
+                    std::cout << "  ||t|| = " << std::setprecision(1) << cv::norm(hornFinalT) << " mm" << std::endl;
+                    std::cout << "  Consistency: stdT=" << std::setprecision(2) << hFinalStdT
+                              << " mm, stdA=" << hFinalStdA << " deg" << std::endl;
+
+                    // Cross-validation: compare SVD vs Horn's
+                    std::cout << "\n  ===== Cross-Validation (SVD vs Horn's) =====" << std::endl;
+                    double tDiff = cv::norm(avgT - hornFinalT);
+                    cv::Mat Rdiff = finalR * hornFinalR.t();
+                    cv::Mat rdiffVec;
+                    cv::Rodrigues(Rdiff, rdiffVec);
+                    double angleDiff = cv::norm(rdiffVec) * 180.0 / CV_PI;
+                    std::cout << "  ||t_svd - t_horn|| = " << std::setprecision(1) << tDiff << " mm" << std::endl;
+                    std::cout << "  Rotation difference = " << std::setprecision(3) << angleDiff << " deg" << std::endl;
+
+                    if (tDiff < 5.0 && angleDiff < 1.0)
+                        std::cout << "  AGREEMENT: Both methods agree closely" << std::endl;
+                    else if (tDiff < 15.0 && angleDiff < 3.0)
+                        std::cout << "  MODERATE: Some disagreement, check conditions" << std::endl;
+                    else
+                        std::cout << "  DIVERGENCE: Methods disagree significantly, investigate" << std::endl;
+
+                    // Use Horn's if it has better consistency
+                    if (hFinalStdT < finalStdT * 0.5 && hFinalStdA < finalStdA * 0.5)
+                    {
+                        std::cout << "\n  NOTE: Horn's method shows significantly better consistency." << std::endl;
+                        std::cout << "  Consider using Horn's results. (Currently saving SVD results.)" << std::endl;
+                    }
+                }
+
+                std::cout << "\n  --- Consistency Metrics (SVD, after outlier removal) ---" << std::endl;
+                std::cout << "  Captures used:      " << usedCount << "/" << results.size() << std::endl;
+                std::cout << "  ||t|| std dev:      " << finalStdT << " mm" << std::endl;
+                std::cout << "  ||t|| max error:    " << maxTErr << " mm" << std::endl;
+                std::cout << "  Angle std dev:      " << finalStdA << " deg" << std::endl;
+                std::cout << "  Angle max error:    " << maxAErr << " deg" << std::endl;
+
+                if (hornUsedCount > 0)
+                {
+                    std::cout << "\n  --- Consistency Metrics (Horn's, after outlier removal) ---" << std::endl;
+                    std::cout << "  Captures used:      " << hornUsedCount << "/" << hornCount << std::endl;
+                    std::cout << "  ||t|| std dev:      " << hFinalStdT << " mm" << std::endl;
+                    std::cout << "  ||t|| max error:    " << hMaxTErr << " mm" << std::endl;
+                    std::cout << "  Angle std dev:      " << hFinalStdA << " deg" << std::endl;
+                    std::cout << "  Angle max error:    " << hMaxAErr << " deg" << std::endl;
+                }
+
+                // Quality assessment (based on better method)
+                double bestStdT = finalStdT;
+                double bestStdA = finalStdA;
+                if (hornUsedCount > 0)
+                {
+                    bestStdT = std::min(finalStdT, hFinalStdT);
+                    bestStdA = std::min(finalStdA, hFinalStdA);
+                }
+
+                std::cout << "\n  --- Quality Assessment ---" << std::endl;
+                if (bestStdT < 2.0 && bestStdA < 1.0)
+                    std::cout << "  EXCELLENT: Very consistent across captures" << std::endl;
+                else if (bestStdT < 5.0 && bestStdA < 2.0)
+                    std::cout << "  GOOD: Reasonably consistent" << std::endl;
+                else if (bestStdT < 10.0 && bestStdA < 5.0)
+                    std::cout << "  FAIR: Consider recapturing with better poses" << std::endl;
+                else
+                    std::cout << "  POOR: High variance, recapture recommended" << std::endl;
+            }
+
+            calibrationDone = true;
+            std::cout << "\n=== Calibration Complete ===" << std::endl;
+            std::cout << "Press 'S' to save, ESC to quit" << std::endl;
         }
         else if (key == 's' || key == 'S')  // Save
         {
@@ -992,7 +2683,7 @@ int main(int argc, char** argv)
             }
             else
             {
-                std::cout << "No calibration to save. Press SPACE to calibrate first." << std::endl;
+                std::cout << "No calibration to save. Press SPACE to capture, then 'C' to compute." << std::endl;
             }
         }
 

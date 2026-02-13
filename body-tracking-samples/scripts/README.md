@@ -1,6 +1,6 @@
-# Data Synchronization Scripts
+# Data Processing & Visualization Scripts
 
-Post-processing tools for synchronizing skeleton tracking data with HMD/Controller data.
+Post-processing tools for synchronizing skeleton tracking data with HMD/Controller data and visualizing ego-view datasets.
 
 ## Overview
 
@@ -173,8 +173,94 @@ SUMMARY
 6. **Cross-correlate**: Find peak lag using `scipy.signal.correlate`
 7. **Output**: Delay in milliseconds
 
+---
+
+## Ego-View Dataset Visualizer
+
+Visualizes the ego-view dataset output from [multi_device_offline_processor](../multi_device_offline_processor/) — overlays 2D skeleton joints onto helmet camera images and shows 3D joints in a separate figure.
+
+### Quick Start
+
+```bash
+# Interactive preview (side-by-side 2D overlay + 3D skeleton)
+python visualize_ego_dataset.py --input ego_dataset/
+
+# 2D overlay only
+python visualize_ego_dataset.py --input ego_dataset/ --view 2d
+
+# 3D skeleton only
+python visualize_ego_dataset.py --input ego_dataset/ --view 3d
+```
+
+### Output Modes
+
+```bash
+# Save overlay images to a directory
+python visualize_ego_dataset.py --input ego_dataset/ --output overlays/ --mode images
+
+# Save video (2D overlay, fast OpenCV export)
+python visualize_ego_dataset.py --input ego_dataset/ --output overlay.mp4 --mode video --view 2d
+
+# Save video (side-by-side 2D + 3D via matplotlib)
+python visualize_ego_dataset.py --input ego_dataset/ --output combined.mp4 --mode video --view both
+```
+
+### Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--input`, `-i` | (required) | Path to `ego_dataset/` directory |
+| `--output`, `-o` | (auto) | Output path (directory for images, file for video) |
+| `--mode` | `preview` | `preview`, `images`, or `video` |
+| `--view` | `both` | `2d` (overlay only), `3d` (skeleton only), or `both` (side-by-side) |
+| `--fps` | `30` | Video frame rate |
+| `--min-confidence` | `1` | Minimum joint confidence to display (0-3) |
+
+### Interactive Preview Controls
+
+| Key | Action |
+|-----|--------|
+| Left / Right | Previous / Next frame |
+| PgUp / PgDown | Skip 10 frames |
+| Home / End | First / Last frame |
+| Slider | Jump to any frame |
+
+### What It Shows
+
+**2D Overlay** — Skeleton bones and joints drawn on the helmet camera image, color-coded by body part:
+- Green: spine (pelvis → neck)
+- Red: head/face
+- Blue: left arm
+- Orange: right arm
+- Purple: left leg
+- Teal: right leg
+
+Joint circle size scales with confidence level. A text overlay shows frame number, timestamp, and whether the checkerboard was detected.
+
+**3D Skeleton** — Interactive matplotlib 3D plot of all 32 joints in the helmet camera coordinate frame (mm). Same color coding. Axes auto-scale to the skeleton bounding box.
+
+### Expected Input
+
+The `ego_dataset/` directory produced by `multi_device_offline_processor --helmet-serial ...`:
+
+```
+ego_dataset/
+├── images/
+│   ├── frame_000000.jpg
+│   └── ...
+├── annotations/
+│   ├── frame_000000.json   ← per-frame: camera_pose, skeleton_3d, skeleton_2d
+│   └── ...
+└── metadata.json
+```
+
+See the [multi_device_offline_processor README](../multi_device_offline_processor/README.md#ego-view-output) for the full JSON schema.
+
+---
+
 ## Related Projects
 
 - [multi_device_body_viewer](../multi_device_body_viewer/) - C++ skeleton viewer with CSV recording
+- [multi_device_offline_processor](../multi_device_offline_processor/) - Offline body tracking with ego-view dataset generation
 - [sample_unity_bodytracking](../sample_unity_bodytracking/) - Unity body tracking with HMD recording
 - [sample_unity_hmd_recorder](../sample_unity_hmd_recorder/) - Standalone HMD/Controller recorder

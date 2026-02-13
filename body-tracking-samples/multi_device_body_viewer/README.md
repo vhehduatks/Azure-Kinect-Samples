@@ -221,6 +221,79 @@ multi_device_body_viewer.exe --primary CL3FC3100HN --no-udp
 | `STOP_RECORD` | Stop recording |
 | `CYCLE_CAMERA` | Cycle camera view |
 
+## Helmet Camera Overlay
+
+Project the fused skeleton onto a helmet-mounted camera's live feed for calibration verification. The helmet camera has a checkerboard rigidly attached, and the fixed cameras detect it to compute the helmet's pose in real-time.
+
+### Requirements
+
+- Helmet-mounted Orbbec Femto Bolt camera
+- Checkerboard rigidly attached to the helmet
+- `T_checker_to_A.json` from `hmd_calibration` (defines checkerboard-to-camera transform)
+- Extrinsic calibration file (`calibration.json`) from `multi_device_calibration`
+
+### Usage
+
+```bash
+multi_device_body_viewer.exe \
+  --primary CL8T75400DC \
+  --calibration calibration.json \
+  --helmet-serial CL3FC3100AB \
+  --t-checker-to-a T_checker_to_A.json \
+  --helmet-cb-rows 4 \
+  --helmet-cb-cols 5 \
+  --helmet-cb-square 30
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--helmet-serial SN` | (required) | Serial number of helmet-mounted camera |
+| `--t-checker-to-a FILE` | `T_checker_to_A.json` | Checkerboard-to-camera transform |
+| `--helmet-cb-rows N` | 4 | Checkerboard inner corner rows |
+| `--helmet-cb-cols N` | 5 | Checkerboard inner corner cols |
+| `--helmet-cb-square N` | 30 | Square size in mm |
+
+### How It Works
+
+```
+Fixed Camera 0 ──► Body Tracker ──► Fused Skeleton (world frame)
+Fixed Camera 1 ──► Body Tracker ──┘        │
+  ...                                      │
+                                           ▼
+Fixed Camera N ──► Detect Checkerboard ──► Helmet Pose (world frame)
+                   Convert to 3D              │
+                   Transform to world         │
+                   Compose with T_checker_to_A│
+                                              ▼
+Helmet Camera ──► Color Image ──► Project skeleton ──► cv::imshow
+```
+
+1. **Fixed cameras** detect the checkerboard on the helmet and compute its 3D pose in the world frame
+2. **Multi-camera fusion**: When multiple fixed cameras see the checkerboard, their pose estimates are fused using inverse-square-distance weighting
+3. **Outlier rejection**: With 3+ detections, candidates >100mm from the median translation are rejected before fusion
+4. **EMA smoothing**: Fused pose is temporally smoothed (α=0.75) to reduce frame-to-frame jitter, with a 200ms staleness guard to avoid ghost positions after detection gaps
+5. The checkerboard pose is composed with `T_checker_to_A` to get the helmet camera's pose
+6. Fused skeleton joints are transformed from world to helmet camera coordinates
+7. Joints are projected to 2D using `k4a_calibration_3d_to_2d` and drawn on the color image
+
+### Runtime Controls
+
+Press **V** to toggle the helmet overlay window on/off.
+
+### Status Indicators
+
+- **Green "TRACKING"**: Checkerboard detected, skeleton projected
+- **Red "NO CHECKERBOARD"**: No checkerboard visible to any fixed camera
+- **Red "CHECKERBOARD LOST"**: Detection stale (>500ms since last detection)
+
+### Build Note
+
+The helmet overlay requires OpenCV 4.12.0. Ensure `opencv_world4120.dll` is in the output directory alongside the Orbbec DLLs:
+
+```powershell
+Copy-Item "C:\opencv\build\x64\vc16\bin\opencv_world4120.dll" ".\build\bin\Release" -Force
+```
+
 ## Sync Hub Configuration
 
 The `--primary` option must match the camera connected to the sync hub's PRIMARY/MASTER port:

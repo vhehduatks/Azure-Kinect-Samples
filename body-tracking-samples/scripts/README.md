@@ -354,6 +354,59 @@ After processing, `batch_summary.json` contains:
 
 ---
 
+## Batch Ego Dataset Visualizer
+
+Visualizes batch ego-view datasets with optional HMD/controller trajectory overlay. Works with output from `batch_ego_dataset.py`.
+
+### Quick Start
+
+```bash
+# List all sessions
+python visualize_batch_ego_dataset.py --batch-dir batch_out/ --list
+
+# Interactive preview of a session
+python visualize_batch_ego_dataset.py --batch-dir batch_out/ --session Dancing1_20260214_001511
+
+# Interactive preview with HMD overlay
+python visualize_batch_ego_dataset.py --batch-dir batch_out/ \
+    --session Dancing1_20260214_001511 --hmd-dir Test/
+
+# Export videos for all sessions
+python visualize_batch_ego_dataset.py --batch-dir batch_out/ --mode video --hmd-dir Test/
+```
+
+### Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--batch-dir`, `-b` | (required) | Batch output directory |
+| `--session`, `-s` | (auto) | Session name (default: first for preview, all for video) |
+| `--hmd-dir` | (none) | Directory with HMD CSV files for overlay |
+| `--mode` | `preview` | `preview` (interactive) or `video` (MP4 export) |
+| `--fps` | `30` | Video frame rate |
+| `--min-confidence` | `1` | Minimum joint confidence (0-3) |
+| `--list` | off | List available sessions and exit |
+
+### Visualization Panels
+
+When HMD data is provided, the display shows three panels:
+
+1. **Ego-View 2D** — Helmet camera image with skeleton overlay (bones color-coded by body part)
+2. **3D Skeleton + HMD** — 3D view with skeleton joints, HMD position (red diamond), and controller positions (blue/orange circles) with trailing trajectories
+3. **HMD Height** — Timeseries of HMD and controller Y-positions over time, with a vertical line marking the current frame
+
+Without HMD data, panels 1 and 2 are shown (same as `visualize_ego_dataset.py`).
+
+### Interactive Controls
+
+| Key | Action |
+|-----|--------|
+| Left / Right | Previous / Next frame |
+| PgUp / PgDown | Skip 10 frames |
+| Home / End | First / Last frame |
+
+---
+
 ## Related Projects
 
 - [multi_device_body_viewer](../multi_device_body_viewer/) - C++ skeleton viewer with CSV recording

@@ -91,6 +91,8 @@ def load_hmd_csv(filepath: str) -> pd.DataFrame:
     """
     print(f"Loading HMD data: {filepath}")
     df = pd.read_csv(filepath)
+    # Strip whitespace from column names (some CSVs have " timestamp_ms" etc.)
+    df.columns = [c.strip() for c in df.columns]
     print(f"  Rows: {len(df)}")
     print(f"  Columns: {list(df.columns)[:10]}...")
     return df
@@ -202,12 +204,29 @@ def extract_hmd_points(df: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray, np.nda
         raise ValueError(f"Unknown HMD CSV format. Columns: {list(df.columns)}")
 
     # Get timestamps
-    if 'timestamp_ms' in df.columns:
-        timestamps = df['timestamp_ms'].values
+    if 'milisecond' in df.columns:
+        timestamps = df['milisecond'].values.astype(np.float64)
+    elif 'timestamp_ms' in df.columns:
+        ts_col = df['timestamp_ms']
+        if ts_col.dtype == object:
+            # Handle HH:MM:SS:mmm string format
+            def parse_ts(s):
+                parts = str(s).split(':')
+                if len(parts) == 4:
+                    h, m, sec, ms = int(parts[0]), int(parts[1]), int(parts[2]), int(parts[3])
+                    return (h * 3600 + m * 60 + sec) * 1000 + ms
+                return 0
+            timestamps = np.array([parse_ts(v) for v in ts_col], dtype=np.float64)
+        else:
+            timestamps = ts_col.values.astype(np.float64)
     elif 'Timestamp' in df.columns:
         timestamps = pd.to_datetime(df['Timestamp']).astype(np.int64) // 10**6
-    else:
+    elif 'frame' in df.columns:
+        timestamps = df['frame'].values * (1000 / 30)
+    elif 'Frame' in df.columns:
         timestamps = df['Frame'].values * (1000 / 30)
+    else:
+        raise KeyError(f"No timestamp column found in HMD CSV. Columns: {list(df.columns)}")
 
     return timestamps, hmd, left_ctrl, right_ctrl
 

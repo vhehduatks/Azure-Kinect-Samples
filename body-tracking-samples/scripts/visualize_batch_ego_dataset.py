@@ -3,7 +3,21 @@
 Batch Ego Dataset Visualizer with HMD Overlay
 
 Visualizes ego-view datasets produced by batch_ego_dataset.py, with optional
-HMD/controller trajectory overlay in the 3D view.
+HMD/controller trajectory overlay.
+
+Layout (with HMD):
+    +-------------------+-------------------+
+    | Ego-View 2D       | 3D Skeleton       |
+    | (helmet camera)   | (camera frame)    |
+    +-------------------+-------------------+
+    | HMD 3D Trajectory | HMD Timeseries    |
+    | (Unity world)     | (height + speed)  |
+    +-------------------+-------------------+
+
+Layout (without HMD):
+    +-------------------+-------------------+
+    | Ego-View 2D       | 3D Skeleton       |
+    +-------------------+-------------------+
 
 Usage:
     # List all sessions in batch output
@@ -13,14 +27,14 @@ Usage:
     python visualize_batch_ego_dataset.py --batch-dir batch_out/ --session Dancing1_20260214_001511
 
     # Interactive preview with HMD overlay
-    python visualize_batch_ego_dataset.py --batch-dir batch_out/ --session Dancing1_20260214_001511 \
+    python visualize_batch_ego_dataset.py --batch-dir batch_out/ --session Dancing1_20260214_001511 \\
         --hmd-dir Test/
 
     # Export videos for all sessions
     python visualize_batch_ego_dataset.py --batch-dir batch_out/ --mode video --hmd-dir Test/
 
     # Export video for one session
-    python visualize_batch_ego_dataset.py --batch-dir batch_out/ --session Dancing1_20260214_001511 \
+    python visualize_batch_ego_dataset.py --batch-dir batch_out/ --session Dancing1_20260214_001511 \\
         --mode video --hmd-dir Test/
 """
 
@@ -68,34 +82,43 @@ class HMDData:
         self.path = Path(csv_path)
         self.df = pd.read_csv(self.path)
 
-        # Normalize column names (strip whitespace)
+        # Strip whitespace from column names (some CSVs have " timestamp_ms")
         self.df.columns = [c.strip() for c in self.df.columns]
 
-        # Parse timestamps
+        # Parse timestamps (epoch ms)
         if 'milisecond' in self.df.columns:
             self.timestamps_ms = self.df['milisecond'].values.astype(np.float64)
         elif 'timestamp_ms' in self.df.columns:
             ts_col = self.df['timestamp_ms']
-            # Handle HH:MM:SS:mmm format
             if ts_col.dtype == object:
                 self.timestamps_ms = self._parse_time_strings(ts_col)
             else:
                 self.timestamps_ms = ts_col.values.astype(np.float64)
+        elif 'frame' in self.df.columns:
+            self.timestamps_ms = self.df['frame'].values.astype(np.float64) * (1000.0 / 72)
         else:
             self.timestamps_ms = np.arange(len(self.df), dtype=np.float64) * (1000.0 / 72)
 
-        # Extract positions (meters)
-        self.hmd_pos = self.df[['hmd_pos_x', 'hmd_pos_y', 'hmd_pos_z']].values
-        self.left_pos = self.df[['left_pos_x', 'left_pos_y', 'left_pos_z']].values
-        self.right_pos = self.df[['right_pos_x', 'right_pos_y', 'right_pos_z']].values
+        # Extract positions (meters, Unity Y-up coordinate system)
+        self.hmd_pos = self.df[['hmd_pos_x', 'hmd_pos_y', 'hmd_pos_z']].values.astype(np.float64)
+        self.left_pos = self.df[['left_pos_x', 'left_pos_y', 'left_pos_z']].values.astype(np.float64)
+        self.right_pos = self.df[['right_pos_x', 'right_pos_y', 'right_pos_z']].values.astype(np.float64)
 
         # Extract rotations (quaternion xyzw)
-        self.hmd_rot = self.df[['hmd_rot_x', 'hmd_rot_y', 'hmd_rot_z', 'hmd_rot_w']].values
-        self.left_rot = self.df[['left_rot_x', 'left_rot_y', 'left_rot_z', 'left_rot_w']].values
-        self.right_rot = self.df[['right_rot_x', 'right_rot_y', 'right_rot_z', 'right_rot_w']].values
+        self.hmd_rot = self.df[['hmd_rot_x', 'hmd_rot_y', 'hmd_rot_z', 'hmd_rot_w']].values.astype(np.float64)
+        self.left_rot = self.df[['left_rot_x', 'left_rot_y', 'left_rot_z', 'left_rot_w']].values.astype(np.float64)
+        self.right_rot = self.df[['right_rot_x', 'right_rot_y', 'right_rot_z', 'right_rot_w']].values.astype(np.float64)
+
+        # Pre-compute speed (m/s) for timeseries
+        dt = np.diff(self.timestamps_ms) / 1000.0  # seconds
+        dp = np.linalg.norm(np.diff(self.hmd_pos, axis=0), axis=1)
+        self.hmd_speed = np.zeros(len(self.df))
+        valid_dt = dt > 1e-6
+        self.hmd_speed[1:][valid_dt] = dp[valid_dt] / dt[valid_dt]
 
         print(f"Loaded HMD data: {len(self.df)} frames from {self.path.name}")
-        print(f"  Time range: {self.timestamps_ms[0]:.0f} - {self.timestamps_ms[-1]:.0f} ms")
+        dur_s = (self.timestamps_ms[-1] - self.timestamps_ms[0]) / 1000.0
+        print(f"  Duration: {dur_s:.1f}s, {len(self.df)} frames")
 
     def _parse_time_strings(self, series) -> np.ndarray:
         """Parse HH:MM:SS:mmm format to epoch-like ms."""
@@ -121,6 +144,7 @@ class HMDData:
 
     def get_positions_at(self, idx: int) -> Dict[str, np.ndarray]:
         """Get HMD/controller positions at frame index (in meters)."""
+        idx = max(0, min(idx, len(self.df) - 1))
         return {
             'hmd': self.hmd_pos[idx],
             'left': self.left_pos[idx],
@@ -128,18 +152,27 @@ class HMDData:
         }
 
     def get_trajectory(self, start_idx: int, end_idx: int) -> Dict[str, np.ndarray]:
-        """Get position trajectories over a range of frames."""
-        s, e = max(0, start_idx), min(len(self.df), end_idx)
+        """Get position trajectories over a range of frames (meters)."""
+        s = max(0, start_idx)
+        e = min(len(self.df), end_idx)
         return {
             'hmd': self.hmd_pos[s:e],
             'left': self.left_pos[s:e],
             'right': self.right_pos[s:e],
         }
 
+    def get_rotations_at(self, idx: int) -> Dict[str, np.ndarray]:
+        """Get HMD/controller rotations (quaternion xyzw) at frame index."""
+        idx = max(0, min(idx, len(self.df) - 1))
+        return {
+            'hmd': self.hmd_rot[idx],
+            'left': self.left_rot[idx],
+            'right': self.right_rot[idx],
+        }
+
 
 def find_hmd_csv(session_name: str, hmd_dir: Path) -> Optional[Path]:
     """Find HMD CSV matching a session name in the given directory."""
-    # session_name is like "Dancing1_20260214_001511"
     for f in hmd_dir.iterdir():
         if f.suffix.lower() != '.csv':
             continue
@@ -154,144 +187,123 @@ def find_hmd_csv(session_name: str, hmd_dir: Path) -> Optional[Path]:
 
 
 # =============================================================================
-# 3D Visualization with HMD
+# HMD 3D Trajectory Visualization
 # =============================================================================
-def draw_skeleton_3d_with_hmd(
+def draw_hmd_3d(
     ax,
-    joints_3d: Optional[np.ndarray],
-    hmd_data: Optional[HMDData],
+    hmd_data: HMDData,
     hmd_idx: int,
-    camera_pose: Optional[Dict],
-    min_confidence: int = 1,
     fixed_bounds: Optional[Tuple] = None,
-    trail_length: int = 30,
+    trail_length: int = 60,
 ):
-    """Draw 3D skeleton + HMD/controller positions in world space.
+    """Draw HMD and controller positions/trajectories in Unity world space.
 
-    The skeleton joints are in helmet camera frame (from ego annotations).
-    To show them with HMD data, we transform skeleton joints back to world
-    space using the camera pose, then plot everything in world coordinates.
-    HMD positions are in meters (Unity), so we convert to mm for consistency.
+    Coordinate system (Unity): X=right, Y=up, Z=forward. Units: meters.
     """
     ax.clear()
 
-    has_skeleton = joints_3d is not None and len(joints_3d) > 0
-    has_hmd = hmd_data is not None and hmd_idx >= 0
+    pos = hmd_data.get_positions_at(hmd_idx)
+    hmd = pos['hmd']
+    left = pos['left']
+    right = pos['right']
 
-    # Draw skeleton in camera frame (mm) if no HMD to merge with
-    if has_skeleton and not has_hmd:
-        draw_skeleton_3d(ax, joints_3d, min_confidence, fixed_bounds)
-        return
+    # Current positions as markers
+    ax.scatter(hmd[0], hmd[1], hmd[2],
+               c='red', s=120, marker='D', label='HMD',
+               edgecolors='white', linewidths=0.5, zorder=5)
+    ax.scatter(left[0], left[1], left[2],
+               c='dodgerblue', s=80, marker='o', label='L Ctrl',
+               edgecolors='white', linewidths=0.5, zorder=5)
+    ax.scatter(right[0], right[1], right[2],
+               c='orange', s=80, marker='o', label='R Ctrl',
+               edgecolors='white', linewidths=0.5, zorder=5)
 
-    # Draw HMD/controller data
-    if has_hmd:
-        pos = hmd_data.get_positions_at(hmd_idx)
+    # Lines from HMD to controllers
+    ax.plot([hmd[0], left[0]], [hmd[1], left[1]], [hmd[2], left[2]],
+            'b--', alpha=0.4, linewidth=1)
+    ax.plot([hmd[0], right[0]], [hmd[1], right[1]], [hmd[2], right[2]],
+            color='orange', linestyle='--', alpha=0.4, linewidth=1)
 
-        # Convert meters to mm for display
-        hmd_mm = pos['hmd'] * 1000
-        left_mm = pos['left'] * 1000
-        right_mm = pos['right'] * 1000
+    # Trailing trajectories
+    trail_start = max(0, hmd_idx - trail_length)
+    trail = hmd_data.get_trajectory(trail_start, hmd_idx + 1)
 
-        # Current positions as large markers
-        ax.scatter(*hmd_mm, c='red', s=120, marker='D', label='HMD',
-                   edgecolors='white', linewidths=0.5, zorder=5)
-        ax.scatter(*left_mm, c='dodgerblue', s=80, marker='o', label='L Ctrl',
-                   edgecolors='white', linewidths=0.5, zorder=5)
-        ax.scatter(*right_mm, c='orange', s=80, marker='o', label='R Ctrl',
-                   edgecolors='white', linewidths=0.5, zorder=5)
+    for key, color, alpha in [
+        ('hmd', 'red', 0.5),
+        ('left', 'dodgerblue', 0.3),
+        ('right', 'orange', 0.3),
+    ]:
+        pts = trail[key]
+        if len(pts) > 1:
+            ax.plot(pts[:, 0], pts[:, 1], pts[:, 2],
+                    color=color, alpha=alpha, linewidth=1.5)
 
-        # Draw trailing trajectory
-        trail_start = max(0, hmd_idx - trail_length)
-        trail = hmd_data.get_trajectory(trail_start, hmd_idx + 1)
+    # HMD forward direction indicator (from quaternion)
+    rot = hmd_data.get_rotations_at(hmd_idx)['hmd']
+    qx, qy, qz, qw = rot
+    # Quaternion to forward vector: rotate (0,0,1) by quaternion
+    fx = 2 * (qx * qz + qw * qy)
+    fy = 2 * (qy * qz - qw * qx)
+    fz = 1 - 2 * (qx * qx + qy * qy)
+    arrow_len = 0.15  # meters
+    ax.plot([hmd[0], hmd[0] + fx * arrow_len],
+            [hmd[1], hmd[1] + fy * arrow_len],
+            [hmd[2], hmd[2] + fz * arrow_len],
+            color='red', linewidth=2.5, alpha=0.8)
 
-        for key, color, alpha in [
-            ('hmd', 'red', 0.4),
-            ('left', 'dodgerblue', 0.3),
-            ('right', 'orange', 0.3),
-        ]:
-            pts = trail[key] * 1000  # to mm
-            if len(pts) > 1:
-                ax.plot(pts[:, 0], -pts[:, 1], pts[:, 2],
-                        color=color, alpha=alpha, linewidth=1.5)
+    ax.set_xlabel('X (m)')
+    ax.set_ylabel('Y (m)')
+    ax.set_zlabel('Z (m)')
+    ax.set_title('HMD 3D Trajectory')
 
-        # Draw lines from HMD to controllers (arm-like connection)
-        ax.plot([hmd_mm[0], left_mm[0]], [-hmd_mm[1], -left_mm[1]],
-                [hmd_mm[2], left_mm[2]], 'b--', alpha=0.3, linewidth=1)
-        ax.plot([hmd_mm[0], right_mm[0]], [-hmd_mm[1], -right_mm[1]],
-                [hmd_mm[2], right_mm[2]], color='orange', linestyle='--',
-                alpha=0.3, linewidth=1)
+    if fixed_bounds:
+        cx, cy, cz, hr = fixed_bounds
+        ax.set_xlim(cx - hr, cx + hr)
+        ax.set_ylim(cy - hr, cy + hr)
+        ax.set_zlim(cz - hr, cz + hr)
+    else:
+        # Auto-scale around current HMD position
+        hr = 0.8  # meters
+        ax.set_xlim(hmd[0] - hr, hmd[0] + hr)
+        ax.set_ylim(hmd[1] - hr, hmd[1] + hr)
+        ax.set_zlim(hmd[2] - hr, hmd[2] + hr)
 
-        # Also draw skeleton if available (in camera frame)
-        if has_skeleton:
-            # Draw skeleton joints offset or in camera frame
-            xs = joints_3d[:, 0]
-            ys = joints_3d[:, 1]
-            zs = joints_3d[:, 2]
-
-            for parent, child in BONE_CONNECTIONS:
-                if parent >= len(joints_3d) or child >= len(joints_3d):
-                    continue
-                if joints_3d[parent, 3] < min_confidence or joints_3d[child, 3] < min_confidence:
-                    continue
-                part = get_bone_part(parent, child)
-                color = PART_COLORS_RGB[part]
-                ax.plot([xs[parent], xs[child]],
-                        [-ys[parent], -ys[child]],
-                        [zs[parent], zs[child]],
-                        color=color, linewidth=2, alpha=0.6)
-
-            for jid in range(min(len(joints_3d), 32)):
-                if jid in EXCLUDED_JOINTS:
-                    continue
-                if joints_3d[jid, 3] < min_confidence:
-                    continue
-                part = get_joint_part(jid)
-                color = PART_COLORS_RGB[part]
-                ax.scatter(xs[jid], -ys[jid], zs[jid],
-                           c=[color], s=20, edgecolors='white', linewidths=0.3,
-                           alpha=0.6)
-
-        ax.set_xlabel('X (mm)')
-        ax.set_ylabel('Y (mm)')
-        ax.set_zlabel('Z (mm)')
-
-        if fixed_bounds:
-            cx, cy, cz, hr = fixed_bounds
-            ax.set_xlim(cx - hr, cx + hr)
-            ax.set_ylim(cy - hr, cy + hr)
-            ax.set_zlim(cz - hr, cz + hr)
-        else:
-            # Auto-scale around HMD position
-            center = hmd_mm
-            hr = 1500.0
-            ax.set_xlim(center[0] - hr, center[0] + hr)
-            ax.set_ylim(-center[1] - hr, -center[1] + hr)
-            ax.set_zlim(center[2] - hr, center[2] + hr)
-
-        ax.legend(loc='upper right', fontsize=8)
+    ax.legend(loc='upper right', fontsize=7)
 
 
 def draw_hmd_timeseries(ax, hmd_data: HMDData, current_idx: int):
-    """Draw HMD position timeseries with current frame indicator."""
+    """Draw HMD/controller height and HMD speed over time."""
     ax.clear()
 
     t = (hmd_data.timestamps_ms - hmd_data.timestamps_ms[0]) / 1000.0  # seconds
 
-    # Plot Y (height) for all three devices
-    ax.plot(t, hmd_data.hmd_pos[:, 1], color='red', alpha=0.7, linewidth=1, label='HMD Y')
-    ax.plot(t, hmd_data.left_pos[:, 1], color='dodgerblue', alpha=0.5, linewidth=1, label='L Ctrl Y')
-    ax.plot(t, hmd_data.right_pos[:, 1], color='orange', alpha=0.5, linewidth=1, label='R Ctrl Y')
+    # Height (Y position) for all three devices
+    ax.plot(t, hmd_data.hmd_pos[:, 1], color='red', alpha=0.8,
+            linewidth=1.2, label='HMD height')
+    ax.plot(t, hmd_data.left_pos[:, 1], color='dodgerblue', alpha=0.5,
+            linewidth=1, label='L Ctrl height')
+    ax.plot(t, hmd_data.right_pos[:, 1], color='orange', alpha=0.5,
+            linewidth=1, label='R Ctrl height')
+
+    # Speed on secondary axis
+    ax2 = ax.twinx()
+    ax2.plot(t, hmd_data.hmd_speed, color='gray', alpha=0.3,
+             linewidth=0.8, label='HMD speed')
+    ax2.set_ylabel('Speed (m/s)', color='gray', fontsize=8)
+    ax2.tick_params(axis='y', labelcolor='gray', labelsize=7)
+    ax2.set_ylim(0, max(np.percentile(hmd_data.hmd_speed, 99) * 1.3, 0.5))
 
     # Current frame marker
     if 0 <= current_idx < len(t):
-        ax.axvline(t[current_idx], color='black', linewidth=1.5, alpha=0.7, linestyle='--')
+        ax.axvline(t[current_idx], color='black', linewidth=1.5,
+                   alpha=0.6, linestyle='--')
         ax.scatter(t[current_idx], hmd_data.hmd_pos[current_idx, 1],
-                   c='red', s=50, zorder=5, edgecolors='black', linewidths=0.5)
+                   c='red', s=40, zorder=5, edgecolors='black', linewidths=0.5)
 
-    ax.set_xlabel('Time (s)')
-    ax.set_ylabel('Height (m)')
-    ax.set_title('HMD / Controller Height')
-    ax.legend(loc='upper right', fontsize=7)
+    ax.set_xlabel('Time (s)', fontsize=9)
+    ax.set_ylabel('Height (m)', fontsize=9)
+    ax.set_title('HMD / Controller Timeseries')
+    ax.legend(loc='upper left', fontsize=7)
     ax.grid(True, alpha=0.3)
 
 
@@ -335,15 +347,23 @@ def discover_batch_sessions(batch_dir: Path) -> List[Dict]:
 
 
 # =============================================================================
-# HMD Bounds Computation
+# Bounds Computation
 # =============================================================================
 def compute_hmd_bounds(hmd_data: HMDData) -> Tuple:
-    """Compute 3D axis bounds centered on HMD median position (in mm)."""
-    hmd_mm = hmd_data.hmd_pos * 1000
-    cx = float(np.median(hmd_mm[:, 0]))
-    cy = float(-np.median(hmd_mm[:, 1]))  # invert Y
-    cz = float(np.median(hmd_mm[:, 2]))
-    hr = 1500.0
+    """Compute stable 3D axis bounds from HMD trajectory (meters)."""
+    cx = float(np.median(hmd_data.hmd_pos[:, 0]))
+    cy = float(np.median(hmd_data.hmd_pos[:, 1]))
+    cz = float(np.median(hmd_data.hmd_pos[:, 2]))
+
+    # Range covers full trajectory + margin
+    all_pos = np.vstack([hmd_data.hmd_pos, hmd_data.left_pos, hmd_data.right_pos])
+    span = max(
+        np.ptp(all_pos[:, 0]),
+        np.ptp(all_pos[:, 1]),
+        np.ptp(all_pos[:, 2]),
+    )
+    hr = max(span / 2 * 1.2, 0.5)  # at least 0.5m
+
     return (cx, cy, cz, hr)
 
 
@@ -363,28 +383,28 @@ def preview_session(
 
     has_hmd = hmd_data is not None
 
-    # Pre-compute bounds
-    if has_hmd:
-        bounds_3d = compute_hmd_bounds(hmd_data)
-    else:
-        bounds_3d = compute_fixed_bounds(dataset, min_confidence)
+    # Pre-compute stable bounds
+    skel_bounds = compute_fixed_bounds(dataset, min_confidence)
+    hmd_bounds = compute_hmd_bounds(hmd_data) if has_hmd else None
 
-    # Layout: 2D overlay | 3D skeleton+HMD | HMD timeseries (if HMD available)
+    # Layout: 2x2 with HMD, 1x2 without
     if has_hmd:
-        fig = plt.figure(figsize=(20, 9))
-        ax_2d = fig.add_subplot(131)
-        ax_3d = fig.add_subplot(132, projection='3d')
-        ax_ts = fig.add_subplot(133)
+        fig = plt.figure(figsize=(18, 12))
+        ax_2d = fig.add_subplot(221)
+        ax_3d = fig.add_subplot(222, projection='3d')
+        ax_hmd3d = fig.add_subplot(223, projection='3d')
+        ax_ts = fig.add_subplot(224)
     else:
         fig = plt.figure(figsize=(16, 8))
         ax_2d = fig.add_subplot(121)
         ax_3d = fig.add_subplot(122, projection='3d')
+        ax_hmd3d = None
         ax_ts = None
 
-    fig.suptitle(session_name or 'Ego Dataset', fontsize=12, fontweight='bold')
-    plt.subplots_adjust(bottom=0.12, top=0.92, wspace=0.3)
+    fig.suptitle(session_name or 'Ego Dataset', fontsize=13, fontweight='bold')
+    plt.subplots_adjust(bottom=0.10, top=0.93, hspace=0.30, wspace=0.25)
 
-    ax_slider = plt.axes([0.15, 0.02, 0.70, 0.03])
+    ax_slider = plt.axes([0.15, 0.02, 0.70, 0.025])
     slider = Slider(ax_slider, 'Frame', 0, max(len(dataset) - 1, 1),
                     valinit=0, valstep=1, valfmt='%d')
 
@@ -396,11 +416,10 @@ def preview_session(
         cb = frame.get('checkerboard_detected', False)
         ts_usec = frame.get('timestamp_usec', 0)
         n_bodies = frame.get('num_bodies', 0)
-        camera_pose = frame.get('camera_pose', None)
 
-        info = f"Frame {frame_idx} | ts={ts_usec} | bodies={n_bodies} | CB={'Y' if cb else 'N'}"
+        info = f"Frame {frame_idx}/{len(dataset)-1} | bodies={n_bodies} | CB={'Y' if cb else 'N'}"
 
-        # 2D overlay
+        # Panel 1: Ego-view 2D overlay
         ax_2d.clear()
         img = dataset.get_image(frame_idx)
         if img is not None:
@@ -414,19 +433,20 @@ def preview_session(
         ax_2d.set_title(f'Ego-View 2D\n{info}')
         ax_2d.axis('off')
 
-        # 3D skeleton + HMD
-        hmd_idx = -1
+        # Panel 2: 3D skeleton (helmet camera frame, mm)
+        if joints_3d is not None and len(joints_3d) > 0:
+            draw_skeleton_3d(ax_3d, joints_3d, min_confidence, fixed_bounds=skel_bounds)
+            ax_3d.set_title('3D Skeleton (Camera Frame)')
+        else:
+            ax_3d.clear()
+            ax_3d.set_title('3D Skeleton - No Data')
+
+        # Panels 3 & 4: HMD
         if has_hmd:
             hmd_idx = hmd_data.get_nearest_idx(ts_usec)
 
-        draw_skeleton_3d_with_hmd(
-            ax_3d, joints_3d, hmd_data, hmd_idx, camera_pose,
-            min_confidence, bounds_3d,
-        )
-        ax_3d.set_title('3D Skeleton + HMD' if has_hmd else '3D Skeleton')
-
-        # HMD timeseries
-        if ax_ts is not None and has_hmd:
+            draw_hmd_3d(ax_hmd3d, hmd_data, hmd_idx,
+                        fixed_bounds=hmd_bounds)
             draw_hmd_timeseries(ax_ts, hmd_data, hmd_idx)
 
         fig.canvas.draw_idle()
@@ -468,24 +488,24 @@ def export_session_video(
 
     has_hmd = hmd_data is not None
 
-    if has_hmd:
-        bounds_3d = compute_hmd_bounds(hmd_data)
-    else:
-        bounds_3d = compute_fixed_bounds(dataset, min_confidence)
+    skel_bounds = compute_fixed_bounds(dataset, min_confidence)
+    hmd_bounds = compute_hmd_bounds(hmd_data) if has_hmd else None
 
     if has_hmd:
-        fig = plt.figure(figsize=(20, 7))
-        ax_2d = fig.add_subplot(131)
-        ax_3d = fig.add_subplot(132, projection='3d')
-        ax_ts = fig.add_subplot(133)
+        fig = plt.figure(figsize=(18, 10))
+        ax_2d = fig.add_subplot(221)
+        ax_3d = fig.add_subplot(222, projection='3d')
+        ax_hmd3d = fig.add_subplot(223, projection='3d')
+        ax_ts = fig.add_subplot(224)
     else:
         fig = plt.figure(figsize=(16, 7))
         ax_2d = fig.add_subplot(121)
         ax_3d = fig.add_subplot(122, projection='3d')
+        ax_hmd3d = None
         ax_ts = None
 
     fig.suptitle(session_name, fontsize=11, fontweight='bold')
-    plt.subplots_adjust(top=0.92, wspace=0.3)
+    plt.subplots_adjust(top=0.93, hspace=0.30, wspace=0.25)
 
     def update(frame_idx):
         frame = dataset.get_frame(frame_idx)
@@ -493,8 +513,8 @@ def export_session_video(
         joints_3d = dataset.get_joints_3d(frame_idx)
         cb = frame.get('checkerboard_detected', False)
         ts_usec = frame.get('timestamp_usec', 0)
-        camera_pose = frame.get('camera_pose', None)
-        info = f"Frame {frame_idx} | CB={'Y' if cb else 'N'}"
+        n_bodies = frame.get('num_bodies', 0)
+        info = f"Frame {frame_idx} | bodies={n_bodies} | CB={'Y' if cb else 'N'}"
 
         ax_2d.clear()
         img = dataset.get_image(frame_idx)
@@ -509,14 +529,16 @@ def export_session_video(
         ax_2d.set_title(f'Ego-View 2D\n{info}')
         ax_2d.axis('off')
 
-        hmd_idx = hmd_data.get_nearest_idx(ts_usec) if has_hmd else -1
-        draw_skeleton_3d_with_hmd(
-            ax_3d, joints_3d, hmd_data, hmd_idx, camera_pose,
-            min_confidence, bounds_3d,
-        )
-        ax_3d.set_title('3D + HMD' if has_hmd else '3D Skeleton')
+        if joints_3d is not None and len(joints_3d) > 0:
+            draw_skeleton_3d(ax_3d, joints_3d, min_confidence, fixed_bounds=skel_bounds)
+            ax_3d.set_title('3D Skeleton')
+        else:
+            ax_3d.clear()
+            ax_3d.set_title('3D Skeleton - No Data')
 
-        if ax_ts is not None and has_hmd:
+        if has_hmd:
+            hmd_idx = hmd_data.get_nearest_idx(ts_usec)
+            draw_hmd_3d(ax_hmd3d, hmd_data, hmd_idx, fixed_bounds=hmd_bounds)
             draw_hmd_timeseries(ax_ts, hmd_data, hmd_idx)
 
         if (frame_idx + 1) % 50 == 0:

@@ -276,43 +276,57 @@ def process_session(
     """Orchestrate processing of a single session."""
     result = SessionResult(name=session.name, status="pending")
 
-    # Check resume
     metadata_path = output_dir / session.name / "ego_dataset" / "metadata.json"
-    if resume and metadata_path.exists():
-        print(f"  [{session.name}] Already completed, skipping (--resume)")
-        result.status = "skipped"
-        return result
+    synced_path = output_dir / session.name / "synced_data.csv"
+    needs_hmd_sync = session.hmd_csv is not None
+
+    # Check resume: skip only if ALL steps are already done
+    if resume:
+        processor_done = metadata_path.exists()
+        sync_done = synced_path.exists() or not needs_hmd_sync
+        if processor_done and sync_done:
+            print(f"  [{session.name}] Already completed, skipping (--resume)")
+            result.status = "skipped"
+            return result
 
     print(f"  [{session.name}] Processing...")
     print(f"    MKVs: {len(session.mkv_by_serial)} cameras")
     print(f"    HMD: {session.hmd_csv.name if session.hmd_csv else 'NONE'}")
 
-    # Step 1: Run offline processor
-    try:
-        t0 = time.time()
-        run_offline_processor(
-            session, processor_exe, calib_dir, output_dir,
-            sensor_orientation, smoothing,
-        )
-        result.processor_time = time.time() - t0
-        print(f"    Processor done ({result.processor_time:.1f}s)")
-    except Exception as e:
-        result.status = "failed"
-        result.error = f"Processor: {e}"
-        print(f"    FAILED (processor): {e}")
-        return result
+    # Step 1: Run offline processor (skip if already done under --resume)
+    skip_processor = resume and metadata_path.exists()
+    if skip_processor:
+        print(f"    Processor already done, skipping (--resume)")
+    else:
+        try:
+            t0 = time.time()
+            run_offline_processor(
+                session, processor_exe, calib_dir, output_dir,
+                sensor_orientation, smoothing,
+            )
+            result.processor_time = time.time() - t0
+            print(f"    Processor done ({result.processor_time:.1f}s)")
+        except Exception as e:
+            result.status = "failed"
+            result.error = f"Processor: {e}"
+            print(f"    FAILED (processor): {e}")
+            return result
 
-    # Step 2: Run HMD sync
-    try:
-        t0 = time.time()
-        run_hmd_sync(session, output_dir, scripts_dir)
-        result.sync_time = time.time() - t0
-        print(f"    HMD sync done ({result.sync_time:.1f}s)")
-    except Exception as e:
-        result.status = "failed"
-        result.error = f"HMD sync: {e}"
-        print(f"    FAILED (HMD sync): {e}")
-        return result
+    # Step 2: Run HMD sync (skip if already done under --resume)
+    skip_sync = resume and synced_path.exists()
+    if skip_sync:
+        print(f"    HMD sync already done, skipping (--resume)")
+    else:
+        try:
+            t0 = time.time()
+            run_hmd_sync(session, output_dir, scripts_dir)
+            result.sync_time = time.time() - t0
+            print(f"    HMD sync done ({result.sync_time:.1f}s)")
+        except Exception as e:
+            result.status = "failed"
+            result.error = f"HMD sync: {e}"
+            print(f"    FAILED (HMD sync): {e}")
+            return result
 
     result.status = "success"
     total_time = result.processor_time + result.sync_time

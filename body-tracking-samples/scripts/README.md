@@ -258,6 +258,102 @@ See the [multi_device_offline_processor README](../multi_device_offline_processo
 
 ---
 
+## Batch Ego Dataset Generator
+
+Automates running `multi_device_offline_processor.exe` and `sync_skeleton_hmd.py` for all recorded sessions in a directory. Instead of manually invoking ~15 CLI arguments per pose, this script discovers all sessions, groups MKV files by timestamp, and processes them sequentially.
+
+### Input Structure
+
+The input directory should contain MKV recordings and HMD CSVs with matching timestamps:
+
+```
+Test/
+  recording_cam0_CL8T75400DC_Dancing1_20260214_001511.mkv
+  recording_cam1_CL8T75400GD_Dancing1_20260214_001511.mkv   (helmet)
+  recording_cam2_CL8T75400KV_Dancing1_20260214_001511.mkv
+  recording_cam3_CL8T75400CB_Dancing1_20260214_001511.mkv
+  HMD_Test_Dancing1_20260214_001511.csv
+  ...
+```
+
+Sessions are grouped by matching `{Pose}_{Date}_{Time}`. Camera role is determined by serial number (not cam index).
+
+### Output Structure
+
+```
+batch_out/
+  Dancing1_20260214_001511/
+    ego_dataset/          # images/ + annotations/ + metadata.json
+    output.csv            # fused skeleton CSV
+    synced_data.csv       # synchronized skeleton + HMD
+    processor.log         # stdout/stderr from processor
+  Gaming-Boxing_20260214_000909/
+    ...
+  batch_summary.json      # overall results
+```
+
+### Quick Start
+
+```bash
+# 1. Dry run — list all discovered sessions without processing
+python batch_ego_dataset.py \
+    --input-dir Test/ \
+    --output-dir batch_out/ \
+    --dry-run
+
+# 2. Process all sessions
+python batch_ego_dataset.py \
+    --input-dir Test/ \
+    --output-dir batch_out/
+
+# 3. Resume after interruption (skip completed sessions)
+python batch_ego_dataset.py \
+    --input-dir Test/ \
+    --output-dir batch_out/ \
+    --resume
+```
+
+### Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--input-dir` | (required) | Directory with MKV recordings and HMD CSVs |
+| `--output-dir` | (required) | Output root directory |
+| `--processor-exe` | (auto-detect) | Path to `multi_device_offline_processor.exe` |
+| `--calib-dir` | (same as exe) | Directory with `calibration.json` and `T_checker_to_A.json` |
+| `--sensor-orientation` | `ccw90` | Sensor orientation: `default`, `cw90`, `ccw90`, `flip180` |
+| `--smoothing` | `0.5` | Temporal smoothing factor (0.0–1.0) |
+| `--dry-run` | off | List sessions without processing |
+| `--resume` | off | Skip sessions with existing `ego_dataset/metadata.json` |
+
+### Camera Configuration
+
+| Serial | Role |
+|--------|------|
+| `CL8T75400DC` | Primary (reference camera, identity transform) |
+| `CL8T75400GD` | Helmet (head-mounted, ego-view source) |
+| `CL8T75400KV` | Secondary (fixed) |
+| `CL8T75400CB` | Secondary (fixed) |
+
+### Batch Summary
+
+After processing, `batch_summary.json` contains:
+
+```json
+{
+  "total": 19,
+  "succeeded": 17,
+  "failed": 2,
+  "skipped": 0,
+  "sessions": [
+    {"name": "Dancing1_20260214_001511", "status": "success", "time_sec": 120.5},
+    {"name": "...", "status": "failed", "error": "..."}
+  ]
+}
+```
+
+---
+
 ## Related Projects
 
 - [multi_device_body_viewer](../multi_device_body_viewer/) - C++ skeleton viewer with CSV recording

@@ -1,7 +1,7 @@
 {
   "version": "1.0",
   "sceneName": "SampleScene",
-  "exportTimestamp": "2026-01-14 17:14:43",
+  "exportTimestamp": "2026-02-11 21:49:44",
   "gameObjects": [
     {
       "name": "Main Camera",
@@ -1978,15 +1978,34 @@
         "OVRPassthroughLayer"
       ]    },
     {
-      "name": "hmddatamanager",
-      "path": "hmddatamanager",
+      "name": "EventSystem",
+      "path": "EventSystem",
       "active": true,
       "position": [0.000, 0.000, 0.000],
       "rotation": [0.000, 0.000, 0.000],
       "scale": [1.000, 1.000, 1.000],
       "scripts": [
-        "HMDDataRecorder"
+        "EventSystem",
+        "InputSystemUIInputModule"
       ]    },
+    {
+      "name": "RecordingSyncController",
+      "path": "RecordingSyncController",
+      "active": true,
+      "position": [56.154, -52.755, -20.992],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000],
+      "scripts": [
+        "RecordingSyncController"
+      ]    },
+    {
+      "name": "-----------------------",
+      "path": "-----------------------",
+      "active": true,
+      "position": [0.094, -0.095, 5.296],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
     {
       "name": "RecordingUI",
       "path": "RecordingUI",
@@ -1998,12 +2017,81 @@
         "RecordingStatusUI"
       ]    },
     {
+      "name": "Video Player",
+      "path": "Video Player",
+      "active": true,
+      "position": [-0.216, -0.083, 1.484],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
+      "name": "ShowingActionUI",
+      "path": "ShowingActionUI",
+      "active": true,
+      "position": [0.000, 0.000, 1.500],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [0.001, 0.001, 1.000],
+      "scripts": [
+        "CanvasScaler",
+        "GraphicRaycaster"
+      ]    },
+    {
+      "name": "Panel",
+      "path": "ShowingActionUI/Panel",
+      "active": true,
+      "position": [0.000, 0.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000],
+      "scripts": [
+        "Image"
+      ]    },
+    {
+      "name": "Action_text",
+      "path": "ShowingActionUI/Panel/Action_text",
+      "active": true,
+      "position": [0.000, 535.750, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000],
+      "text": "Action ",
+      "scripts": [
+        "TextMeshProUGUI"
+      ]    },
+    {
+      "name": "Action_Video",
+      "path": "ShowingActionUI/Panel/Action_Video",
+      "active": true,
+      "position": [0.000, -100.000, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.200, 1.200, 1.000],
+      "scripts": [
+        "RawImage"
+      ]    },
+    {
+      "name": "count_text",
+      "path": "ShowingActionUI/Panel/count_text",
+      "active": true,
+      "position": [0.000, 51.750, 0.000],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000],
+      "text": "CountDown",
+      "scripts": [
+        "TextMeshProUGUI"
+      ]    },
+    {
+      "name": "-----------------------",
+      "path": "-----------------------",
+      "active": true,
+      "position": [0.094, -0.095, 5.296],
+      "rotation": [0.000, 0.000, 0.000],
+      "scale": [1.000, 1.000, 1.000]
+    },
+    {
       "name": "RecordingStatusCanvas",
       "path": "RecordingStatusCanvas",
       "active": true,
-      "position": [0.000, 0.000, 0.500],
+      "position": [960.000, 540.000, 0.000],
       "rotation": [0.000, 0.000, 0.000],
-      "scale": [1.000, 1.000, 1.000],
+      "scale": [4.157, 4.157, 4.157],
       "scripts": [
         "CanvasScaler",
         "GraphicRaycaster"
@@ -2012,9 +2100,9 @@
       "name": "StatusPanel",
       "path": "RecordingStatusCanvas/StatusPanel",
       "active": true,
-      "position": [6.384, 4.704, 0.000],
+      "position": [230.940, 129.904, 0.000],
       "rotation": [0.000, 0.000, 0.000],
-      "scale": [1.000, 1.000, 1.000],
+      "scale": [0.400, 0.400, 1.000],
       "scripts": [
         "Image"
       ]    },
@@ -2022,7 +2110,7 @@
       "name": "RecordingIndicator",
       "path": "RecordingStatusCanvas/StatusPanel/RecordingIndicator",
       "active": true,
-      "position": [2.000, 142.704, 0.000],
+      "position": [-173.000, -2.000, 0.000],
       "rotation": [0.000, 0.000, 0.000],
       "scale": [1.000, 1.000, 1.000],
       "text": "IDLE",
@@ -2033,7 +2121,7 @@
       "name": "FrameCountText",
       "path": "RecordingStatusCanvas/StatusPanel/FrameCountText",
       "active": true,
-      "position": [54.192, 102.704, 0.000],
+      "position": [-175.000, -42.000, 0.000],
       "rotation": [0.000, 0.000, 0.000],
       "scale": [1.000, 1.000, 1.000],
       "text": "Frame: 0",
@@ -2044,7 +2132,7 @@
       "name": "HMDPositionText",
       "path": "RecordingStatusCanvas/StatusPanel/HMDPositionText",
       "active": true,
-      "position": [-182.384, 62.704, 0.000],
+      "position": [-336.000, -82.000, 0.000],
       "rotation": [0.000, 0.000, 0.000],
       "scale": [1.000, 1.000, 1.000],
       "text": "HMD Pos: (0.00, 0.00, 0.00)",
@@ -2055,7 +2143,7 @@
       "name": "HMDRotationText",
       "path": "RecordingStatusCanvas/StatusPanel/HMDRotationText",
       "active": true,
-      "position": [-182.384, 37.704, 0.000],
+      "position": [-336.000, -107.000, 0.000],
       "rotation": [0.000, 0.000, 0.000],
       "scale": [1.000, 1.000, 1.000],
       "text": "HMD Rot: (0.00, 0.00, 0.00)",
@@ -2066,7 +2154,7 @@
       "name": "LeftControllerText",
       "path": "RecordingStatusCanvas/StatusPanel/LeftControllerText",
       "active": true,
-      "position": [-182.384, 7.704, 0.000],
+      "position": [-336.000, -137.000, 0.000],
       "rotation": [0.000, 0.000, 0.000],
       "scale": [1.000, 1.000, 1.000],
       "text": "L Ctrl: (0.00, 0.00, 0.00)",
@@ -2077,7 +2165,7 @@
       "name": "RightControllerText",
       "path": "RecordingStatusCanvas/StatusPanel/RightControllerText",
       "active": true,
-      "position": [-182.384, -22.296, 0.000],
+      "position": [-336.000, -167.000, 0.000],
       "rotation": [0.000, 0.000, 0.000],
       "scale": [1.000, 1.000, 1.000],
       "text": "R Ctrl: (0.00, 0.00, 0.00)",
@@ -2085,26 +2173,15 @@
         "TextMeshProUGUI"
       ]    },
     {
-      "name": "InstructionText",
-      "path": "RecordingStatusCanvas/StatusPanel/InstructionText",
-      "active": true,
-      "position": [0.000, -137.704, 0.000],
-      "rotation": [0.000, 0.000, 0.000],
-      "scale": [1.000, 1.000, 1.000],
-      "text": "Press [R] to Start/Stop Recording",
-      "scripts": [
-        "TextMeshProUGUI"
-      ]    },
-    {
-      "name": "EventSystem",
-      "path": "EventSystem",
+      "name": "hmddatamanager",
+      "path": "hmddatamanager",
       "active": true,
       "position": [0.000, 0.000, 0.000],
       "rotation": [0.000, 0.000, 0.000],
       "scale": [1.000, 1.000, 1.000],
       "scripts": [
-        "EventSystem",
-        "StandaloneInputModule"
+        "HMDDataRecorder",
+        "ActionBtn"
       ]    }
   ]
 }

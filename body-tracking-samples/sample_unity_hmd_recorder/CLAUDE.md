@@ -1,9 +1,71 @@
-# Project Instructions
+# CLAUDE.md
 
-This Unity project uses Vibe Unity for automated development workflows.
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## About Vibe Unity
-Vibe Unity enables claude-code integration for Unity scene creation and project automation.
+## Project Overview
+
+Unity application for recording HMD (Head-Mounted Display) and controller 6DOF data from Meta Quest devices. Designed to synchronize with external C++ body tracking applications via UDP.
+
+## Requirements
+
+- Unity 2021.3+
+- Meta XR SDK v83+
+- Meta Quest 2/3/Pro
+
+## Key Scripts
+
+| Script | Purpose |
+|--------|---------|
+| `HMDDataRecorder.cs` | Records HMD/controller 6DOF to CSV at configurable frame rate |
+| `RecordingSyncController.cs` | UDP sync with external apps (port 9000 send, 9001 receive) |
+| `RecordingStatusUI.cs` | VR overlay showing recording state and real-time 6DOF data |
+
+## Architecture
+
+### Data Flow
+```
+OVRCameraRig (Meta SDK)
+    ├── centerEyeAnchor → HMD position/rotation
+    ├── leftHandAnchor  → Left controller 6DOF
+    └── rightHandAnchor → Right controller 6DOF
+                ↓
+        HMDDataRecorder (CSV output)
+                ↓
+        RecordingStatusUI (VR overlay)
+```
+
+### UDP Sync Protocol
+```
+Unity ──TOGGLE_RECORD──► multi_device_body_viewer (port 9000)
+Unity ◄──START_RECORD─── confirmation (port 9001)
+Unity ◄──STOP_RECORD──── confirmation (port 9001)
+```
+
+Commands: `TOGGLE_RECORD`, `START_RECORD`, `STOP_RECORD`, `CYCLE_CAMERA`
+
+## Controls
+
+| Key | Action |
+|-----|--------|
+| R | Start/Stop recording (also sends UDP sync) |
+| K | Cycle camera view (UDP command) |
+| ESC | Quit application |
+
+## Output Format
+
+CSV location: `Assets/Recordings/HMD_{participantID}_{sessionName}_{timestamp}.csv`
+
+Columns: `timestamp_ms, frame, unity_time, hmd_pos_xyz, hmd_rot_xyzw, left_pos_xyz, left_rot_xyzw, right_pos_xyz, right_rot_xyzw`
+
+## Related Projects
+
+- `../multi_device_body_viewer/` - C++ body tracking (UDP sync target)
+- `../scripts/` - Python synchronization scripts for skeleton/HMD alignment
+- `../sample_unity_bodytracking/` - Unity body tracking with Orbbec cameras
+
+---
+
+## Vibe Unity Integration
 
 ⌄⌄⌄⌄⌄⌄⌄⌄⌄⌄⌄⌄⌄⌄⌄⌄⌄⌄⌄⌄⌄⌄⌄⌄⌄⌄⌄⌄⌄⌄VIBE-UNITY⌄⌄⌄⌄⌄⌄⌄⌄⌄⌄⌄⌄⌄⌄⌄⌄⌄⌄⌄⌄⌄⌄⌄⌄⌄⌄⌄⌄⌄⌄
 

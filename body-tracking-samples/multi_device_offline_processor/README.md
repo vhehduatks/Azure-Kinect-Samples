@@ -201,6 +201,7 @@ ego_output/
 2. **Coordinate transform** - Transform skeletons from each camera to primary camera space
 3. **Body matching** - Match bodies across cameras by pelvis distance
 4. **Joint fusion** - Weighted average of joint positions based on confidence
+5. **Body selection** - Filter phantom bodies and select best candidate for ego-view
 
 ```
 Camera 0 (Primary)          Camera 1 (Secondary)
@@ -216,9 +217,21 @@ Camera 0 (Primary)          Camera 1 (Secondary)
                  │
            Joint Fusion
                  │
+      SelectBestBody (confidence filter → multi-cam preference → spatial continuity)
+                 │
                  ▼
             Fused Skeleton
 ```
+
+### Body Selection (SelectBestBody)
+
+When multiple bodies are detected, the selector applies three filters in order:
+
+1. **Confidence filter** — Reject bodies where pelvis confidence = 0 (phantom/hallucination). Falls back to unfiltered list only if ALL bodies have zero confidence
+2. **Multi-camera preference** — Prefer bodies seen by 2+ cameras (matchCount ≥ 2) over single-camera detections
+3. **Spatial continuity** — Among candidates, select the body closest to the previous frame's pelvis position
+
+This prevents phantom bodies (detected at 6m+ with all-zero confidence) from locking in via spatial continuity and blocking the real body for the entire session.
 
 ## Ego-View Pipeline
 
@@ -240,12 +253,20 @@ Fixed MKV 2 ──► Color+Depth ──► Detect Checkerboard ───┘
                           FuseHelmetPoses() ──► Outlier rejection (median, 100mm)
                                         │      Weighted fusion (1/depth²)
                                         │
-                          SmoothPose() ──► EMA (α=0.75, 200ms staleness guard)
+                          SmoothPose() ──► Camera-switch-aware EMA
+                                        │    α=0.75 normal, α=0.15 on camera switch
+                                        │
+                                        ▼
+                          SelectBestBody() ──► Confidence filter → multi-cam → spatial
+                                        │
+                          Skeleton Smoothing ──► Adaptive per-joint EMA
+                                        │       + body switch detection (200mm)
+                                        │       + confidence carry-forward (5-frame TTL)
                                         │
                                         ▼
 Helmet MKV ──► Color Frame    3D joints: R^T × (P_world - t) → ego 3D
                    │          2D joints: k4a_calibration_3d_to_2d → ego 2D
-                   ▼                    │
+                   ▼                    │      (min depth 50mm, off-screen clamping)
               Save image                ▼
                    └──────── Save annotation JSON
 ```
@@ -264,9 +285,33 @@ Without interleaved advancement, lock-step processing (advancing all cameras sim
 
 When multiple fixed cameras detect the checkerboard simultaneously, their pose estimates are combined for robustness:
 
-1. **Weighted fusion** — Each detection is weighted by `1/depth²` (closer cameras have less depth noise)
+1. **Weighted fusion** — Each detection is weighted by `1/depth²` (closer cameras have less depth noise). A **2x same-camera consistency bonus** is applied to the camera used in the previous frame, reducing unnecessary camera switching
 2. **Outlier rejection** — With 3+ detections, candidates whose translation is >100mm from the per-axis median are rejected before fusion. If all are rejected, the closest to the median is kept as fallback
-3. **EMA temporal smoothing** — The fused pose is blended with the previous frame's pose using an exponential moving average (α=0.75: 75% current, 25% previous). A 200ms staleness guard prevents ghost positions after detection gaps — if more than 200ms has elapsed since the last detection, the new pose snaps directly without blending
+3. **Camera-switch-aware EMA** — The fused pose is blended with the previous frame's pose using an exponential moving average. When the detection camera is the same as the previous frame, α=0.75 (75% current, 25% previous). When the detection camera **switches**, α=0.15 (15% current, 85% previous) to suppress the discontinuous pose jump that occurs when different cameras produce slightly different estimates. A 200ms staleness guard prevents ghost positions after detection gaps
+
+### Skeleton Stabilization
+
+After body selection, the ego-view skeleton is stabilized with three mechanisms:
+
+1. **Adaptive per-joint smoothing** — Instead of uniform EMA, each joint group has its own alpha tuned to its expected motion range:
+
+   | Joint Group | Joints | Alpha | Rationale |
+   |-------------|--------|-------|-----------|
+   | Core | Pelvis, spine, neck, clavicles, hips | 0.30 | Stability anchor — these joints move slowly |
+   | Head/face | Head, nose, eyes, ears | 0.50 | Moderate — tracks head turns without lag |
+   | Mid-limb | Shoulders, elbows, knees, ankles | 0.65 | Balanced — follows arm/leg motion |
+   | Extremities | Wrists, hands, handtips, thumbs, feet | 0.85 | Responsive — fast-motion tracking (boxing, waving) |
+
+2. **Body switch detection** — If the pelvis jumps >200mm between frames (indicating a phantom body or tracker glitch), the previous skeleton is carried forward instead. The 200mm threshold accommodates normal human motion (pelvis moves <150mm/frame at 30fps) while catching phantom switches (typically >300mm)
+
+3. **Confidence carry-forward with TTL** — When a joint drops to confidence=0, its last good position is held for up to 5 frames (~167ms at 30fps). After the TTL expires, the raw position is accepted rather than freezing indefinitely at an increasingly wrong location
+
+### 2D Projection
+
+3D joints in helmet camera frame are projected to 2D using `k4a_calibration_3d_to_2d`. Two guards prevent extreme coordinate values:
+
+- **Minimum depth threshold (50mm)** — Points closer than 50mm to the camera are set to (0, 0) with `visible=false`. This prevents the lens distortion model from producing extreme values for near-camera points
+- **Off-screen clamping** — Projected coordinates outside the image are clamped to ±1x image dimensions (e.g., ±1920 for a 1920-wide image). The `visible` flag remains `false` but the stored coordinates stay within a reasonable range for downstream consumers
 
 ### Transform Math
 
@@ -291,7 +336,9 @@ World → Helmet camera (3D joints):
   P_helmet = helmetR^T × (P_world - helmetT)
 
 Helmet camera 3D → 2D (image projection):
-  k4a_calibration_3d_to_2d(&helmetCalib, &P_helmet, COLOR, COLOR, &P_2d)
+  if P_helmet.z < 50mm → (0, 0, visible=false)
+  else → k4a_calibration_3d_to_2d(&helmetCalib, &P_helmet, COLOR, COLOR, &P_2d)
+         clamp to ±image_dims if off-screen
 ```
 
 ## Workflow

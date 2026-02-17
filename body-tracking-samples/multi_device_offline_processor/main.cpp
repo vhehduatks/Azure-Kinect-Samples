@@ -12,6 +12,7 @@
 #include <map>
 #include <iomanip>
 #include <cmath>
+#include <cstring>
 #include <algorithm>
 #include <filesystem>
 
@@ -608,21 +609,89 @@ Transform SmoothPose(const Transform& curr, const Transform& prev, double alpha)
     return result;
 }
 
+// Adaptive per-joint smoothing alpha: core joints get heavy smoothing for stability,
+// extremities get light smoothing for responsiveness during fast motion (e.g. boxing).
+float GetJointSmoothAlpha(int jointId) {
+    switch (jointId) {
+        // Core: heavy smoothing (stability anchor)
+        case K4ABT_JOINT_PELVIS:
+        case K4ABT_JOINT_SPINE_NAVEL:
+        case K4ABT_JOINT_SPINE_CHEST:
+        case K4ABT_JOINT_NECK:
+        case K4ABT_JOINT_CLAVICLE_LEFT:
+        case K4ABT_JOINT_CLAVICLE_RIGHT:
+        case K4ABT_JOINT_HIP_LEFT:
+        case K4ABT_JOINT_HIP_RIGHT:
+            return 0.30f;
+
+        // Head/face: moderate smoothing
+        case K4ABT_JOINT_HEAD:
+        case K4ABT_JOINT_NOSE:
+        case K4ABT_JOINT_EYE_LEFT:
+        case K4ABT_JOINT_EYE_RIGHT:
+        case K4ABT_JOINT_EAR_LEFT:
+        case K4ABT_JOINT_EAR_RIGHT:
+            return 0.50f;
+
+        // Mid-limb: balanced
+        case K4ABT_JOINT_SHOULDER_LEFT:
+        case K4ABT_JOINT_SHOULDER_RIGHT:
+        case K4ABT_JOINT_ELBOW_LEFT:
+        case K4ABT_JOINT_ELBOW_RIGHT:
+        case K4ABT_JOINT_KNEE_LEFT:
+        case K4ABT_JOINT_KNEE_RIGHT:
+        case K4ABT_JOINT_ANKLE_LEFT:
+        case K4ABT_JOINT_ANKLE_RIGHT:
+            return 0.65f;
+
+        // Extremities: light smoothing (responsiveness for hands/feet)
+        case K4ABT_JOINT_WRIST_LEFT:
+        case K4ABT_JOINT_WRIST_RIGHT:
+        case K4ABT_JOINT_HAND_LEFT:
+        case K4ABT_JOINT_HAND_RIGHT:
+        case K4ABT_JOINT_HANDTIP_LEFT:
+        case K4ABT_JOINT_HANDTIP_RIGHT:
+        case K4ABT_JOINT_THUMB_LEFT:
+        case K4ABT_JOINT_THUMB_RIGHT:
+        case K4ABT_JOINT_FOOT_LEFT:
+        case K4ABT_JOINT_FOOT_RIGHT:
+            return 0.85f;
+
+        default:
+            return 0.50f;
+    }
+}
+
 // Select the best body from fused bodies for ego-view.
-// Prioritizes multi-camera bodies (matchCount >= 2) over single-camera detections.
-// Among candidates, uses spatial continuity (closest to previous pelvis).
+// Filters out phantom bodies (confidence=0), then prioritizes multi-camera bodies
+// (matchCount >= 2) over single-camera detections. Among candidates, uses spatial
+// continuity (closest to previous pelvis).
 int SelectBestBody(const vector<FusedBody>& fusedBodies, const k4a_float3_t& prevPelvis, bool hasPrev)
 {
     if (fusedBodies.empty()) return -1;
     if (fusedBodies.size() == 1) return 0;
 
+    // Filter out phantom bodies where pelvis has zero confidence
+    vector<int> validBodies;
+    for (size_t i = 0; i < fusedBodies.size(); i++) {
+        if (fusedBodies[i].joints[K4ABT_JOINT_PELVIS].confidence != K4ABT_JOINT_CONFIDENCE_NONE)
+            validBodies.push_back((int)i);
+    }
+    // Fall back to unfiltered list only if ALL bodies have zero confidence
+    if (validBodies.empty()) {
+        for (size_t i = 0; i < fusedBodies.size(); i++)
+            validBodies.push_back((int)i);
+    }
+
+    if (validBodies.size() == 1) return validBodies[0];
+
     // Separate multi-camera and single-camera bodies
     vector<int> multiCam, singleCam;
-    for (size_t i = 0; i < fusedBodies.size(); i++) {
+    for (int i : validBodies) {
         if (fusedBodies[i].matchCount >= 2)
-            multiCam.push_back((int)i);
+            multiCam.push_back(i);
         else
-            singleCam.push_back((int)i);
+            singleCam.push_back(i);
     }
 
     // Prefer multi-camera bodies; fall back to single-camera only if none exist
@@ -700,7 +769,9 @@ vector<Joint2D> ProjectSkeleton(const vector<Joint3D>& skeleton3D,
         result[i].name = joint.name;
         result[i].confidence = joint.confidence;
 
-        if (joint.z <= 0) {
+        // Reject points behind or too close to the camera — near-zero depth
+        // causes extreme values from the lens distortion model
+        if (joint.z < 50.0f) {
             result[i].u = 0;
             result[i].v = 0;
             result[i].visible = false;
@@ -720,6 +791,11 @@ vector<Joint2D> ProjectSkeleton(const vector<Joint3D>& skeleton3D,
             result[i].v = point2d.xy.y;
             result[i].visible = (point2d.xy.x >= 0 && point2d.xy.x < width &&
                                   point2d.xy.y >= 0 && point2d.xy.y < height);
+            // Clamp off-screen projections to avoid extreme distorted values in JSON
+            if (!result[i].visible) {
+                result[i].u = max(-1.0f * width, min(result[i].u, 2.0f * width));
+                result[i].v = max(-1.0f * height, min(result[i].v, 2.0f * height));
+            }
         } else {
             result[i].u = 0;
             result[i].v = 0;
@@ -767,47 +843,26 @@ void WriteEgoFrameJson(const string& path, int frameId, uint64_t timestamp,
 
     j["skeleton_3d"] = json::array();
     for (size_t i = 0; i < joints3D.size(); i++) {
-        // Exclude confidence=0 joints (nonsensical positions, e.g. hand/fingertip outside FOV)
-        if (joints3D[i].confidence <= 0) {
-            j["skeleton_3d"].push_back({
-                {"joint_id", i},
-                {"name", joints3D[i].name},
-                {"x", 0}, {"y", 0}, {"z", 0},
-                {"confidence", 0}
-            });
-        } else {
-            j["skeleton_3d"].push_back({
-                {"joint_id", i},
-                {"name", joints3D[i].name},
-                {"x", joints3D[i].x},
-                {"y", joints3D[i].y},
-                {"z", joints3D[i].z},
-                {"confidence", joints3D[i].confidence}
-            });
-        }
+        j["skeleton_3d"].push_back({
+            {"joint_id", i},
+            {"name", joints3D[i].name},
+            {"x", joints3D[i].x},
+            {"y", joints3D[i].y},
+            {"z", joints3D[i].z},
+            {"confidence", joints3D[i].confidence}
+        });
     }
 
     j["skeleton_2d"] = json::array();
     for (size_t i = 0; i < joints2D.size(); i++) {
-        // Exclude confidence=0 joints
-        if (joints2D[i].confidence <= 0) {
-            j["skeleton_2d"].push_back({
-                {"joint_id", i},
-                {"name", joints2D[i].name},
-                {"u", 0}, {"v", 0},
-                {"confidence", 0},
-                {"visible", false}
-            });
-        } else {
-            j["skeleton_2d"].push_back({
-                {"joint_id", i},
-                {"name", joints2D[i].name},
-                {"u", joints2D[i].u},
-                {"v", joints2D[i].v},
-                {"confidence", joints2D[i].confidence},
-                {"visible", joints2D[i].visible}
-            });
-        }
+        j["skeleton_2d"].push_back({
+            {"joint_id", i},
+            {"name", joints2D[i].name},
+            {"u", joints2D[i].u},
+            {"v", joints2D[i].v},
+            {"confidence", joints2D[i].confidence},
+            {"visible", joints2D[i].visible}
+        });
     }
 
     ofstream file(path);
@@ -1544,10 +1599,12 @@ int main(int argc, char** argv)
 
     // EMA temporal smoothing state for helmet pose
     const double EMA_ALPHA = 0.75;
+    const double EMA_ALPHA_CAM_SWITCH = 0.15; // much stronger smoothing on camera switch
     const uint64_t STALENESS_THRESHOLD_US = 200000; // 200ms in microseconds
     Transform prevHelmetPose;
     bool hasPrevPose = false;
     uint64_t prevPoseTimestamp = 0;
+    int prevDetectionCamera = -1;
 
     // Latest fused body data (updated when fixed cameras produce new fusion)
     vector<FusedBody> latestFused;
@@ -1562,10 +1619,12 @@ int main(int argc, char** argv)
     FusedBody prevSmoothedBody;
     bool hasPrevSmoothed = false;
     uint64_t prevSmoothedTimestamp = 0;
-    const double SKEL_SMOOTH_ALPHA = 0.4;       // 40% current, 60% previous (stronger smoothing)
     const uint64_t SKEL_STALENESS_US = 100000;   // 100ms
-    const float BODY_SWITCH_THRESHOLD_MM = 80.0f; // if pelvis jumps > this, carry forward previous
+    const float BODY_SWITCH_THRESHOLD_MM = 200.0f; // if pelvis jumps > this, carry forward previous
 
+    // Confidence carry-forward TTL: stop holding stale joint positions after this many frames
+    const int MAX_CARRY_FRAMES = 5;              // ~167ms at 30fps
+    int jointCarryCount[K4ABT_JOINT_COUNT] = {};
 
     // Seed all processors with their first frame
     for (auto& proc : processors) {
@@ -1710,21 +1769,16 @@ int main(int argc, char** argv)
                 candidatePose.valid = true;
 
                 // Weight: inverse-square distance (depth noise scales with distance²)
-                candidates.push_back({candidatePose, 1.0f / (avgDepth * avgDepth), proc.deviceIndex});
+                float weight = 1.0f / (avgDepth * avgDepth);
+                // Same-camera consistency bonus: prefer the camera used in previous frame
+                if (prevDetectionCamera >= 0 && proc.deviceIndex == prevDetectionCamera)
+                    weight *= 2.0f;
+                candidates.push_back({candidatePose, weight, proc.deviceIndex});
             }
 
             if (!candidates.empty()) {
                 helmetPose = FuseHelmetPoses(candidates);
                 detectionSuccess = true;
-
-                // EMA temporal smoothing
-                uint64_t curTs = processors[helmetIdx].lastTimestamp;
-                if (hasPrevPose && (curTs - prevPoseTimestamp) < STALENESS_THRESHOLD_US) {
-                    helmetPose = SmoothPose(helmetPose, prevHelmetPose, EMA_ALPHA);
-                }
-                prevHelmetPose = helmetPose;
-                hasPrevPose = true;
-                prevPoseTimestamp = curTs;
 
                 // Use camera with highest weight for JSON metadata
                 float bestWeight = 0.0f;
@@ -1734,6 +1788,18 @@ int main(int argc, char** argv)
                         detectionCamera = c.cameraIndex;
                     }
                 }
+
+                // EMA temporal smoothing — use stronger smoothing when detection camera switches
+                uint64_t curTs = processors[helmetIdx].lastTimestamp;
+                if (hasPrevPose && (curTs - prevPoseTimestamp) < STALENESS_THRESHOLD_US) {
+                    bool camSwitched = (prevDetectionCamera >= 0 && detectionCamera != prevDetectionCamera);
+                    double alpha = camSwitched ? EMA_ALPHA_CAM_SWITCH : EMA_ALPHA;
+                    helmetPose = SmoothPose(helmetPose, prevHelmetPose, alpha);
+                }
+                prevHelmetPose = helmetPose;
+                hasPrevPose = true;
+                prevPoseTimestamp = curTs;
+                prevDetectionCamera = detectionCamera;
             }
 
             // 2. Generate ego-view output
@@ -1788,21 +1854,23 @@ int main(int argc, char** argv)
                     // This prevents snapping to phantom bodies or tracker glitches
                     smoothedBody = prevSmoothedBody;
                     useCarryForward = true;
+                    memset(jointCarryCount, 0, sizeof(jointCarryCount));
                     // Do NOT update prevPelvisWorld — keep tracking from the stable position
                 } else if (hasPrevSmoothed && pelvisDist < BODY_SWITCH_THRESHOLD_MM &&
                            (curTs - prevSmoothedTimestamp) < SKEL_STALENESS_US) {
-                    // Normal motion: smooth ALL joints with same alpha
+                    // Normal motion: smooth joints with adaptive per-joint alpha
                     smoothedBody = selectedBody;
                     for (int j = 0; j < K4ABT_JOINT_COUNT; j++) {
+                        float alpha = GetJointSmoothAlpha(j);
                         smoothedBody.joints[j].position.xyz.x = (float)(
-                            SKEL_SMOOTH_ALPHA * selectedBody.joints[j].position.xyz.x +
-                            (1.0 - SKEL_SMOOTH_ALPHA) * prevSmoothedBody.joints[j].position.xyz.x);
+                            alpha * selectedBody.joints[j].position.xyz.x +
+                            (1.0f - alpha) * prevSmoothedBody.joints[j].position.xyz.x);
                         smoothedBody.joints[j].position.xyz.y = (float)(
-                            SKEL_SMOOTH_ALPHA * selectedBody.joints[j].position.xyz.y +
-                            (1.0 - SKEL_SMOOTH_ALPHA) * prevSmoothedBody.joints[j].position.xyz.y);
+                            alpha * selectedBody.joints[j].position.xyz.y +
+                            (1.0f - alpha) * prevSmoothedBody.joints[j].position.xyz.y);
                         smoothedBody.joints[j].position.xyz.z = (float)(
-                            SKEL_SMOOTH_ALPHA * selectedBody.joints[j].position.xyz.z +
-                            (1.0 - SKEL_SMOOTH_ALPHA) * prevSmoothedBody.joints[j].position.xyz.z);
+                            alpha * selectedBody.joints[j].position.xyz.z +
+                            (1.0f - alpha) * prevSmoothedBody.joints[j].position.xyz.z);
                     }
                     // Update tracked pelvis for next frame
                     prevPelvisWorld = selectedBody.joints[K4ABT_JOINT_PELVIS].position;
@@ -1812,13 +1880,32 @@ int main(int argc, char** argv)
                     smoothedBody = selectedBody;
                     prevPelvisWorld = selectedBody.joints[K4ABT_JOINT_PELVIS].position;
                     hasPrevPelvis = true;
+                    memset(jointCarryCount, 0, sizeof(jointCarryCount));
+                }
+
+                // 3. Carry forward last known good position for low-confidence joints,
+                //    but only up to MAX_CARRY_FRAMES (~167ms). After that, accept the
+                //    current (possibly bad) position rather than freezing indefinitely.
+                if (hasPrevSmoothed) {
+                    for (int j = 0; j < K4ABT_JOINT_COUNT; j++) {
+                        if (smoothedBody.joints[j].confidence == K4ABT_JOINT_CONFIDENCE_NONE &&
+                            prevSmoothedBody.joints[j].confidence != K4ABT_JOINT_CONFIDENCE_NONE &&
+                            jointCarryCount[j] < MAX_CARRY_FRAMES) {
+                            smoothedBody.joints[j].position = prevSmoothedBody.joints[j].position;
+                            smoothedBody.joints[j].orientation = prevSmoothedBody.joints[j].orientation;
+                            smoothedBody.joints[j].confidence = prevSmoothedBody.joints[j].confidence;
+                            jointCarryCount[j]++;
+                        } else {
+                            jointCarryCount[j] = 0;
+                        }
+                    }
                 }
 
                 prevSmoothedBody = smoothedBody;
                 hasPrevSmoothed = true;
                 prevSmoothedTimestamp = curTs;
 
-                // 3. Transform and project
+                // 4. Transform and project
                 vector<FusedBody> singleBody = {smoothedBody};
                 joints3D = TransformSkeletonToCamera(singleBody, helmetPose, 0);
                 joints2D = ProjectSkeleton(joints3D, helmetCalibration);

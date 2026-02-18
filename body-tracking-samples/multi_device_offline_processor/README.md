@@ -97,6 +97,87 @@ The helmet camera MKV is identified by its serial number. The processor:
 | `world` | Fuse skeletons in world space via extrinsic calibration, then transform to helmet frame (default, backward compatible) |
 | `local` | Transform each camera's skeleton to helmet-local coordinates independently (using only camera-local checkerboard detection), then fuse. Eliminates extrinsic calibration errors from the skeleton→helmet projection path. |
 
+#### Why `local` mode?
+
+In `world` mode, the skeleton path traverses two calibrations: camera→world (extrinsic) then world→helmet (checkerboard). Extrinsic calibration errors (typically 5-15mm) accumulate and cause the projected 2D skeleton to drift from the actual body in the helmet image.
+
+In `local` mode, each camera computes its own helmet pose from its own checkerboard detection and transforms its skeleton directly to helmet-local coordinates — the extrinsic calibration is never on the skeleton path. The world-frame pose is still computed for JSON metadata (camera_pose R/t) but does not affect skeleton accuracy.
+
+#### Local-Mode Pipeline
+
+```
+For each fixed camera that detects the checkerboard:
+
+  Camera N body tracker
+       │
+       ▼
+  SelectBestBodyLocal()         ← phantom rejection + pelvis continuity (per-camera)
+       │
+  Per-camera temporal smoothing ← adaptive per-joint EMA in camera space
+       │                          body switch detection (200mm threshold)
+       │                          confidence carry-forward (5-frame TTL)
+       │
+  Detect checkerboard corners (2D)
+       │
+  Convert2DTo3D in CAMERA space (no world transform)
+       │
+  ComputeCheckerboardPose → checkerPose_cam
+       │
+  helmetPose_cam = checkerPose_cam ∘ T_checker_to_A
+       │
+  TransformBodyToHelmetLocal()
+       │     P_helmet = R_helmet_cam^T × (P_cam - t_helmet_cam)
+       │
+       ▼
+  CameraHelmetSkeleton { joints[32], weight = 1/depth², cameraIndex }
+       │
+       └──────────────────► Collect from all cameras
+                                    │
+                            Pelvis outlier rejection
+                                    │  With 2+ candidates: reject if pelvis
+                                    │  >150mm from per-axis median
+                                    │
+                            FuseHelmetLocalSkeletons()
+                                    │  Confidence-weighted average per joint:
+                                    │  w_total = Σ (camera_weight × conf_weight)
+                                    │  P_fused = Σ (P_j × w) / w_total
+                                    │  conf_fused = max(conf across cameras)
+                                    │
+                                    ▼
+                            joints3D[32] in helmet-local frame
+                                    │
+                            ProjectSkeleton() → joints2D[32]
+                                    │
+                                    ▼
+                            Save annotation JSON
+```
+
+#### Per-Camera State
+
+Each fixed camera maintains independent smoothing state for local mode:
+
+| State | Description |
+|-------|-------------|
+| `prevPelvisLocal` | Previous pelvis position (camera space) for body selection continuity |
+| `prevSmoothedBodyLocal` | Previous smoothed skeleton (camera space) for EMA |
+| `jointCarryCountLocal[32]` | Per-joint carry-forward counter (resets when joint regains confidence) |
+| `prevSmoothedTimestampLocal` | Timestamp of last smoothed frame (staleness guard, 100ms) |
+
+This means if one camera temporarily loses its checkerboard detection, the other cameras continue independently without affecting the first camera's smoothing state when it resumes.
+
+#### Confidence Weights
+
+Joint fusion uses confidence-weighted averaging with these weights:
+
+| Confidence Level | Weight |
+|-----------------|--------|
+| None (0) | 0.0 |
+| Low (1) | 0.25 |
+| Medium (2) | 0.6 |
+| High (3) | 1.0 |
+
+Camera weight is `1/depth²` (inverse-square of average checkerboard depth in mm), with a 2x bonus for the camera used in the previous frame to reduce camera switching.
+
 ### Processing Modes
 
 | Mode | Description |

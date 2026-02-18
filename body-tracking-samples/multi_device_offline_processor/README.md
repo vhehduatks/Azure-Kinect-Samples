@@ -88,6 +88,14 @@ The helmet camera MKV is identified by its serial number. The processor:
 | `--helmet-cb-cols N` | Checkerboard inner corners cols (default: 5) |
 | `--helmet-cb-square N` | Checkerboard square size in mm (default: 30) |
 | `--ego-output DIR` | Output directory for ego-view data (default: ego_output/) |
+| `--ego-fusion-mode MODE` | Ego skeleton fusion mode: `world` (default) or `local` |
+
+### Ego Fusion Modes
+
+| Mode | Description |
+|------|-------------|
+| `world` | Fuse skeletons in world space via extrinsic calibration, then transform to helmet frame (default, backward compatible) |
+| `local` | Transform each camera's skeleton to helmet-local coordinates independently (using only camera-local checkerboard detection), then fuse. Eliminates extrinsic calibration errors from the skeleton→helmet projection path. |
 
 ### Processing Modes
 
@@ -343,7 +351,7 @@ Helmet camera 3D → 2D (image projection):
 
 ## Workflow
 
-Complete workflow from recording to analysis:
+### Single Session
 
 ```bash
 # 1. Record MKV files (using multi_device_recorder)
@@ -356,12 +364,13 @@ multi_device_offline_processor.exe \
     recordings/recording_cam0_*.mkv \
     recordings/recording_cam1_*.mkv
 
-# 3. (Optional) Generate ego-view dataset
+# 3. (Optional) Generate ego-view dataset (local-frame fusion for better accuracy)
 multi_device_offline_processor.exe \
     --calibration calibration.json \
     --helmet-serial CL3FC3100HN \
     --t-checker-to-a T_checker_to_A.json \
     --helmet-cb-rows 4 --helmet-cb-cols 5 --helmet-cb-square 30 \
+    --ego-fusion-mode local \
     --ego-output ego_dataset/ \
     recordings/recording_cam0_*.mkv \
     recordings/recording_cam1_*.mkv \
@@ -374,6 +383,96 @@ python sync_skeleton_hmd.py \
     --hmd hmd_exp01.csv \
     --output synced_exp01.csv
 ```
+
+### Batch Ego Fusion Pipeline
+
+For multi-session recordings (e.g., 20 poses in one capture session), the Python batch scripts automate the full pipeline from raw MKV files to annotated visualization videos.
+
+```
+┌──────────────────────────────────────────────────────────────────────────┐
+│  RECORDING                                                               │
+│                                                                          │
+│  multi_device_recorder.exe          Unity HMD Recorder                   │
+│   ├─ recording_cam0_DC_Dancing1_20260214_182242.mkv    HMD_Test_         │
+│   ├─ recording_cam1_GD_Dancing1_20260214_182242.mkv    Dancing1_         │
+│   ├─ recording_cam2_KV_Dancing1_20260214_182242.mkv    20260214_         │
+│   └─ recording_cam3_CB_Dancing1_20260214_182242.mkv    182242.csv        │
+│   (× N sessions: Dancing1, Boxing, Walking, ...)                         │
+└──────────────────────────────┬───────────────────────────────────────────┘
+                               │
+                               ▼
+┌──────────────────────────────────────────────────────────────────────────┐
+│  BATCH PROCESSING            batch_ego_dataset.py                        │
+│                                                                          │
+│  For each session:                                                       │
+│   1. multi_device_offline_processor.exe                                  │
+│      → ego_dataset/ (images + 3D/2D skeleton annotations)                │
+│      → output.csv (fused skeleton timeseries)                            │
+│   2. sync_skeleton_hmd.py                                                │
+│      → synced_data.csv (skeleton + HMD aligned by cross-correlation)     │
+└──────────────────────────────┬───────────────────────────────────────────┘
+                               │
+                               ▼
+┌──────────────────────────────────────────────────────────────────────────┐
+│  VISUALIZATION               visualize_batch_ego_dataset.py              │
+│                                                                          │
+│  --mode preview   Interactive slider (matplotlib)                        │
+│  --mode video     Batch MP4 export (OpenCV, ~35-45 fps)                  │
+│                                                                          │
+│  Output per session: 1280×960 MP4 with 4 panels                          │
+│   ┌─────────────────┬─────────────────┐                                  │
+│   │ Ego-View 2D     │ 3D Skeleton     │                                  │
+│   │ (camera + skel) │ (ortho project) │                                  │
+│   ├─────────────────┼─────────────────┤                                  │
+│   │ HMD 3D Traj     │ HMD Timeseries  │                                  │
+│   │ (trail + arrow) │ (height + speed) │                                  │
+│   └─────────────────┴─────────────────┘                                  │
+└──────────────────────────────────────────────────────────────────────────┘
+```
+
+**Commands:**
+
+```bash
+# 1. Batch process all sessions (auto-discovers MKVs + HMD CSVs by timestamp)
+python batch_ego_dataset.py \
+    --input-dir Test/ \
+    --output-dir batch_out/
+
+# 2. Resume after interruption (skips completed sessions)
+python batch_ego_dataset.py \
+    --input-dir Test/ \
+    --output-dir batch_out/ \
+    --resume
+
+# 3. Export visualization videos for all sessions (~9s per 300-frame session)
+python visualize_batch_ego_dataset.py \
+    --batch-dir batch_out/ \
+    --mode video
+
+# 4. Interactive preview of one session
+python visualize_batch_ego_dataset.py \
+    --batch-dir batch_out/ \
+    --session Dancing1_20260214_182242
+```
+
+**Output structure:**
+
+```
+batch_out/
+├── batch_summary.json
+├── Dancing1_20260214_182242/
+│   ├── ego_dataset/                     # images/ + annotations/
+│   ├── output.csv                       # fused skeleton CSV
+│   ├── synced_data.csv                  # synchronized skeleton + HMD
+│   ├── processor.log                    # processor stdout/stderr
+│   └── Dancing1_20260214_182242_visualization.mp4
+├── Gaming-Boxing_20260214_181615/
+│   └── ...
+└── Walking_20260214_182220/
+    └── ...
+```
+
+See [scripts/README.md](../scripts/README.md) for detailed options on batch processing and visualization.
 
 ## Requirements
 

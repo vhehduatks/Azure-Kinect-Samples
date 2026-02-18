@@ -356,7 +356,9 @@ After processing, `batch_summary.json` contains:
 
 ## Batch Ego Dataset Visualizer
 
-Visualizes batch ego-view datasets with optional HMD/controller trajectory overlay. Works with output from `batch_ego_dataset.py`.
+Visualizes batch ego-view datasets with HMD/controller trajectory overlay. Works with output from `batch_ego_dataset.py`.
+
+HMD data is **auto-loaded** from `synced_data.csv` in each session directory. Use `--hmd-dir` only as a fallback when synced files are not available.
 
 ### Quick Start
 
@@ -364,15 +366,14 @@ Visualizes batch ego-view datasets with optional HMD/controller trajectory overl
 # List all sessions
 python visualize_batch_ego_dataset.py --batch-dir batch_out/ --list
 
-# Interactive preview of a session
+# Interactive preview (HMD auto-loaded from synced_data.csv)
 python visualize_batch_ego_dataset.py --batch-dir batch_out/ --session Dancing1_20260214_001511
 
-# Interactive preview with HMD overlay
-python visualize_batch_ego_dataset.py --batch-dir batch_out/ \
-    --session Dancing1_20260214_001511 --hmd-dir Test/
-
 # Export videos for all sessions
-python visualize_batch_ego_dataset.py --batch-dir batch_out/ --mode video --hmd-dir Test/
+python visualize_batch_ego_dataset.py --batch-dir batch_out/ --mode video
+
+# Fallback: load raw HMD CSVs from a separate directory
+python visualize_batch_ego_dataset.py --batch-dir batch_out/ --hmd-dir Test/
 ```
 
 ### Options
@@ -381,7 +382,7 @@ python visualize_batch_ego_dataset.py --batch-dir batch_out/ --mode video --hmd-
 |--------|---------|-------------|
 | `--batch-dir`, `-b` | (required) | Batch output directory |
 | `--session`, `-s` | (auto) | Session name (default: first for preview, all for video) |
-| `--hmd-dir` | (none) | Directory with HMD CSV files for overlay |
+| `--hmd-dir` | (none) | Fallback directory with raw HMD CSVs (auto-loaded from `synced_data.csv` if available) |
 | `--mode` | `preview` | `preview` (interactive) or `video` (MP4 export) |
 | `--fps` | `30` | Video frame rate |
 | `--min-confidence` | `1` | Minimum joint confidence (0-3) |
@@ -389,13 +390,18 @@ python visualize_batch_ego_dataset.py --batch-dir batch_out/ --mode video --hmd-
 
 ### Visualization Panels
 
-When HMD data is provided, the display shows three panels:
+When HMD data is available, the display shows four panels (2x2, 1280x960):
 
 1. **Ego-View 2D** — Helmet camera image with skeleton overlay (bones color-coded by body part)
-2. **3D Skeleton + HMD** — 3D view with skeleton joints, HMD position (red diamond), and controller positions (blue/orange circles) with trailing trajectories
-3. **HMD Height** — Timeseries of HMD and controller Y-positions over time, with a vertical line marking the current frame
+2. **3D Skeleton** — Orthographic 3D projection of skeleton joints in camera frame (mm)
+3. **HMD 3D Trajectory** — HMD/controller positions in Unity world space (meters) with fading trail polylines and forward direction arrow
+4. **HMD Timeseries** — Height and speed over time with vertical cursor at current frame
 
-Without HMD data, panels 1 and 2 are shown (same as `visualize_ego_dataset.py`).
+Without HMD data, panels 1 and 2 are shown (1280x480).
+
+### Video Export Performance
+
+Video export uses pure OpenCV rendering (~35-45 fps) instead of matplotlib, making it practical for batch processing. A 300-frame session exports in ~9 seconds. The timeseries background is pre-rendered once and only the cursor is drawn per frame.
 
 ### Interactive Controls
 

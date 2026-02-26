@@ -98,6 +98,12 @@ struct Joint3D {
     string name;
 };
 
+struct CameraHelmetSkeleton {
+    int cameraIndex;
+    Joint3D joints[K4ABT_JOINT_COUNT];
+    float weight;
+};
+
 struct Joint2D {
     float u, v;
     int confidence;
@@ -110,6 +116,9 @@ struct Joint2D {
 // ============================================================================
 CalibrationData g_calibration = {0, {}, false};
 const float BODY_MATCH_THRESHOLD_MM = 500.0f;
+
+// Forward declarations
+float ConfidenceToWeight(k4abt_joint_confidence_level_t conf);
 
 // ============================================================================
 // Coordinate Transformation Functions
@@ -755,6 +764,114 @@ vector<Joint3D> TransformSkeletonToCamera(const vector<FusedBody>& fusedBodies,
     return result;
 }
 
+// Transform a single body from camera space to helmet-local space.
+// Each camera independently computes its helmet pose from checkerboard detection,
+// so this uses only camera-local measurements (no world-frame extrinsics).
+void TransformBodyToHelmetLocal(const k4abt_body_t& body_cam,
+                                 const Transform& helmetPose_cam,
+                                 Joint3D* joints_out)
+{
+    cv::Mat R_inv = helmetPose_cam.rotation.t();
+    for (int j = 0; j < K4ABT_JOINT_COUNT; j++) {
+        cv::Mat p_cam = (cv::Mat_<double>(3, 1) <<
+            (double)body_cam.skeleton.joints[j].position.xyz.x,
+            (double)body_cam.skeleton.joints[j].position.xyz.y,
+            (double)body_cam.skeleton.joints[j].position.xyz.z);
+        cv::Mat p_helmet = R_inv * (p_cam - helmetPose_cam.translation);
+        joints_out[j].x = (float)p_helmet.at<double>(0);
+        joints_out[j].y = (float)p_helmet.at<double>(1);
+        joints_out[j].z = (float)p_helmet.at<double>(2);
+        joints_out[j].confidence = (int)body_cam.skeleton.joints[j].confidence_level;
+        auto it = g_jointNames.find(static_cast<k4abt_joint_id_t>(j));
+        joints_out[j].name = (it != g_jointNames.end()) ? it->second : "UNKNOWN";
+    }
+}
+
+// Confidence-weighted average of helmet-local skeletons from multiple cameras.
+// Same fusion logic as FuseBodiesAtTimestamp() but operates in helmet-local coords.
+vector<Joint3D> FuseHelmetLocalSkeletons(const vector<CameraHelmetSkeleton>& skeletons)
+{
+    vector<Joint3D> result(K4ABT_JOINT_COUNT);
+
+    for (int j = 0; j < K4ABT_JOINT_COUNT; j++) {
+        float totalWeight = 0.0f;
+        float avgX = 0, avgY = 0, avgZ = 0;
+        int maxConf = 0;
+
+        for (const auto& skel : skeletons) {
+            float confWeight = ConfidenceToWeight(
+                static_cast<k4abt_joint_confidence_level_t>(skel.joints[j].confidence));
+            if (confWeight <= 0.0f) continue;
+
+            float w = skel.weight * confWeight;
+            avgX += skel.joints[j].x * w;
+            avgY += skel.joints[j].y * w;
+            avgZ += skel.joints[j].z * w;
+            totalWeight += w;
+
+            if (skel.joints[j].confidence > maxConf)
+                maxConf = skel.joints[j].confidence;
+        }
+
+        auto it = g_jointNames.find(static_cast<k4abt_joint_id_t>(j));
+        result[j].name = (it != g_jointNames.end()) ? it->second : "UNKNOWN";
+
+        if (totalWeight > 0) {
+            result[j].x = avgX / totalWeight;
+            result[j].y = avgY / totalWeight;
+            result[j].z = avgZ / totalWeight;
+            result[j].confidence = maxConf;
+        } else {
+            result[j].x = 0;
+            result[j].y = 0;
+            result[j].z = 0;
+            result[j].confidence = 0;
+        }
+    }
+
+    return result;
+}
+
+// Select the best body from camera-local bodies using pelvis continuity.
+// Analogous to SelectBestBody() but operates on raw k4abt_body_t in camera space.
+int SelectBestBodyLocal(const vector<k4abt_body_t>& bodies,
+                         const k4a_float3_t& prevPelvis, bool hasPrev)
+{
+    if (bodies.empty()) return -1;
+    if (bodies.size() == 1) return 0;
+
+    // Filter out phantom bodies where pelvis has zero confidence
+    vector<int> validBodies;
+    for (size_t i = 0; i < bodies.size(); i++) {
+        if (bodies[i].skeleton.joints[K4ABT_JOINT_PELVIS].confidence_level != K4ABT_JOINT_CONFIDENCE_NONE)
+            validBodies.push_back((int)i);
+    }
+    if (validBodies.empty()) {
+        for (size_t i = 0; i < bodies.size(); i++)
+            validBodies.push_back((int)i);
+    }
+
+    if (validBodies.size() == 1) return validBodies[0];
+
+    if (hasPrev) {
+        float minDist = numeric_limits<float>::max();
+        int bestIdx = validBodies[0];
+        for (int idx : validBodies) {
+            float dx = bodies[idx].skeleton.joints[K4ABT_JOINT_PELVIS].position.xyz.x - prevPelvis.xyz.x;
+            float dy = bodies[idx].skeleton.joints[K4ABT_JOINT_PELVIS].position.xyz.y - prevPelvis.xyz.y;
+            float dz = bodies[idx].skeleton.joints[K4ABT_JOINT_PELVIS].position.xyz.z - prevPelvis.xyz.z;
+            float dist = sqrt(dx*dx + dy*dy + dz*dz);
+            if (dist < minDist) {
+                minDist = dist;
+                bestIdx = idx;
+            }
+        }
+        return bestIdx;
+    }
+
+    return validBodies[0];
+}
+
 // Project 3D joints (in helmet camera frame) to 2D image coordinates
 vector<Joint2D> ProjectSkeleton(const vector<Joint3D>& skeleton3D,
                                  const k4a_calibration_t& calibration)
@@ -889,6 +1006,133 @@ float ConfidenceToWeight(k4abt_joint_confidence_level_t conf)
         case K4ABT_JOINT_CONFIDENCE_HIGH:   return 1.0f;
         default: return 0.0f;
     }
+}
+
+// ============================================================================
+// Per-Camera Interpolation (15 FPS → 30 FPS midpoint synthesis)
+// ============================================================================
+float QuaternionDot(const k4a_quaternion_t& a, const k4a_quaternion_t& b)
+{
+    return a.wxyz.w * b.wxyz.w + a.wxyz.x * b.wxyz.x +
+           a.wxyz.y * b.wxyz.y + a.wxyz.z * b.wxyz.z;
+}
+
+k4a_quaternion_t QuaternionSlerp(const k4a_quaternion_t& a, const k4a_quaternion_t& b, float t)
+{
+    k4a_quaternion_t bAdj = b;
+    float dot = QuaternionDot(a, b);
+
+    // Ensure shortest path
+    if (dot < 0.0f) {
+        bAdj.wxyz.w = -b.wxyz.w;
+        bAdj.wxyz.x = -b.wxyz.x;
+        bAdj.wxyz.y = -b.wxyz.y;
+        bAdj.wxyz.z = -b.wxyz.z;
+        dot = -dot;
+    }
+
+    k4a_quaternion_t result;
+    if (dot > 0.9995f) {
+        // Near-parallel: fallback to LERP + normalize
+        result.wxyz.w = a.wxyz.w + t * (bAdj.wxyz.w - a.wxyz.w);
+        result.wxyz.x = a.wxyz.x + t * (bAdj.wxyz.x - a.wxyz.x);
+        result.wxyz.y = a.wxyz.y + t * (bAdj.wxyz.y - a.wxyz.y);
+        result.wxyz.z = a.wxyz.z + t * (bAdj.wxyz.z - a.wxyz.z);
+    } else {
+        float theta = acosf(dot);
+        float sinTheta = sinf(theta);
+        float wA = sinf((1.0f - t) * theta) / sinTheta;
+        float wB = sinf(t * theta) / sinTheta;
+        result.wxyz.w = wA * a.wxyz.w + wB * bAdj.wxyz.w;
+        result.wxyz.x = wA * a.wxyz.x + wB * bAdj.wxyz.x;
+        result.wxyz.y = wA * a.wxyz.y + wB * bAdj.wxyz.y;
+        result.wxyz.z = wA * a.wxyz.z + wB * bAdj.wxyz.z;
+    }
+
+    // Normalize
+    float len = sqrtf(result.wxyz.w * result.wxyz.w + result.wxyz.x * result.wxyz.x +
+                      result.wxyz.y * result.wxyz.y + result.wxyz.z * result.wxyz.z);
+    if (len > 1e-6f) {
+        result.wxyz.w /= len;
+        result.wxyz.x /= len;
+        result.wxyz.y /= len;
+        result.wxyz.z /= len;
+    }
+    return result;
+}
+
+vector<k4abt_body_t> InterpolateBodies(const vector<k4abt_body_t>& bodiesA,
+                                        const vector<k4abt_body_t>& bodiesB, float t)
+{
+    vector<k4abt_body_t> result;
+
+    // Track which bodies in B have been matched
+    vector<bool> matchedB(bodiesB.size(), false);
+
+    for (const auto& bodyA : bodiesA) {
+        // Find matching body in B by ID
+        int matchIdx = -1;
+        for (size_t i = 0; i < bodiesB.size(); i++) {
+            if (bodiesB[i].id == bodyA.id) {
+                matchIdx = (int)i;
+                break;
+            }
+        }
+
+        k4abt_body_t interp;
+        interp.id = bodyA.id;
+
+        if (matchIdx >= 0) {
+            matchedB[matchIdx] = true;
+            const auto& bodyB = bodiesB[matchIdx];
+
+            for (int j = 0; j < K4ABT_JOINT_COUNT; j++) {
+                auto confA = bodyA.skeleton.joints[j].confidence_level;
+                auto confB = bodyB.skeleton.joints[j].confidence_level;
+                bool validA = (confA != K4ABT_JOINT_CONFIDENCE_NONE);
+                bool validB = (confB != K4ABT_JOINT_CONFIDENCE_NONE);
+
+                if (validA && validB) {
+                    // LERP position
+                    interp.skeleton.joints[j].position.xyz.x =
+                        bodyA.skeleton.joints[j].position.xyz.x * (1.0f - t) +
+                        bodyB.skeleton.joints[j].position.xyz.x * t;
+                    interp.skeleton.joints[j].position.xyz.y =
+                        bodyA.skeleton.joints[j].position.xyz.y * (1.0f - t) +
+                        bodyB.skeleton.joints[j].position.xyz.y * t;
+                    interp.skeleton.joints[j].position.xyz.z =
+                        bodyA.skeleton.joints[j].position.xyz.z * (1.0f - t) +
+                        bodyB.skeleton.joints[j].position.xyz.z * t;
+                    // SLERP orientation
+                    interp.skeleton.joints[j].orientation =
+                        QuaternionSlerp(bodyA.skeleton.joints[j].orientation,
+                                        bodyB.skeleton.joints[j].orientation, t);
+                    // Min confidence
+                    interp.skeleton.joints[j].confidence_level =
+                        (confA < confB) ? confA : confB;
+                } else if (validA) {
+                    interp.skeleton.joints[j] = bodyA.skeleton.joints[j];
+                } else if (validB) {
+                    interp.skeleton.joints[j] = bodyB.skeleton.joints[j];
+                } else {
+                    interp.skeleton.joints[j] = bodyA.skeleton.joints[j]; // both NONE
+                }
+            }
+        } else {
+            // Unmatched body from A (exiting): pass through as-is
+            interp = bodyA;
+        }
+        result.push_back(interp);
+    }
+
+    // Unmatched bodies from B (entering): include as-is
+    for (size_t i = 0; i < bodiesB.size(); i++) {
+        if (!matchedB[i]) {
+            result.push_back(bodiesB[i]);
+        }
+    }
+
+    return result;
 }
 
 // Transform bodies from camera space to primary camera space
@@ -1080,6 +1324,11 @@ struct MkvProcessor {
     uint64_t lastTimestamp = 0;
     vector<k4abt_body_t> lastBodies;
 
+    // Previous frame for interpolation (15 FPS → 30 FPS midpoint synthesis)
+    vector<k4abt_body_t> prevBodies;
+    uint64_t prevTimestamp = 0;
+    bool hasPrevFrame = false;
+
     // Ego-view fields
     bool isHelmet = false;
     k4a_calibration_t calibration = {};
@@ -1087,6 +1336,14 @@ struct MkvProcessor {
     cv::Mat lastColorImage;
     cv::Mat lastDepthImage;
     bool hasNewFrame = false;
+
+    // Per-camera temporal smoothing (local-frame mode)
+    k4abt_body_t prevSmoothedBodyLocal = {};
+    bool hasPrevSmoothedLocal = false;
+    uint64_t prevSmoothedTimestampLocal = 0;
+    k4a_float3_t prevPelvisLocal = {0, 0, 0};
+    bool hasPrevPelvisLocal = false;
+    int jointCarryCountLocal[K4ABT_JOINT_COUNT] = {};
 };
 
 bool InitMkvProcessor(MkvProcessor& proc, const string& filepath, int deviceIndex,
@@ -1241,6 +1498,13 @@ bool ProcessNextFrame(MkvProcessor& proc)
         return false;
     }
 
+    // Save previous frame for interpolation (sliding [prev, last] window)
+    if (!proc.lastBodies.empty()) {
+        proc.prevBodies = proc.lastBodies;
+        proc.prevTimestamp = proc.lastTimestamp;
+        proc.hasPrevFrame = true;
+    }
+
     // Extract data
     proc.lastTimestamp = k4abt_frame_get_device_timestamp_usec(bodyFrame);
     proc.lastBodies.clear();
@@ -1323,7 +1587,9 @@ void PrintUsage()
          << "  --helmet-cb-rows N       - Checkerboard inner rows (default: 4)\n"
          << "  --helmet-cb-cols N       - Checkerboard inner cols (default: 5)\n"
          << "  --helmet-cb-square N     - Square size in mm (default: 30)\n"
-         << "  --ego-output DIR         - Output directory for ego-view data (default: ego_output/)\n\n"
+         << "  --ego-output DIR         - Output directory for ego-view data (default: ego_output/)\n"
+         << "  --ego-fusion-mode MODE   - Ego skeleton fusion: world (default), local\n"
+         << "                             'local' fuses in helmet-local coords (avoids extrinsic errors)\n\n"
          << "BODY TRACKING:\n"
          << "  --sensor-orientation ORI - Sensor orientation: default, cw90, ccw90, flip180\n"
          << "  --smoothing FACTOR       - Temporal smoothing factor 0.0-1.0 (default: 0.0)\n\n"
@@ -1358,6 +1624,7 @@ int main(int argc, char** argv)
     string tCheckerToAPath;
     string egoOutputDir = "ego_output";
     HelmetCBConfig helmetCBConfig;
+    string egoFusionMode = "world";  // "world" (default) or "local"
 
     for (int i = 1; i < argc; i++) {
         string arg(argv[i]);
@@ -1395,6 +1662,14 @@ int main(int argc, char** argv)
         }
         else if (arg == "--ego-output" && i + 1 < argc) {
             egoOutputDir = argv[++i];
+        }
+        else if (arg == "--ego-fusion-mode" && i + 1 < argc) {
+            egoFusionMode = argv[++i];
+            if (egoFusionMode != "world" && egoFusionMode != "local") {
+                cerr << "Unknown ego-fusion-mode: " << egoFusionMode
+                     << " (use 'world' or 'local')" << endl;
+                return -1;
+            }
         }
         else if (arg == "--sensor-orientation" && i + 1 < argc) {
             string ori(argv[++i]);
@@ -1460,6 +1735,7 @@ int main(int argc, char** argv)
         cout << "  Checkerboard: " << helmetCBConfig.rows << "x" << helmetCBConfig.cols
              << " (" << helmetCBConfig.squareMm << "mm)" << endl;
         cout << "  Ego output: " << egoOutputDir << endl;
+        cout << "  Ego fusion mode: " << egoFusionMode << endl;
     }
 
     // Load calibration
@@ -1633,8 +1909,12 @@ int main(int argc, char** argv)
         }
     }
 
+    uint64_t currentMinTimestamp = 0;
+
     while (!allEOF) {
       try {
+        bool wroteCsvRow = false;
+
         // Find the processor with the OLDEST timestamp (most behind)
         int nextIdx = -1;
         uint64_t oldestTs = UINT64_MAX;
@@ -1664,14 +1944,32 @@ int main(int argc, char** argv)
             if (minTimestamp == UINT64_MAX) break;
 
             // Collect frames within sync threshold (fixed cameras only)
+            // Cameras within the sync window contribute directly.
+            // Cameras whose [prev, last] interval straddles minTimestamp
+            // contribute via interpolation (LERP position, SLERP orientation).
             vector<FrameData> syncFrames;
             for (auto& proc : processors) {
                 if (proc.isEOF || proc.isHelmet) continue;
                 if (proc.lastTimestamp <= minTimestamp + syncThresholdUs) {
+                    // Direct match: camera's latest frame is within sync window
                     FrameData fd;
                     fd.timestamp_usec = proc.lastTimestamp;
                     fd.deviceIndex = proc.deviceIndex;
                     fd.bodies = proc.lastBodies;
+                    syncFrames.push_back(fd);
+                } else if (proc.hasPrevFrame &&
+                           proc.prevTimestamp <= minTimestamp &&
+                           proc.lastTimestamp > minTimestamp + syncThresholdUs) {
+                    // Interpolation: camera's frame interval straddles the target
+                    float t = 0.5f;
+                    uint64_t dt = proc.lastTimestamp - proc.prevTimestamp;
+                    if (dt > 0) {
+                        t = (float)(minTimestamp - proc.prevTimestamp) / (float)dt;
+                    }
+                    FrameData fd;
+                    fd.timestamp_usec = minTimestamp;
+                    fd.deviceIndex = proc.deviceIndex;
+                    fd.bodies = InterpolateBodies(proc.prevBodies, proc.lastBodies, t);
                     syncFrames.push_back(fd);
                 }
             }
@@ -1703,6 +2001,8 @@ int main(int argc, char** argv)
                     WriteFusedBodyToCSV(csvFile, minTimestamp, body);
                 }
                 lastCsvTimestamp = minTimestamp;
+                wroteCsvRow = true;
+                currentMinTimestamp = minTimestamp;
 
                 frameCount++;
                 if (frameCount % 100 == 0) {
@@ -1716,100 +2016,372 @@ int main(int argc, char** argv)
         // ================================================================
         // Helmet camera frame: generate ego-view output
         // ================================================================
+        // Only generate ego frames when a new physical helmet image arrives.
+        // The helmet camera's native timestamps are the master reference.
+        bool egoTrigger = false;
+        uint64_t egoTimestamp = 0;
+
         if (isHelmetFrame && egoMode && processors[helmetIdx].hasNewFrame) {
+            egoTrigger = true;
+            egoTimestamp = processors[helmetIdx].lastTimestamp;
+        }
+
+        if (egoTrigger) {
             cv::Size patternSize = helmetCBConfig.patternSize();
 
-            // 1. Detect checkerboard on ALL fixed cameras, fuse weighted poses
-            Transform helmetPose;
+            Transform helmetPose;  // world-frame pose (used for JSON metadata in both modes)
             bool detectionSuccess = false;
             int detectionCamera = -1;
+            vector<Joint3D> joints3D;
+            vector<Joint2D> joints2D;
+            int numBodies = (int)latestFused.size();
 
-            vector<WeightedPose> candidates;
+            if (egoFusionMode == "local") {
+                // ============================================================
+                // LOCAL-FRAME FUSION: transform joints to helmet-local coords
+                // per-camera using only camera-local measurements, then fuse.
+                // Eliminates extrinsic calibration errors from skeleton path.
+                // ============================================================
+                vector<CameraHelmetSkeleton> localCandidates;
+                vector<WeightedPose> poseCandidates;  // world-frame poses for JSON metadata only
 
-            for (auto& proc : processors) {
-                if (proc.isHelmet || proc.isEOF) continue;
-                if (proc.lastColorImage.empty() || proc.lastDepthImage.empty()) continue;
+                for (auto& proc : processors) {
+                    if (proc.isHelmet || proc.isEOF) continue;
+                    if (proc.lastColorImage.empty() || proc.lastDepthImage.empty()) continue;
+                    if (proc.lastBodies.empty()) continue;
 
-                vector<cv::Point2f> corners;
-                if (!DetectCheckerboardCorners(proc.lastColorImage, corners, patternSize)) {
-                    continue;
-                }
+                    // Detect checkerboard corners
+                    vector<cv::Point2f> corners;
+                    if (!DetectCheckerboardCorners(proc.lastColorImage, corners, patternSize))
+                        continue;
 
-                vector<cv::Point3f> points3D_cam;
-                if (!Convert2DTo3DOffline(proc.calibration, proc.transformation,
-                                           proc.lastDepthImage, corners, points3D_cam)) {
-                    continue;
-                }
+                    // Convert 2D corners to 3D in CAMERA space (no world transform)
+                    vector<cv::Point3f> points3D_cam;
+                    if (!Convert2DTo3DOffline(proc.calibration, proc.transformation,
+                                               proc.lastDepthImage, corners, points3D_cam))
+                        continue;
 
-                // Compute average depth for confidence weighting
-                float avgDepth = 0.0f;
-                for (const auto& p : points3D_cam) {
-                    avgDepth += sqrt(p.x * p.x + p.y * p.y + p.z * p.z);
-                }
-                avgDepth /= (float)points3D_cam.size();
+                    // Average depth for confidence weighting
+                    float avgDepth = 0.0f;
+                    for (const auto& p : points3D_cam)
+                        avgDepth += sqrt(p.x * p.x + p.y * p.y + p.z * p.z);
+                    avgDepth /= (float)points3D_cam.size();
 
-                // Transform corners from camera space to world space
-                // Look up calibration by deviceIndex (not array position)
-                for (const auto& cam : g_calibration.cameras) {
-                    if (cam.deviceIndex == proc.deviceIndex && cam.isValid) {
-                        TransformPointsToWorld(points3D_cam, cam);
-                        break;
+                    // Checkerboard pose in CAMERA space (NOT world)
+                    Transform checkerPose_cam = ComputeCheckerboardPose(points3D_cam, patternSize);
+                    if (!checkerPose_cam.valid) continue;
+
+                    // Helmet pose in camera space: helmetPose_cam = checkerPose_cam ∘ T_checker_to_A
+                    Transform helmetPose_cam;
+                    helmetPose_cam.rotation = checkerPose_cam.rotation * tCheckerToA.rotation;
+                    helmetPose_cam.translation = checkerPose_cam.rotation * tCheckerToA.translation
+                                                + checkerPose_cam.translation;
+                    helmetPose_cam.valid = true;
+
+                    // Select best body from this camera using camera-local pelvis continuity
+                    int bodyIdx = SelectBestBodyLocal(proc.lastBodies,
+                                                      proc.prevPelvisLocal, proc.hasPrevPelvisLocal);
+                    if (bodyIdx < 0) continue;
+
+                    const k4abt_body_t& selectedBody = proc.lastBodies[bodyIdx];
+                    uint64_t curTs = processors[helmetIdx].lastTimestamp;
+
+                    // Per-camera temporal smoothing in camera-local space
+                    k4abt_body_t smoothedBody = selectedBody;
+                    float pelvisDist = 0.0f;
+                    if (proc.hasPrevSmoothedLocal) {
+                        float dx = selectedBody.skeleton.joints[0].position.xyz.x
+                                 - proc.prevSmoothedBodyLocal.skeleton.joints[0].position.xyz.x;
+                        float dy = selectedBody.skeleton.joints[0].position.xyz.y
+                                 - proc.prevSmoothedBodyLocal.skeleton.joints[0].position.xyz.y;
+                        float dz = selectedBody.skeleton.joints[0].position.xyz.z
+                                 - proc.prevSmoothedBodyLocal.skeleton.joints[0].position.xyz.z;
+                        pelvisDist = sqrt(dx*dx + dy*dy + dz*dz);
+                    }
+
+                    if (proc.hasPrevSmoothedLocal && pelvisDist > BODY_SWITCH_THRESHOLD_MM &&
+                        (curTs - proc.prevSmoothedTimestampLocal) < SKEL_STALENESS_US) {
+                        // Large jump: carry forward previous skeleton
+                        smoothedBody = proc.prevSmoothedBodyLocal;
+                    } else if (proc.hasPrevSmoothedLocal && pelvisDist <= BODY_SWITCH_THRESHOLD_MM &&
+                               (curTs - proc.prevSmoothedTimestampLocal) < SKEL_STALENESS_US) {
+                        // Normal motion: adaptive per-joint smoothing
+                        for (int j = 0; j < K4ABT_JOINT_COUNT; j++) {
+                            float alpha = GetJointSmoothAlpha(j);
+                            smoothedBody.skeleton.joints[j].position.xyz.x =
+                                alpha * selectedBody.skeleton.joints[j].position.xyz.x +
+                                (1.0f - alpha) * proc.prevSmoothedBodyLocal.skeleton.joints[j].position.xyz.x;
+                            smoothedBody.skeleton.joints[j].position.xyz.y =
+                                alpha * selectedBody.skeleton.joints[j].position.xyz.y +
+                                (1.0f - alpha) * proc.prevSmoothedBodyLocal.skeleton.joints[j].position.xyz.y;
+                            smoothedBody.skeleton.joints[j].position.xyz.z =
+                                alpha * selectedBody.skeleton.joints[j].position.xyz.z +
+                                (1.0f - alpha) * proc.prevSmoothedBodyLocal.skeleton.joints[j].position.xyz.z;
+                        }
+                        proc.prevPelvisLocal = selectedBody.skeleton.joints[K4ABT_JOINT_PELVIS].position;
+                        proc.hasPrevPelvisLocal = true;
+                    } else {
+                        // First frame or stale: accept as-is
+                        proc.prevPelvisLocal = selectedBody.skeleton.joints[K4ABT_JOINT_PELVIS].position;
+                        proc.hasPrevPelvisLocal = true;
+                        memset(proc.jointCarryCountLocal, 0, sizeof(proc.jointCarryCountLocal));
+                    }
+
+                    // Carry forward low-confidence joints (up to MAX_CARRY_FRAMES)
+                    if (proc.hasPrevSmoothedLocal) {
+                        for (int j = 0; j < K4ABT_JOINT_COUNT; j++) {
+                            if (smoothedBody.skeleton.joints[j].confidence_level == K4ABT_JOINT_CONFIDENCE_NONE &&
+                                proc.prevSmoothedBodyLocal.skeleton.joints[j].confidence_level != K4ABT_JOINT_CONFIDENCE_NONE &&
+                                proc.jointCarryCountLocal[j] < MAX_CARRY_FRAMES) {
+                                smoothedBody.skeleton.joints[j] = proc.prevSmoothedBodyLocal.skeleton.joints[j];
+                                proc.jointCarryCountLocal[j]++;
+                            } else {
+                                proc.jointCarryCountLocal[j] = 0;
+                            }
+                        }
+                    }
+
+                    proc.prevSmoothedBodyLocal = smoothedBody;
+                    proc.hasPrevSmoothedLocal = true;
+                    proc.prevSmoothedTimestampLocal = curTs;
+
+                    // Transform smoothed body to helmet-local coordinates
+                    CameraHelmetSkeleton camSkel;
+                    camSkel.cameraIndex = proc.deviceIndex;
+                    TransformBodyToHelmetLocal(smoothedBody, helmetPose_cam, camSkel.joints);
+                    float weight = 1.0f / (avgDepth * avgDepth);
+                    if (prevDetectionCamera >= 0 && proc.deviceIndex == prevDetectionCamera)
+                        weight *= 2.0f;
+                    camSkel.weight = weight;
+                    localCandidates.push_back(camSkel);
+
+                    // Compute world-frame pose for JSON metadata only:
+                    // R_world = R_ext * R_helmet_cam, t_world = R_ext * t_helmet_cam + t_ext
+                    for (const auto& cam : g_calibration.cameras) {
+                        if (cam.deviceIndex == proc.deviceIndex && cam.isValid) {
+                            cv::Mat R_ext(3, 3, CV_64F), t_ext(3, 1, CV_64F);
+                            for (int r = 0; r < 3; r++) {
+                                for (int c = 0; c < 3; c++)
+                                    R_ext.at<double>(r, c) = (double)cam.rotation[r][c];
+                                t_ext.at<double>(r, 0) = (double)cam.translation[r];
+                            }
+                            Transform worldPose;
+                            worldPose.rotation = R_ext * helmetPose_cam.rotation;
+                            worldPose.translation = R_ext * helmetPose_cam.translation + t_ext;
+                            worldPose.valid = true;
+                            poseCandidates.push_back({worldPose, weight, proc.deviceIndex});
+                            break;
+                        }
                     }
                 }
 
-                // Compute checkerboard pose in world
-                Transform checkerPose = ComputeCheckerboardPose(points3D_cam, patternSize);
-                if (!checkerPose.valid) continue;
+                if (!localCandidates.empty()) {
+                    // Outlier rejection: check pelvis agreement across cameras
+                    if (localCandidates.size() >= 2) {
+                        vector<float> pxs, pys, pzs;
+                        for (const auto& cs : localCandidates) {
+                            pxs.push_back(cs.joints[K4ABT_JOINT_PELVIS].x);
+                            pys.push_back(cs.joints[K4ABT_JOINT_PELVIS].y);
+                            pzs.push_back(cs.joints[K4ABT_JOINT_PELVIS].z);
+                        }
+                        sort(pxs.begin(), pxs.end());
+                        sort(pys.begin(), pys.end());
+                        sort(pzs.begin(), pzs.end());
+                        size_t mid = pxs.size() / 2;
+                        float medX = pxs[mid], medY = pys[mid], medZ = pzs[mid];
 
-                // Compose: helmetPose = checkerPose × T_checker_to_A
-                Transform candidatePose;
-                candidatePose.rotation = checkerPose.rotation * tCheckerToA.rotation;
-                candidatePose.translation = checkerPose.rotation * tCheckerToA.translation
-                                           + checkerPose.translation;
-                candidatePose.valid = true;
+                        const float PELVIS_OUTLIER_MM = 150.0f;
+                        vector<CameraHelmetSkeleton> filtered;
+                        for (const auto& cs : localCandidates) {
+                            float dx = cs.joints[K4ABT_JOINT_PELVIS].x - medX;
+                            float dy = cs.joints[K4ABT_JOINT_PELVIS].y - medY;
+                            float dz = cs.joints[K4ABT_JOINT_PELVIS].z - medZ;
+                            if (sqrt(dx*dx + dy*dy + dz*dz) <= PELVIS_OUTLIER_MM)
+                                filtered.push_back(cs);
+                        }
+                        if (!filtered.empty())
+                            localCandidates = filtered;
+                    }
 
-                // Weight: inverse-square distance (depth noise scales with distance²)
-                float weight = 1.0f / (avgDepth * avgDepth);
-                // Same-camera consistency bonus: prefer the camera used in previous frame
-                if (prevDetectionCamera >= 0 && proc.deviceIndex == prevDetectionCamera)
-                    weight *= 2.0f;
-                candidates.push_back({candidatePose, weight, proc.deviceIndex});
-            }
+                    joints3D = FuseHelmetLocalSkeletons(localCandidates);
+                    joints2D = ProjectSkeleton(joints3D, helmetCalibration);
+                    detectionSuccess = true;
 
-            if (!candidates.empty()) {
-                helmetPose = FuseHelmetPoses(candidates);
-                detectionSuccess = true;
+                    // World-frame pose for JSON metadata (does NOT affect skeleton accuracy)
+                    if (!poseCandidates.empty()) {
+                        helmetPose = FuseHelmetPoses(poseCandidates);
+                        float bestWeight = 0.0f;
+                        for (const auto& c : poseCandidates) {
+                            if (c.weight > bestWeight) {
+                                bestWeight = c.weight;
+                                detectionCamera = c.cameraIndex;
+                            }
+                        }
 
-                // Use camera with highest weight for JSON metadata
-                float bestWeight = 0.0f;
-                for (const auto& c : candidates) {
-                    if (c.weight > bestWeight) {
-                        bestWeight = c.weight;
-                        detectionCamera = c.cameraIndex;
+                        uint64_t curTs = processors[helmetIdx].lastTimestamp;
+                        if (hasPrevPose && (curTs - prevPoseTimestamp) < STALENESS_THRESHOLD_US) {
+                            bool camSwitched = (prevDetectionCamera >= 0 && detectionCamera != prevDetectionCamera);
+                            double alpha = camSwitched ? EMA_ALPHA_CAM_SWITCH : EMA_ALPHA;
+                            helmetPose = SmoothPose(helmetPose, prevHelmetPose, alpha);
+                        }
+                        prevHelmetPose = helmetPose;
+                        hasPrevPose = true;
+                        prevPoseTimestamp = curTs;
+                        prevDetectionCamera = detectionCamera;
                     }
                 }
 
-                // EMA temporal smoothing — use stronger smoothing when detection camera switches
-                uint64_t curTs = processors[helmetIdx].lastTimestamp;
-                if (hasPrevPose && (curTs - prevPoseTimestamp) < STALENESS_THRESHOLD_US) {
-                    bool camSwitched = (prevDetectionCamera >= 0 && detectionCamera != prevDetectionCamera);
-                    double alpha = camSwitched ? EMA_ALPHA_CAM_SWITCH : EMA_ALPHA;
-                    helmetPose = SmoothPose(helmetPose, prevHelmetPose, alpha);
+            } else {
+                // ============================================================
+                // WORLD-FRAME FUSION (existing pipeline, --ego-fusion-mode world)
+                // ============================================================
+                vector<WeightedPose> candidates;
+
+                for (auto& proc : processors) {
+                    if (proc.isHelmet || proc.isEOF) continue;
+                    if (proc.lastColorImage.empty() || proc.lastDepthImage.empty()) continue;
+
+                    vector<cv::Point2f> corners;
+                    if (!DetectCheckerboardCorners(proc.lastColorImage, corners, patternSize))
+                        continue;
+
+                    vector<cv::Point3f> points3D_cam;
+                    if (!Convert2DTo3DOffline(proc.calibration, proc.transformation,
+                                               proc.lastDepthImage, corners, points3D_cam))
+                        continue;
+
+                    float avgDepth = 0.0f;
+                    for (const auto& p : points3D_cam)
+                        avgDepth += sqrt(p.x * p.x + p.y * p.y + p.z * p.z);
+                    avgDepth /= (float)points3D_cam.size();
+
+                    // Transform corners from camera space to world space
+                    for (const auto& cam : g_calibration.cameras) {
+                        if (cam.deviceIndex == proc.deviceIndex && cam.isValid) {
+                            TransformPointsToWorld(points3D_cam, cam);
+                            break;
+                        }
+                    }
+
+                    Transform checkerPose = ComputeCheckerboardPose(points3D_cam, patternSize);
+                    if (!checkerPose.valid) continue;
+
+                    Transform candidatePose;
+                    candidatePose.rotation = checkerPose.rotation * tCheckerToA.rotation;
+                    candidatePose.translation = checkerPose.rotation * tCheckerToA.translation
+                                               + checkerPose.translation;
+                    candidatePose.valid = true;
+
+                    float weight = 1.0f / (avgDepth * avgDepth);
+                    if (prevDetectionCamera >= 0 && proc.deviceIndex == prevDetectionCamera)
+                        weight *= 2.0f;
+                    candidates.push_back({candidatePose, weight, proc.deviceIndex});
                 }
-                prevHelmetPose = helmetPose;
-                hasPrevPose = true;
-                prevPoseTimestamp = curTs;
-                prevDetectionCamera = detectionCamera;
+
+                if (!candidates.empty()) {
+                    helmetPose = FuseHelmetPoses(candidates);
+                    detectionSuccess = true;
+
+                    float bestWeight = 0.0f;
+                    for (const auto& c : candidates) {
+                        if (c.weight > bestWeight) {
+                            bestWeight = c.weight;
+                            detectionCamera = c.cameraIndex;
+                        }
+                    }
+
+                    uint64_t curTs = processors[helmetIdx].lastTimestamp;
+                    if (hasPrevPose && (curTs - prevPoseTimestamp) < STALENESS_THRESHOLD_US) {
+                        bool camSwitched = (prevDetectionCamera >= 0 && detectionCamera != prevDetectionCamera);
+                        double alpha = camSwitched ? EMA_ALPHA_CAM_SWITCH : EMA_ALPHA;
+                        helmetPose = SmoothPose(helmetPose, prevHelmetPose, alpha);
+                    }
+                    prevHelmetPose = helmetPose;
+                    hasPrevPose = true;
+                    prevPoseTimestamp = curTs;
+                    prevDetectionCamera = detectionCamera;
+                }
+
+                // World-frame body selection, smoothing, and projection
+                if (detectionSuccess && !latestFused.empty()) {
+                    int bodyIdx = SelectBestBody(latestFused, prevPelvisWorld, hasPrevPelvis);
+                    if (bodyIdx < 0) bodyIdx = 0;
+
+                    const FusedBody& selectedBody = latestFused[bodyIdx];
+                    uint64_t curTs = processors[helmetIdx].lastTimestamp;
+
+                    float pelvisDist = 0.0f;
+                    if (hasPrevSmoothed) {
+                        float dx = selectedBody.joints[0].position.xyz.x - prevSmoothedBody.joints[0].position.xyz.x;
+                        float dy = selectedBody.joints[0].position.xyz.y - prevSmoothedBody.joints[0].position.xyz.y;
+                        float dz = selectedBody.joints[0].position.xyz.z - prevSmoothedBody.joints[0].position.xyz.z;
+                        pelvisDist = sqrt(dx*dx + dy*dy + dz*dz);
+                    }
+
+                    FusedBody smoothedBody;
+                    bool useCarryForward = false;
+
+                    if (hasPrevSmoothed && pelvisDist > BODY_SWITCH_THRESHOLD_MM &&
+                        (curTs - prevSmoothedTimestamp) < SKEL_STALENESS_US) {
+                        smoothedBody = prevSmoothedBody;
+                        useCarryForward = true;
+                        memset(jointCarryCount, 0, sizeof(jointCarryCount));
+                    } else if (hasPrevSmoothed && pelvisDist < BODY_SWITCH_THRESHOLD_MM &&
+                               (curTs - prevSmoothedTimestamp) < SKEL_STALENESS_US) {
+                        smoothedBody = selectedBody;
+                        for (int j = 0; j < K4ABT_JOINT_COUNT; j++) {
+                            float alpha = GetJointSmoothAlpha(j);
+                            smoothedBody.joints[j].position.xyz.x = (float)(
+                                alpha * selectedBody.joints[j].position.xyz.x +
+                                (1.0f - alpha) * prevSmoothedBody.joints[j].position.xyz.x);
+                            smoothedBody.joints[j].position.xyz.y = (float)(
+                                alpha * selectedBody.joints[j].position.xyz.y +
+                                (1.0f - alpha) * prevSmoothedBody.joints[j].position.xyz.y);
+                            smoothedBody.joints[j].position.xyz.z = (float)(
+                                alpha * selectedBody.joints[j].position.xyz.z +
+                                (1.0f - alpha) * prevSmoothedBody.joints[j].position.xyz.z);
+                        }
+                        prevPelvisWorld = selectedBody.joints[K4ABT_JOINT_PELVIS].position;
+                        hasPrevPelvis = true;
+                    } else {
+                        smoothedBody = selectedBody;
+                        prevPelvisWorld = selectedBody.joints[K4ABT_JOINT_PELVIS].position;
+                        hasPrevPelvis = true;
+                        memset(jointCarryCount, 0, sizeof(jointCarryCount));
+                    }
+
+                    if (hasPrevSmoothed) {
+                        for (int j = 0; j < K4ABT_JOINT_COUNT; j++) {
+                            if (smoothedBody.joints[j].confidence == K4ABT_JOINT_CONFIDENCE_NONE &&
+                                prevSmoothedBody.joints[j].confidence != K4ABT_JOINT_CONFIDENCE_NONE &&
+                                jointCarryCount[j] < MAX_CARRY_FRAMES) {
+                                smoothedBody.joints[j].position = prevSmoothedBody.joints[j].position;
+                                smoothedBody.joints[j].orientation = prevSmoothedBody.joints[j].orientation;
+                                smoothedBody.joints[j].confidence = prevSmoothedBody.joints[j].confidence;
+                                jointCarryCount[j]++;
+                            } else {
+                                jointCarryCount[j] = 0;
+                            }
+                        }
+                    }
+
+                    prevSmoothedBody = smoothedBody;
+                    hasPrevSmoothed = true;
+                    prevSmoothedTimestamp = curTs;
+
+                    vector<FusedBody> singleBody = {smoothedBody};
+                    joints3D = TransformSkeletonToCamera(singleBody, helmetPose, 0);
+                    joints2D = ProjectSkeleton(joints3D, helmetCalibration);
+                }
             }
 
-            // 2. Generate ego-view output
+            // Generate ego-view output (shared between modes)
             ostringstream filename;
             filename << "frame_" << setw(6) << setfill('0') << egoFrameCount;
 
             string imagePath = egoOutputDir + "/images/" + filename.str() + ".jpg";
             string jsonPath = egoOutputDir + "/annotations/" + filename.str() + ".json";
 
-            // Save ego-view image
             cv::Mat outputImage;
             if (processors[helmetIdx].lastColorImage.channels() == 4) {
                 cv::cvtColor(processors[helmetIdx].lastColorImage, outputImage, cv::COLOR_BGRA2BGR);
@@ -1822,98 +2394,9 @@ int main(int argc, char** argv)
                 cv::imwrite(imagePath, outputImage, jpegParams);
             }
 
-            // Compute 3D/2D joints using latest fused skeleton (closest in time)
-            vector<Joint3D> joints3D;
-            vector<Joint2D> joints2D;
-            int numBodies = (int)latestFused.size();
-
-            if (detectionSuccess && !latestFused.empty()) {
-                // 1. Select body: prefer multi-camera fused bodies (matchCount >= 2)
-                //    to avoid phantom single-camera detections
-                int bodyIdx = SelectBestBody(latestFused, prevPelvisWorld, hasPrevPelvis);
-                if (bodyIdx < 0) bodyIdx = 0;
-
-                const FusedBody& selectedBody = latestFused[bodyIdx];
-                uint64_t curTs = processors[helmetIdx].lastTimestamp;
-
-                // 2. Check if selected body is plausible (not a phantom/glitch)
-                float pelvisDist = 0.0f;
-                if (hasPrevSmoothed) {
-                    float dx = selectedBody.joints[0].position.xyz.x - prevSmoothedBody.joints[0].position.xyz.x;
-                    float dy = selectedBody.joints[0].position.xyz.y - prevSmoothedBody.joints[0].position.xyz.y;
-                    float dz = selectedBody.joints[0].position.xyz.z - prevSmoothedBody.joints[0].position.xyz.z;
-                    pelvisDist = sqrt(dx*dx + dy*dy + dz*dz);
-                }
-
-                FusedBody smoothedBody;
-                bool useCarryForward = false;
-
-                if (hasPrevSmoothed && pelvisDist > BODY_SWITCH_THRESHOLD_MM &&
-                    (curTs - prevSmoothedTimestamp) < SKEL_STALENESS_US) {
-                    // Large jump detected: carry forward previous skeleton
-                    // This prevents snapping to phantom bodies or tracker glitches
-                    smoothedBody = prevSmoothedBody;
-                    useCarryForward = true;
-                    memset(jointCarryCount, 0, sizeof(jointCarryCount));
-                    // Do NOT update prevPelvisWorld — keep tracking from the stable position
-                } else if (hasPrevSmoothed && pelvisDist < BODY_SWITCH_THRESHOLD_MM &&
-                           (curTs - prevSmoothedTimestamp) < SKEL_STALENESS_US) {
-                    // Normal motion: smooth joints with adaptive per-joint alpha
-                    smoothedBody = selectedBody;
-                    for (int j = 0; j < K4ABT_JOINT_COUNT; j++) {
-                        float alpha = GetJointSmoothAlpha(j);
-                        smoothedBody.joints[j].position.xyz.x = (float)(
-                            alpha * selectedBody.joints[j].position.xyz.x +
-                            (1.0f - alpha) * prevSmoothedBody.joints[j].position.xyz.x);
-                        smoothedBody.joints[j].position.xyz.y = (float)(
-                            alpha * selectedBody.joints[j].position.xyz.y +
-                            (1.0f - alpha) * prevSmoothedBody.joints[j].position.xyz.y);
-                        smoothedBody.joints[j].position.xyz.z = (float)(
-                            alpha * selectedBody.joints[j].position.xyz.z +
-                            (1.0f - alpha) * prevSmoothedBody.joints[j].position.xyz.z);
-                    }
-                    // Update tracked pelvis for next frame
-                    prevPelvisWorld = selectedBody.joints[K4ABT_JOINT_PELVIS].position;
-                    hasPrevPelvis = true;
-                } else {
-                    // First frame or stale: accept as-is (snap)
-                    smoothedBody = selectedBody;
-                    prevPelvisWorld = selectedBody.joints[K4ABT_JOINT_PELVIS].position;
-                    hasPrevPelvis = true;
-                    memset(jointCarryCount, 0, sizeof(jointCarryCount));
-                }
-
-                // 3. Carry forward last known good position for low-confidence joints,
-                //    but only up to MAX_CARRY_FRAMES (~167ms). After that, accept the
-                //    current (possibly bad) position rather than freezing indefinitely.
-                if (hasPrevSmoothed) {
-                    for (int j = 0; j < K4ABT_JOINT_COUNT; j++) {
-                        if (smoothedBody.joints[j].confidence == K4ABT_JOINT_CONFIDENCE_NONE &&
-                            prevSmoothedBody.joints[j].confidence != K4ABT_JOINT_CONFIDENCE_NONE &&
-                            jointCarryCount[j] < MAX_CARRY_FRAMES) {
-                            smoothedBody.joints[j].position = prevSmoothedBody.joints[j].position;
-                            smoothedBody.joints[j].orientation = prevSmoothedBody.joints[j].orientation;
-                            smoothedBody.joints[j].confidence = prevSmoothedBody.joints[j].confidence;
-                            jointCarryCount[j]++;
-                        } else {
-                            jointCarryCount[j] = 0;
-                        }
-                    }
-                }
-
-                prevSmoothedBody = smoothedBody;
-                hasPrevSmoothed = true;
-                prevSmoothedTimestamp = curTs;
-
-                // 4. Transform and project
-                vector<FusedBody> singleBody = {smoothedBody};
-                joints3D = TransformSkeletonToCamera(singleBody, helmetPose, 0);
-                joints2D = ProjectSkeleton(joints3D, helmetCalibration);
-            }
-
             // Save annotation JSON
             WriteEgoFrameJson(jsonPath, egoFrameCount,
-                              processors[helmetIdx].lastTimestamp,
+                              egoTimestamp,
                               detectionSuccess, detectionCamera,
                               helmetPose, joints3D, joints2D,
                               filename.str() + ".jpg",
@@ -1960,6 +2443,7 @@ int main(int argc, char** argv)
         metadata["checkerboard_square_mm"] = helmetCBConfig.squareMm;
         metadata["t_checker_to_a_path"] = tCheckerToAPath;
         metadata["calibration_path"] = calibrationPath;
+        metadata["ego_fusion_mode"] = egoFusionMode;
 
         json mkvList = json::array();
         for (size_t i = 0; i < mkvPaths.size(); i++) {

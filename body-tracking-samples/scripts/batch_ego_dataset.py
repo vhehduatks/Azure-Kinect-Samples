@@ -160,6 +160,7 @@ def run_offline_processor(
     output_dir: Path,
     sensor_orientation: str,
     smoothing: float,
+    ego_fusion_mode: str = "world",
 ) -> bool:
     """Run multi_device_offline_processor.exe for a session."""
     session_dir = output_dir / session.name
@@ -190,6 +191,7 @@ def run_offline_processor(
         "--smoothing", str(smoothing),
         "--output", str(output_csv),
         "--ego-output", str(ego_output),
+        "--ego-fusion-mode", ego_fusion_mode,
     ] + mkv_paths
 
     print(f"    Command: {' '.join(cmd[:6])} ... ({len(mkv_paths)} MKVs)")
@@ -272,6 +274,7 @@ def process_session(
     sensor_orientation: str,
     smoothing: float,
     resume: bool,
+    ego_fusion_mode: str = "world",
 ) -> SessionResult:
     """Orchestrate processing of a single session."""
     result = SessionResult(name=session.name, status="pending")
@@ -302,7 +305,7 @@ def process_session(
             t0 = time.time()
             run_offline_processor(
                 session, processor_exe, calib_dir, output_dir,
-                sensor_orientation, smoothing,
+                sensor_orientation, smoothing, ego_fusion_mode,
             )
             result.processor_time = time.time() - t0
             print(f"    Processor done ({result.processor_time:.1f}s)")
@@ -449,6 +452,11 @@ Examples:
         "--resume", action="store_true",
         help="Skip sessions that already have ego_dataset/metadata.json",
     )
+    parser.add_argument(
+        "--ego-fusion-mode", default="world",
+        choices=["world", "local"],
+        help="Ego skeleton fusion mode: world (default) or local",
+    )
 
     args = parser.parse_args()
 
@@ -501,6 +509,7 @@ Examples:
     print(f"  Calibration:  {calib_dir}")
     print(f"  Orientation:  {args.sensor_orientation}")
     print(f"  Smoothing:    {args.smoothing}")
+    print(f"  Ego fusion:   {args.ego_fusion_mode}")
     print(f"  Resume:       {args.resume}")
     print()
 
@@ -582,6 +591,7 @@ Examples:
             sensor_orientation=args.sensor_orientation,
             smoothing=args.smoothing,
             resume=args.resume,
+            ego_fusion_mode=args.ego_fusion_mode,
         )
         results.append(result)
 

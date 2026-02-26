@@ -59,11 +59,16 @@ JOINT_NAMES = [
 BONE_CONNECTIONS = [
     (0, 1), (1, 2), (2, 3), (3, 26),       # Spine to head
     (26, 27), (27, 28), (28, 29), (27, 30), (30, 31),  # Head/face
-    (2, 4), (4, 5), (5, 6), (6, 7), (7, 8), (8, 9), (7, 10),  # Left arm
-    (2, 11), (11, 12), (12, 13), (13, 14), (14, 15), (15, 16), (14, 17),  # Right arm
+    (2, 4), (4, 5), (5, 6), (6, 7),        # Left arm (stop at wrist)
+    (2, 11), (11, 12), (12, 13), (13, 14),  # Right arm (stop at wrist)
     (0, 18), (18, 19), (19, 20), (20, 21),  # Left leg
     (0, 22), (22, 23), (23, 24), (24, 25),  # Right leg
 ]
+
+# Distal hand joints excluded from rendering (confidence=0 in ~70% of frames)
+# 8=HAND_LEFT, 9=HANDTIP_LEFT, 10=THUMB_LEFT,
+# 15=HAND_RIGHT, 16=HANDTIP_RIGHT, 17=THUMB_RIGHT
+EXCLUDED_JOINTS = {8, 9, 10, 15, 16, 17}
 
 # Colors by body part (BGR for OpenCV, RGB for matplotlib)
 PART_COLORS_RGB = {
@@ -219,6 +224,8 @@ def draw_skeleton_2d_cv(image: np.ndarray, joints_2d: np.ndarray,
 
     # Draw joints
     for jid in range(min(len(joints_2d), 32)):
+        if jid in EXCLUDED_JOINTS:
+            continue
         u, v, conf, vis = joints_2d[jid]
         if conf < min_confidence or vis < 0.5:
             continue
@@ -253,6 +260,8 @@ def draw_skeleton_2d_mpl(ax, joints_2d: np.ndarray, img_shape: Tuple[int, int],
 
     # Draw joints
     for jid in range(min(len(joints_2d), 32)):
+        if jid in EXCLUDED_JOINTS:
+            continue
         u, v, conf, vis = joints_2d[jid]
         if conf < min_confidence or vis < 0.5:
             continue
@@ -266,8 +275,14 @@ def draw_skeleton_2d_mpl(ax, joints_2d: np.ndarray, img_shape: Tuple[int, int],
 # =============================================================================
 # 3D Visualization (Matplotlib)
 # =============================================================================
-def draw_skeleton_3d(ax, joints_3d: np.ndarray, min_confidence: int = 1):
-    """Draw 3D skeleton on a matplotlib 3D axis."""
+def draw_skeleton_3d(ax, joints_3d: np.ndarray, min_confidence: int = 1,
+                     fixed_bounds: Optional[Tuple] = None):
+    """Draw 3D skeleton on a matplotlib 3D axis.
+
+    Args:
+        fixed_bounds: Optional (center_x, center_y, center_z, half_range) to lock the
+                      coordinate system and prevent frame-to-frame shaking.
+    """
     ax.clear()
 
     # In helmet camera frame: X=right, Y=down, Z=forward
@@ -295,6 +310,8 @@ def draw_skeleton_3d(ax, joints_3d: np.ndarray, min_confidence: int = 1):
 
     # Draw joints
     for jid in range(min(len(joints_3d), 32)):
+        if jid in EXCLUDED_JOINTS:
+            continue
         conf = joints_3d[jid, 3]
         if conf < min_confidence:
             continue
@@ -310,21 +327,82 @@ def draw_skeleton_3d(ax, joints_3d: np.ndarray, min_confidence: int = 1):
     ax.set_zlabel('Z (mm)')
     ax.set_title('3D Skeleton (Helmet Camera Frame)')
 
-    # Set equal aspect ratio
-    valid = joints_3d[joints_3d[:, 3] >= min_confidence]
-    if len(valid) > 0:
-        center_x = np.mean(valid[:, 0])
-        center_y = -np.mean(valid[:, 1])
-        center_z = np.mean(valid[:, 2])
-        max_range = max(
-            np.ptp(valid[:, 0]),
-            np.ptp(valid[:, 1]),
-            np.ptp(valid[:, 2])
-        ) / 2
-        max_range = max(max_range, 200)  # At least 200mm range
-        ax.set_xlim(center_x - max_range, center_x + max_range)
-        ax.set_ylim(center_y - max_range, center_y + max_range)
-        ax.set_zlim(center_z - max_range, center_z + max_range)
+    # Use fixed bounds if provided (prevents frame-to-frame shaking)
+    if fixed_bounds is not None:
+        cx, cy, cz, hr = fixed_bounds
+        ax.set_xlim(cx - hr, cx + hr)
+        ax.set_ylim(cy - hr, cy + hr)
+        ax.set_zlim(cz - hr, cz + hr)
+    else:
+        # Fallback: compute from current frame (only confident, non-excluded joints)
+        mask = np.array([(joints_3d[j, 3] >= min_confidence and j not in EXCLUDED_JOINTS)
+                         for j in range(len(joints_3d))])
+        valid = joints_3d[mask]
+        if len(valid) > 0:
+            center_x = np.mean(valid[:, 0])
+            center_y = -np.mean(valid[:, 1])
+            center_z = np.mean(valid[:, 2])
+            max_range = max(
+                np.ptp(valid[:, 0]),
+                np.ptp(valid[:, 1]),
+                np.ptp(valid[:, 2])
+            ) / 2
+            max_range = max(max_range, 200)  # At least 200mm range
+            ax.set_xlim(center_x - max_range, center_x + max_range)
+            ax.set_ylim(center_y - max_range, center_y + max_range)
+            ax.set_zlim(center_z - max_range, center_z + max_range)
+
+
+def compute_fixed_bounds(dataset, min_confidence: int = 1) -> Optional[Tuple]:
+    """Pre-compute stable 3D axis bounds from the entire dataset.
+
+    Samples frames across the dataset, collects all confident joint positions,
+    and computes tight bounds from the actual data spread. This ensures
+    small-range activities (dancing, gesturing) are visible rather than
+    being lost in an oversized fixed window.
+    """
+    # Sample at most ~100 frames for speed
+    n = len(dataset)
+    step = max(1, n // 100)
+    sample_indices = range(0, n, step)
+
+    all_xs, all_ys, all_zs = [], [], []
+
+    for i in sample_indices:
+        joints = dataset.get_joints_3d(i)
+        if joints is None or len(joints) == 0:
+            continue
+        for jid in range(min(len(joints), 32)):
+            if jid in EXCLUDED_JOINTS:
+                continue
+            if joints[jid, 3] < min_confidence:
+                continue
+            all_xs.append(joints[jid, 0])
+            all_ys.append(-joints[jid, 1])  # Invert Y to match draw_skeleton_3d
+            all_zs.append(joints[jid, 2])
+
+    if not all_xs:
+        return None
+
+    all_xs = np.array(all_xs)
+    all_ys = np.array(all_ys)
+    all_zs = np.array(all_zs)
+
+    # Center on median of all joint positions (robust to outliers)
+    cx = float(np.median(all_xs))
+    cy = float(np.median(all_ys))
+    cz = float(np.median(all_zs))
+
+    # Half-range from 90th-percentile spread per axis, with 1.3x margin
+    def spread_90(vals):
+        p5, p95 = np.percentile(vals, [5, 95])
+        return (p95 - p5) / 2.0
+
+    hr = max(spread_90(all_xs), spread_90(all_ys), spread_90(all_zs)) * 1.3
+    hr = max(hr, 300.0)  # Floor: at least 300mm
+
+    print(f"  3D bounds: center=({cx:.0f}, {cy:.0f}, {cz:.0f}), range=+/-{hr:.0f}mm")
+    return (cx, cy, cz, hr)
 
 
 # =============================================================================
@@ -336,6 +414,12 @@ def preview_interactive(dataset: EgoDataset, view: str = 'both',
     if len(dataset) == 0:
         print("No frames to display.")
         return
+
+    # Pre-compute fixed 3D bounds from entire dataset to prevent shaking
+    bounds_3d = None
+    if view in ('3d', 'both'):
+        print("  Computing stable 3D bounds from dataset...")
+        bounds_3d = compute_fixed_bounds(dataset, min_confidence)
 
     if view == '2d':
         fig, ax_2d = plt.subplots(1, 1, figsize=(12, 8))
@@ -384,7 +468,7 @@ def preview_interactive(dataset: EgoDataset, view: str = 'both',
 
         if ax_3d is not None:
             if joints_3d is not None and len(joints_3d) > 0:
-                draw_skeleton_3d(ax_3d, joints_3d, min_confidence)
+                draw_skeleton_3d(ax_3d, joints_3d, min_confidence, fixed_bounds=bounds_3d)
                 ax_3d.set_title(f'3D Skeleton (Helmet Frame)\n{info}')
             else:
                 ax_3d.clear()
@@ -522,6 +606,12 @@ def _export_video_mpl(dataset: EgoDataset, output_path: str, fps: float,
     """Video export using matplotlib (supports 3D and both views)."""
     from matplotlib.animation import FuncAnimation, FFMpegWriter
 
+    # Pre-compute fixed 3D bounds
+    bounds_3d = None
+    if view in ('3d', 'both'):
+        print("  Computing stable 3D bounds from dataset...")
+        bounds_3d = compute_fixed_bounds(dataset, min_confidence)
+
     if view == '2d':
         fig, ax_2d = plt.subplots(1, 1, figsize=(12, 8))
         ax_3d = None
@@ -557,7 +647,7 @@ def _export_video_mpl(dataset: EgoDataset, output_path: str, fps: float,
 
         if ax_3d is not None:
             if joints_3d is not None and len(joints_3d) > 0:
-                draw_skeleton_3d(ax_3d, joints_3d, min_confidence)
+                draw_skeleton_3d(ax_3d, joints_3d, min_confidence, fixed_bounds=bounds_3d)
                 ax_3d.set_title(f'3D Skeleton\n{info}')
             else:
                 ax_3d.clear()

@@ -72,21 +72,24 @@ class JointItem(QGraphicsEllipseItem):
             return
 
         color = joint_qt_color(self.joint_id)
+        r = CONFIDENCE_RADIUS.get(self._confidence, 3) + 2
+
         if not self._visible or self._confidence == 0:
-            color.setAlpha(80)
+            # Invisible / no-confidence: hollow circle with dashed red outline
+            self.setBrush(QBrush(Qt.NoBrush))
+            pen = QPen(QColor(255, 60, 60, 160), 1.5, Qt.DashLine)
+            self.setPen(pen)
+            r = 4  # small fixed size
         else:
             color.setAlpha(220)
-        self.setBrush(QBrush(color))
+            self.setBrush(QBrush(color))
+            if self.isSelected():
+                self.setPen(QPen(QColor(255, 255, 0), 2.5))
+            else:
+                self.setPen(QPen(Qt.white, 1.5))
 
-        r = CONFIDENCE_RADIUS.get(self._confidence, 3) + 2
         self.prepareGeometryChange()
         self.setRect(-r, -r, 2 * r, 2 * r)
-
-        if self.isSelected():
-            self.setPen(QPen(QColor(255, 255, 0), 2.5))
-        else:
-            self.setPen(QPen(Qt.white, 1.5))
-
         self.setVisible(True)
 
     # ---- programmatic position update --------------------------------

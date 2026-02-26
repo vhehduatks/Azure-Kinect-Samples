@@ -18,6 +18,11 @@ Manually editing per-frame JSON files is impractical for 300+ frame sessions. Th
 │        - pan: middle-drag             │  ├───────────────┤  │
 │        - rubber-band: left-drag       │  │ HMD Info      │  │
 │        - drag joints: left-click      │  │ pos, rot, spd │  │
+│                                       │  ├───────────────┤  │
+│                                       │  │☐ Prune Head   │  │
+│                                       │  ├───────────────┤  │
+│                                       │  │ Extrinsic     │  │
+│                                       │  │ Tuning Sliders│  │
 │                                       │  └───────────────┘  │
 ├───────────────────────────────────────┴─────────────────────┤
 │ [▓▓▓░░░░░░░░░░░░░░░░░░░░░░░░░░░] Color bar (frame status) │
@@ -182,7 +187,7 @@ Displays all 32 body-tracking joints grouped by body part (Spine, Head, Left Arm
 | Column | Description |
 |--------|-------------|
 | Name | Joint name (e.g., `ELBOW_LEFT`). Excluded distal joints marked with `*` |
-| Conf | Confidence level (0--3) from the body tracker |
+| Conf | Confidence level (0--3) from the body tracker, or "pruned" if head pruning is active |
 | Vis | Checkbox: whether the joint is visible in the annotation |
 | KF | Checkbox: whether this frame is a keyframe for this joint |
 | U | Horizontal pixel coordinate |
@@ -199,6 +204,41 @@ When `synced_data.csv` is available in the session directory, the HMD panel disp
 - **Speed**: HMD velocity in m/s
 
 Values are mapped to the current ego frame by linear ratio.
+
+### Head Joint Pruning
+
+In egocentric (helmet-camera) datasets, the head/face joints (IDs 26--31: HEAD, NOSE, EYE\_LEFT, EYE\_RIGHT, EAR\_LEFT, EAR\_RIGHT) are physically on or very near the camera, producing extreme and unreliable 2D projections visible as red lines spanning the entire viewport.
+
+The **"Prune Head Joints (26--31)"** checkbox hides these joints in the viewport and marks them as `visible: false` when saving. This is non-destructive -- joint entries remain in the JSON, only the visibility flag changes.
+
+| State | Viewport | Properties | Save |
+|-------|----------|------------|------|
+| Checked | Joints 26--31 hidden, bones to/from them hidden | Grayed out, Conf shows "pruned" | `visible: false` |
+| Unchecked | All joints displayed normally | Normal colors and values | No change |
+
+The checkbox resets to unchecked when switching sessions.
+
+### Joint Visual Indicators
+
+Joints in the viewport have distinct visual styles based on their state:
+
+| State | Style |
+|-------|-------|
+| Visible, high confidence | Filled circle with body-part color, white outline |
+| Visible, selected | Filled circle with yellow outline |
+| Invisible or confidence 0 | Small hollow circle with dashed red outline |
+| Pruned | Hidden entirely (bone connections also hidden) |
+
+### Extrinsic Tuning
+
+When the session contains both `skeleton_3d` and `skeleton_2d` data, the tool estimates camera intrinsics and enables extrinsic fine-tuning. Six sliders control rotation (rx, ry, rz in degrees) and translation (tx, ty, tz in mm) offsets applied on top of the original extrinsic calibration.
+
+| Button | Description |
+|--------|-------------|
+| **Apply to All Frames** | Re-projects all skeleton data using the current delta and overwrites annotation JSONs (`.bak` backups created) |
+| **Export Transform** | Saves the adjusted extrinsic transform as a new JSON file |
+
+The viewport updates in real-time as sliders are adjusted, allowing visual verification before committing changes.
 
 ## Save Behavior
 
@@ -221,6 +261,7 @@ body-tracking-samples/scripts/
         viewport.py                      # QGraphicsView + JointItem + BoneItem
         timeline.py                      # Color bar + slider + frame label
         properties.py                    # Joint tree + HMD info panel
+        extrinsic_panel.py               # Extrinsic fine-tuning sliders
         session_browser.py               # Batch session picker dialog
         app.py                           # Main window (assembles everything)
 ```

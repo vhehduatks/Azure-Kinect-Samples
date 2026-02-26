@@ -60,6 +60,7 @@ def main():
         # Open the session browser pre-populated with the batch dir
         from annotation_tool.session_browser import SessionBrowserDialog
         from PySide6.QtWidgets import QDialog
+        window._last_batch_dir = args.batch_dir
         dlg = SessionBrowserDialog(window, initial_dir=args.batch_dir)
         if dlg.exec() == QDialog.Accepted:
             session = dlg.selected_session()

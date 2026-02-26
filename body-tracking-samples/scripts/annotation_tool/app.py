@@ -49,6 +49,8 @@ class AnnotationMainWindow(QMainWindow):
         self.model = AnnotationModel(self)
         self.undo_stack = QUndoStack(self)
 
+        self._last_batch_dir: str = ""
+
         # Play/pause timer
         self._play_timer = QTimer(self)
         self._play_timer.setInterval(33)  # ~30 fps
@@ -106,6 +108,7 @@ class AnnotationMainWindow(QMainWindow):
         # Head-joint pruning
         self.prune_checkbox.toggled.connect(lambda on: self.model.set_pruning(on))
         self.model.pruning_changed.connect(self._on_pruning_changed)
+        self.model.session_loaded.connect(self._reset_prune_checkbox)
 
         # Extrinsic panel
         self.extrinsic_panel.extrinsic_changed.connect(self.model.set_extrinsic_delta)
@@ -388,6 +391,9 @@ class AnnotationMainWindow(QMainWindow):
     # ==================================================================
     # Head-joint pruning
     # ==================================================================
+    def _reset_prune_checkbox(self):
+        self.prune_checkbox.setChecked(False)
+
     def _on_pruning_changed(self):
         if self.model.pruning_enabled:
             self._status.showMessage(
@@ -430,6 +436,10 @@ class AnnotationMainWindow(QMainWindow):
             return
         n = self.model.apply_extrinsic_to_all_frames()
         self.undo_stack.clear()
+        # Reset sliders to zero so the delta is not double-applied on the
+        # now-updated data.  This also clears model._extrinsic_delta via
+        # the extrinsic_changed signal.
+        self.extrinsic_panel._on_reset()
         self._status.showMessage(
             f"Applied extrinsic delta to {n} frames (.bak backups created)", 5000
         )
@@ -460,8 +470,10 @@ class AnnotationMainWindow(QMainWindow):
     def _open_session_browser(self):
         if not self._check_unsaved():
             return
-        dlg = SessionBrowserDialog(self)
+        dlg = SessionBrowserDialog(self, initial_dir=self._last_batch_dir)
         if dlg.exec() == QDialog.Accepted:
+            # Remember the batch directory for next time
+            self._last_batch_dir = dlg._dir_edit.text().strip()
             session = dlg.selected_session()
             if session:
                 self._load_session(session)
@@ -485,6 +497,10 @@ class AnnotationMainWindow(QMainWindow):
             self.undo_stack.clear()
 
     def _load_session(self, session: dict):
+        # Remember batch directory from session path for re-opening the browser.
+        # ego_dir is like batch_out/SessionName/ego_dataset/ → parent.parent = batch_out/
+        ego_path = Path(str(session["ego_dir"]))
+        self._last_batch_dir = str(ego_path.parent.parent)
         hmd_csv = str(session["synced_csv"]) if session.get("synced_csv") else None
         self.model.load_session(
             str(session["ego_dir"]),
@@ -549,12 +565,15 @@ class AnnotationMainWindow(QMainWindow):
     def open_ego_dir(self, ego_dir: str):
         """Load a session from a direct ego_dataset path (called from CLI)."""
         ego_path = Path(ego_dir)
+        # Remember parent of ego_dataset as batch dir (e.g. batch_out/Session/)
+        self._last_batch_dir = str(ego_path.parent.parent)
         synced = ego_path.parent / "synced_data.csv"
         hmd_csv = str(synced) if synced.exists() else None
         self.model.load_session(str(ego_path), hmd_csv=hmd_csv)
 
     def open_batch_session(self, batch_dir: str, session_name: str):
         """Load a specific session from a batch directory (called from CLI)."""
+        self._last_batch_dir = batch_dir
         from .constants import discover_batch_sessions
         sessions = discover_batch_sessions(Path(batch_dir))
         for s in sessions:

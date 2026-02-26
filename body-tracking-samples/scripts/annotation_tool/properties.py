@@ -73,6 +73,7 @@ class JointTreeWidget(QTreeWidget):
         model.frame_changed.connect(lambda _: self._refresh())
         model.joint_moved.connect(self._on_joint_moved)
         model.joint_selected.connect(self._on_joint_selected)
+        model.pruning_changed.connect(self._refresh)
         self.currentItemChanged.connect(self._on_current_changed)
         self.itemChanged.connect(self._on_item_changed)
 
@@ -102,6 +103,8 @@ class JointTreeWidget(QTreeWidget):
                 self._joint_items[jid] = item
 
     # ---- refresh all joints for current frame ------------------------
+    _GRAY = QColor(120, 120, 120)
+
     def _refresh(self):
         self._updating = True
         frame = self.model.current_frame
@@ -109,6 +112,7 @@ class JointTreeWidget(QTreeWidget):
             item = self._joint_items.get(jid)
             if item is None:
                 continue
+            pruned = self.model.is_joint_pruned(jid)
             u, v, conf, vis = self.model.get_joint_2d(frame, jid)
             item.setText(self._COL_CONF, str(conf))
             item.setCheckState(
@@ -122,6 +126,13 @@ class JointTreeWidget(QTreeWidget):
             )
             item.setText(self._COL_U, f"{u:.1f}")
             item.setText(self._COL_V, f"{v:.1f}")
+            # Gray out pruned joints
+            fg = QBrush(self._GRAY) if pruned else QBrush()
+            for c in range(self.columnCount()):
+                item.setForeground(c, fg)
+            # Show pruning state in the Conf column
+            if pruned:
+                item.setText(self._COL_CONF, "pruned")
         self._updating = False
 
     # ---- incremental joint update ------------------------------------

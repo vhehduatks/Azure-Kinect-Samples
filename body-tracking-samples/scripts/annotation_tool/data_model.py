@@ -462,8 +462,30 @@ class AnnotationModel(QObject):
         v = orig_v + (delta_v - base_v)
         return (u, v, conf, vis)
 
+    def get_adjusted_joint_3d(self, frame: int, joint_id: int):
+        """Return (x, y, z, conf) with extrinsic delta applied to the 3D point.
+
+        Returns None if no 3D data is available.
+        """
+        if self._dataset is None:
+            return None
+        joints_3d = self._dataset.get_joints_3d(frame)
+        if joints_3d is None or joint_id >= len(joints_3d):
+            return None
+        x, y, z, conf = joints_3d[joint_id]
+        if not self.has_extrinsic_delta():
+            return (float(x), float(y), float(z), int(conf))
+        rx, ry, rz, tx, ty, tz = self._extrinsic_delta
+        R = _euler_to_rotation_matrix(rx, ry, rz)
+        pt = R @ np.array([x, y, z], dtype=np.float64) + np.array([tx, ty, tz])
+        return (float(pt[0]), float(pt[1]), float(pt[2]), int(conf))
+
     def apply_extrinsic_to_all_frames(self) -> int:
-        """Apply current delta to all frames, overwriting skeleton_2d in JSONs.
+        """Apply current delta to all frames, transforming skeleton_3d and
+        re-projecting skeleton_2d from the new 3D coordinates.
+
+        This ensures mathematical consistency between the saved 3D ground
+        truth and the 2D projections, which is critical for DL training.
 
         Returns number of frames updated.
         """
@@ -477,6 +499,17 @@ class AnnotationModel(QObject):
         t_vec = np.array([tx, ty, tz], dtype=np.float64)
         fx, fy, cx, cy = self._intrinsics
 
+        # Resolve image dimensions for visibility bounds checking.
+        # Try the first available image; fall back to 2*cx, 2*cy.
+        img_w, img_h = int(2 * cx), int(2 * cy)
+        for fi in range(min(self.frame_count, 5)):
+            ip = self._dataset.get_frame(fi).get("_image_path", "")
+            if ip and Path(ip).exists():
+                pix = QPixmap(ip)
+                if not pix.isNull():
+                    img_w, img_h = pix.width(), pix.height()
+                    break
+
         updated = 0
         for frame_idx in range(self.frame_count):
             joints_3d = self._dataset.get_joints_3d(frame_idx)
@@ -489,43 +522,53 @@ class AnnotationModel(QObject):
             with open(json_path) as f:
                 data = json.load(f)
 
+            skel_3d = data.get("skeleton_3d", [])
             skel_2d = data.get("skeleton_2d", [])
-            if not skel_2d:
+            if not skel_3d:
                 continue
 
-            changed = False
+            # 1) Transform 3D points and build lookup for re-projection
+            transformed = {}  # joint_id -> (new_x, new_y, new_z)
+            for entry in skel_3d:
+                jid = entry["joint_id"]
+                x, y, z = entry["x"], entry["y"], entry["z"]
+                pt = R @ np.array([x, y, z], dtype=np.float64) + t_vec
+                entry["x"] = round(float(pt[0]), 2)
+                entry["y"] = round(float(pt[1]), 2)
+                entry["z"] = round(float(pt[2]), 2)
+                transformed[jid] = pt
+
+            # 2) Re-project 2D from the new 3D coordinates and
+            #    recalculate visibility (behind camera / out of frame).
             for entry in skel_2d:
                 jid = entry["joint_id"]
-                if jid >= len(joints_3d):
+                pt = transformed.get(jid)
+                if pt is None:
                     continue
-                x, y, z, conf3 = joints_3d[jid]
-                if z < 1:
-                    continue
-                # Baseline projection (no delta)
-                base_u, base_v = _project_pinhole(x, y, z, fx, fy, cx, cy)
-                # Transformed projection (with delta)
-                pt = R @ np.array([x, y, z], dtype=np.float64) + t_vec
+                # Behind camera → force invisible, keep old u/v as-is
                 if pt[2] <= 0:
+                    entry["visible"] = False
                     continue
-                new_u, new_v = _project_pinhole(pt[0], pt[1], pt[2], fx, fy, cx, cy)
-                # Apply only the offset to the original 2D coordinates
-                entry["u"] = round(entry["u"] + (new_u - base_u), 2)
-                entry["v"] = round(entry["v"] + (new_v - base_v), 2)
-                changed = True
+                new_u = float(fx * pt[0] / pt[2] + cx)
+                new_v = float(fy * pt[1] / pt[2] + cy)
+                entry["u"] = round(new_u, 2)
+                entry["v"] = round(new_v, 2)
+                # Outside image bounds → force invisible
+                if new_u < 0 or new_u >= img_w or new_v < 0 or new_v >= img_h:
+                    entry["visible"] = False
 
-            # Force pruned joints invisible
+            # 3) Force pruned joints invisible
             for entry in skel_2d:
                 if entry["joint_id"] in self._pruned_joints:
                     entry["visible"] = False
-                    changed = True
 
-            if changed:
-                # Backup
-                shutil.copy2(json_path, json_path + ".bak")
-                data["skeleton_2d"] = skel_2d
-                with open(json_path, "w") as f:
-                    json.dump(data, f, indent=2)
-                updated += 1
+            # Backup and write
+            shutil.copy2(json_path, json_path + ".bak")
+            data["skeleton_3d"] = skel_3d
+            data["skeleton_2d"] = skel_2d
+            with open(json_path, "w") as f:
+                json.dump(data, f, indent=2)
+            updated += 1
 
         # Reload dataset to pick up new values
         if updated > 0:
@@ -535,6 +578,8 @@ class AnnotationModel(QObject):
             self._dirty_frames.clear()
             self._image_cache.clear()
             self.dirty_changed.emit(False)
+            # Re-estimate intrinsics from the new 3D/2D data
+            self.estimate_intrinsics()
             self.frame_changed.emit(self._current_frame)
 
         return updated

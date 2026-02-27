@@ -108,6 +108,7 @@ class ExtrinsicPanel(QGroupBox):
     apply_all_clicked = Signal()
     export_clicked = Signal()
     reset_clicked = Signal()
+    preview_3d_clicked = Signal()
 
     def __init__(self, parent=None):
         super().__init__("Extrinsic Tuning", parent)
@@ -144,10 +145,20 @@ class ExtrinsicPanel(QGroupBox):
         btn_row.addWidget(self._export_btn)
         layout.addLayout(btn_row)
 
+        btn_row2 = QHBoxLayout()
+        self._preview_3d_btn = QPushButton("Preview 3D")
+        self._preview_3d_btn.setToolTip(
+            "Show original vs adjusted 3D skeleton for the current frame"
+        )
+        btn_row2.addWidget(self._preview_3d_btn)
+        btn_row2.addStretch()
+        layout.addLayout(btn_row2)
+
         # Connect buttons
         self._reset_btn.clicked.connect(self._on_reset)
         self._apply_btn.clicked.connect(self.apply_all_clicked)
         self._export_btn.clicked.connect(self.export_clicked)
+        self._preview_3d_btn.clicked.connect(self.preview_3d_clicked)
 
     def _emit(self):
         self.extrinsic_changed.emit(

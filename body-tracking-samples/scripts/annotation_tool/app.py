@@ -114,6 +114,7 @@ class AnnotationMainWindow(QMainWindow):
         self.extrinsic_panel.extrinsic_changed.connect(self.model.set_extrinsic_delta)
         self.extrinsic_panel.apply_all_clicked.connect(self._apply_extrinsic_all)
         self.extrinsic_panel.export_clicked.connect(self._export_extrinsic)
+        self.extrinsic_panel.preview_3d_clicked.connect(self._preview_3d)
         self.model.session_loaded.connect(self._on_session_loaded_extrinsic)
 
     # ==================================================================
@@ -426,8 +427,8 @@ class AnnotationMainWindow(QMainWindow):
             return
         ans = QMessageBox.question(
             self, "Apply Extrinsic to All Frames",
-            "This will overwrite skeleton_2d in all annotation JSONs\n"
-            "using the current extrinsic delta.\n\n"
+            "This will transform skeleton_3d and re-project skeleton_2d\n"
+            "in all annotation JSONs using the current extrinsic delta.\n\n"
             "Backups (.bak) will be created. Continue?",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
@@ -463,6 +464,39 @@ class AnnotationMainWindow(QMainWindow):
             return
         self.model.export_adjusted_transform(orig_path, out_path)
         self._status.showMessage(f"Exported adjusted transform to {out_path}", 5000)
+
+    def _preview_3d(self):
+        if self.model.dataset is None:
+            self._status.showMessage("No session loaded", 3000)
+            return
+        frame = self.model.current_frame
+        original_3d = self.model.dataset.get_joints_3d(frame)
+        if original_3d is None:
+            self._status.showMessage("No 3D skeleton data for this frame", 3000)
+            return
+
+        import numpy as np
+        from .viz_3d import Skeleton3DDialog
+
+        # Build adjusted 3D array
+        adjusted_3d = np.copy(original_3d)
+        if self.model.has_extrinsic_delta():
+            for jid in range(len(original_3d)):
+                result = self.model.get_adjusted_joint_3d(frame, jid)
+                if result is not None:
+                    adjusted_3d[jid, 0] = result[0]
+                    adjusted_3d[jid, 1] = result[1]
+                    adjusted_3d[jid, 2] = result[2]
+
+        rx, ry, rz, tx, ty, tz = self.model._extrinsic_delta
+        delta_text = (
+            f"Frame {frame}  |  "
+            f"R({rx:+.2f}\u00b0, {ry:+.2f}\u00b0, {rz:+.2f}\u00b0)  "
+            f"T({tx:+.1f}, {ty:+.1f}, {tz:+.1f}) mm"
+        )
+
+        dlg = Skeleton3DDialog(original_3d, adjusted_3d, delta_text, parent=self)
+        dlg.show()
 
     # ==================================================================
     # Session opening / saving

@@ -41,6 +41,7 @@ Manually editing per-frame JSON files is impractical for 300+ frame sessions. Th
 | numpy | any | Already installed |
 | opencv-python | any | Already installed |
 | pandas | any | Already installed (for HMD data) |
+| matplotlib | >= 3.5 | Optional, for 3D extrinsic preview (`pip install matplotlib`) |
 
 Install the one new dependency:
 
@@ -235,10 +236,13 @@ When the session contains both `skeleton_3d` and `skeleton_2d` data, the tool es
 
 | Button | Description |
 |--------|-------------|
-| **Apply to All Frames** | Re-projects all skeleton data using the current delta and overwrites annotation JSONs (`.bak` backups created) |
+| **Apply to All Frames** | Transforms `skeleton_3d` coordinates with the rotation/translation delta, then re-projects `skeleton_2d` from the new 3D points. Both are written to the annotation JSONs (`.bak` backups created). Sliders reset to zero afterward. |
 | **Export Transform** | Saves the adjusted extrinsic transform as a new JSON file |
+| **Preview 3D** | Opens a 3D plot comparing original (blue) vs adjusted (red) skeleton for the current frame. Displacement arrows (green) show per-joint movement. Requires `matplotlib` (`pip install matplotlib`). |
 
 The viewport updates in real-time as sliders are adjusted, allowing visual verification before committing changes.
+
+**3D/2D consistency**: Apply to All transforms the 3D joint coordinates first (`P' = R * P + t`), then re-projects to 2D via the estimated pinhole model (`u = fx * x'/z' + cx`). This ensures the saved `skeleton_3d` and `skeleton_2d` are mathematically consistent, which is critical for DL training data.
 
 ## Save Behavior
 
@@ -262,6 +266,7 @@ body-tracking-samples/scripts/
         timeline.py                      # Color bar + slider + frame label
         properties.py                    # Joint tree + HMD info panel
         extrinsic_panel.py               # Extrinsic fine-tuning sliders
+        viz_3d.py                        # 3D skeleton comparison dialog (matplotlib)
         session_browser.py               # Batch session picker dialog
         app.py                           # Main window (assembles everything)
 ```

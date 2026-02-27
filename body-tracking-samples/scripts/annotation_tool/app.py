@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QFormLayout,
     QCheckBox,
+    QSpinBox,
 )
 
 from .constants import JOINT_NAMES
@@ -113,6 +114,7 @@ class AnnotationMainWindow(QMainWindow):
         # Extrinsic panel
         self.extrinsic_panel.extrinsic_changed.connect(self.model.set_extrinsic_delta)
         self.extrinsic_panel.apply_all_clicked.connect(self._apply_extrinsic_all)
+        self.extrinsic_panel.apply_range_clicked.connect(self._apply_extrinsic_range)
         self.extrinsic_panel.export_clicked.connect(self._export_extrinsic)
         self.extrinsic_panel.preview_3d_clicked.connect(self._preview_3d)
         self.model.session_loaded.connect(self._on_session_loaded_extrinsic)
@@ -443,6 +445,74 @@ class AnnotationMainWindow(QMainWindow):
         self.extrinsic_panel._on_reset()
         self._status.showMessage(
             f"Applied extrinsic delta to {n} frames (.bak backups created)", 5000
+        )
+
+    def _apply_extrinsic_range(self):
+        if not self.model.has_intrinsics():
+            QMessageBox.warning(
+                self, "Extrinsic Tuning",
+                "Cannot apply: camera intrinsics could not be estimated.\n"
+                "Need frames with both skeleton_3d and skeleton_2d data.",
+            )
+            return
+        if not self.model.has_extrinsic_delta():
+            self._status.showMessage("Nothing to apply (all sliders at zero)", 3000)
+            return
+
+        last = max(self.model.frame_count - 1, 0)
+
+        # --- Range dialog ---
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Apply Extrinsic to Range")
+        layout = QFormLayout(dlg)
+
+        start_spin = QSpinBox()
+        start_spin.setRange(0, last)
+        start_spin.setValue(self.model.current_frame)
+        layout.addRow("Start frame:", start_spin)
+
+        end_spin = QSpinBox()
+        end_spin.setRange(0, last)
+        end_spin.setValue(last)
+        layout.addRow("End frame:", end_spin)
+
+        info = QLabel(f"Total session frames: 0\u2013{last}")
+        info.setStyleSheet("color: gray; font-size: 9pt;")
+        layout.addRow(info)
+
+        btn_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        btn_box.accepted.connect(dlg.accept)
+        btn_box.rejected.connect(dlg.reject)
+        layout.addWidget(btn_box)
+
+        if dlg.exec() != QDialog.Accepted:
+            return
+
+        start = start_spin.value()
+        end = end_spin.value()
+        if start > end:
+            start, end = end, start
+
+        ans = QMessageBox.question(
+            self, "Apply Extrinsic to Range",
+            f"This will transform skeleton_3d and re-project skeleton_2d\n"
+            f"for frames {start}\u2013{end} ({end - start + 1} frames)\n"
+            f"using the current extrinsic delta.\n\n"
+            f"Backups (.bak) will be created. Continue?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if ans != QMessageBox.Yes:
+            return
+        n = self.model.apply_extrinsic_to_all_frames(
+            start_frame=start, end_frame=end
+        )
+        self.undo_stack.clear()
+        self.extrinsic_panel._on_reset()
+        self._status.showMessage(
+            f"Applied extrinsic delta to {n} frames "
+            f"(range {start}\u2013{end}, .bak backups created)",
+            5000,
         )
 
     def _export_extrinsic(self):

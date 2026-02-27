@@ -498,9 +498,20 @@ class AnnotationModel(QObject):
         pt = R @ np.array([x, y, z], dtype=np.float64) + np.array([tx, ty, tz])
         return (float(pt[0]), float(pt[1]), float(pt[2]), int(conf))
 
-    def apply_extrinsic_to_all_frames(self) -> int:
-        """Apply current delta to all frames, transforming skeleton_3d and
+    def apply_extrinsic_to_all_frames(
+        self,
+        start_frame: Optional[int] = None,
+        end_frame: Optional[int] = None,
+    ) -> int:
+        """Apply current delta to frames, transforming skeleton_3d and
         updating skeleton_2d via a differential projection offset.
+
+        Parameters
+        ----------
+        start_frame : int, optional
+            First frame index to process (inclusive).  Defaults to 0.
+        end_frame : int, optional
+            Last frame index to process (inclusive).  Defaults to last frame.
 
         Pipeline per frame:
           1. Transform 3D:  P' = R * P + t          (written to skeleton_3d)
@@ -524,6 +535,11 @@ class AnnotationModel(QObject):
         t_vec = np.array([tx, ty, tz], dtype=np.float64)
         fx, fy, cx, cy = self._intrinsics
 
+        # Resolve frame range
+        lo = max(0, start_frame if start_frame is not None else 0)
+        hi = min(self.frame_count - 1,
+                 end_frame if end_frame is not None else self.frame_count - 1)
+
         # Resolve image dimensions for visibility bounds checking.
         # Try the first available image; fall back to 2*cx, 2*cy.
         img_w, img_h = int(2 * cx), int(2 * cy)
@@ -536,7 +552,7 @@ class AnnotationModel(QObject):
                     break
 
         updated = 0
-        for frame_idx in range(self.frame_count):
+        for frame_idx in range(lo, hi + 1):
             joints_3d = self._dataset.get_joints_3d(frame_idx)
             if joints_3d is None:
                 continue

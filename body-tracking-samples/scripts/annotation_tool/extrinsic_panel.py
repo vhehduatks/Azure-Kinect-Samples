@@ -106,6 +106,7 @@ class ExtrinsicPanel(QGroupBox):
 
     extrinsic_changed = Signal(float, float, float, float, float, float)
     apply_all_clicked = Signal()
+    apply_range_clicked = Signal()
     export_clicked = Signal()
     reset_clicked = Signal()
     preview_3d_clicked = Signal()
@@ -139,11 +140,17 @@ class ExtrinsicPanel(QGroupBox):
         btn_row = QHBoxLayout()
         self._reset_btn = QPushButton("Reset")
         self._apply_btn = QPushButton("Apply to All")
+        self._apply_range_btn = QPushButton("Apply to Range...")
         self._export_btn = QPushButton("Export...")
         btn_row.addWidget(self._reset_btn)
         btn_row.addWidget(self._apply_btn)
-        btn_row.addWidget(self._export_btn)
+        btn_row.addWidget(self._apply_range_btn)
         layout.addLayout(btn_row)
+
+        btn_row1b = QHBoxLayout()
+        btn_row1b.addWidget(self._export_btn)
+        btn_row1b.addStretch()
+        layout.addLayout(btn_row1b)
 
         btn_row2 = QHBoxLayout()
         self._preview_3d_btn = QPushButton("Preview 3D")
@@ -157,6 +164,7 @@ class ExtrinsicPanel(QGroupBox):
         # Connect buttons
         self._reset_btn.clicked.connect(self._on_reset)
         self._apply_btn.clicked.connect(self.apply_all_clicked)
+        self._apply_range_btn.clicked.connect(self.apply_range_clicked)
         self._export_btn.clicked.connect(self.export_clicked)
         self._preview_3d_btn.clicked.connect(self.preview_3d_clicked)
 

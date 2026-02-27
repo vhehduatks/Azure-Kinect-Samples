@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QSlider,
     QDoubleSpinBox,
+    QSpinBox,
     QPushButton,
 )
 
@@ -98,6 +99,8 @@ class ExtrinsicPanel(QGroupBox):
         Emitted on any slider/spin change.
     apply_all_clicked()
         User pressed "Apply to All Frames".
+    apply_range_clicked(start_frame, end_frame)
+        User pressed "Apply to Range" with specific frame bounds.
     export_clicked()
         User pressed "Export T_checker_to_A...".
     reset_clicked()
@@ -106,13 +109,14 @@ class ExtrinsicPanel(QGroupBox):
 
     extrinsic_changed = Signal(float, float, float, float, float, float)
     apply_all_clicked = Signal()
-    apply_range_clicked = Signal()
+    apply_range_clicked = Signal(int, int)
     export_clicked = Signal()
     reset_clicked = Signal()
     preview_3d_clicked = Signal()
 
     def __init__(self, parent=None):
         super().__init__("Extrinsic Tuning", parent)
+        self._last_frame: int = 0
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(6, 10, 6, 6)
@@ -136,27 +140,41 @@ class ExtrinsicPanel(QGroupBox):
         layout.addLayout(self._ty)
         layout.addLayout(self._tz)
 
+        # -- Frame range inputs --
+        range_row = QHBoxLayout()
+        range_row.addWidget(QLabel("Start:"))
+        self._start_spin = QSpinBox()
+        self._start_spin.setRange(0, 0)
+        self._start_spin.setValue(0)
+        self._start_spin.setFixedWidth(70)
+        range_row.addWidget(self._start_spin)
+        range_row.addWidget(QLabel("End:"))
+        self._end_spin = QSpinBox()
+        self._end_spin.setRange(0, 0)
+        self._end_spin.setValue(0)
+        self._end_spin.setFixedWidth(70)
+        range_row.addWidget(self._end_spin)
+        range_row.addStretch()
+        layout.addLayout(range_row)
+
         # -- Buttons --
         btn_row = QHBoxLayout()
         self._reset_btn = QPushButton("Reset")
         self._apply_btn = QPushButton("Apply to All")
-        self._apply_range_btn = QPushButton("Apply to Range...")
-        self._export_btn = QPushButton("Export...")
+        self._apply_range_btn = QPushButton("Apply to Range")
+        self._apply_range_btn.setEnabled(False)
         btn_row.addWidget(self._reset_btn)
         btn_row.addWidget(self._apply_btn)
         btn_row.addWidget(self._apply_range_btn)
         layout.addLayout(btn_row)
 
-        btn_row1b = QHBoxLayout()
-        btn_row1b.addWidget(self._export_btn)
-        btn_row1b.addStretch()
-        layout.addLayout(btn_row1b)
-
         btn_row2 = QHBoxLayout()
+        self._export_btn = QPushButton("Export...")
         self._preview_3d_btn = QPushButton("Preview 3D")
         self._preview_3d_btn.setToolTip(
             "Show original vs adjusted 3D skeleton for the current frame"
         )
+        btn_row2.addWidget(self._export_btn)
         btn_row2.addWidget(self._preview_3d_btn)
         btn_row2.addStretch()
         layout.addLayout(btn_row2)
@@ -164,29 +182,34 @@ class ExtrinsicPanel(QGroupBox):
         # Connect buttons
         self._reset_btn.clicked.connect(self._on_reset)
         self._apply_btn.clicked.connect(self.apply_all_clicked)
-        self._apply_range_btn.clicked.connect(self.apply_range_clicked)
+        self._apply_range_btn.clicked.connect(self._on_apply_range)
         self._export_btn.clicked.connect(self.export_clicked)
         self._preview_3d_btn.clicked.connect(self.preview_3d_clicked)
 
-    def _emit(self):
-        self.extrinsic_changed.emit(
-            self._rx.value(),
-            self._ry.value(),
-            self._rz.value(),
-            self._tx.value(),
-            self._ty.value(),
-            self._tz.value(),
-        )
+        # Update Apply to Range button state when range inputs change
+        self._start_spin.valueChanged.connect(self._update_range_btn)
+        self._end_spin.valueChanged.connect(self._update_range_btn)
 
-    def _on_reset(self):
-        self._rx.reset()
-        self._ry.reset()
-        self._rz.reset()
-        self._tx.reset()
-        self._ty.reset()
-        self._tz.reset()
-        self._emit()
-        self.reset_clicked.emit()
+    # ------------------------------------------------------------------ #
+    # Public API
+    # ------------------------------------------------------------------ #
+    def set_frame_count(self, count: int):
+        """Update spin box ranges when a new session is loaded."""
+        last = max(count - 1, 0)
+        self._last_frame = last
+        self._start_spin.setRange(0, last)
+        self._end_spin.setRange(0, last)
+        self._start_spin.setValue(0)
+        self._end_spin.setValue(last)
+        self._update_range_btn()
+
+    def frame_range(self):
+        """Return current (start, end) frame range, auto-swapped."""
+        s = self._start_spin.value()
+        e = self._end_spin.value()
+        if s > e:
+            s, e = e, s
+        return (s, e)
 
     def values(self):
         """Return current (rx, ry, rz, tx, ty, tz) tuple."""
@@ -198,3 +221,37 @@ class ExtrinsicPanel(QGroupBox):
             self._ty.value(),
             self._tz.value(),
         )
+
+    # ------------------------------------------------------------------ #
+    # Internal
+    # ------------------------------------------------------------------ #
+    def _emit(self):
+        self.extrinsic_changed.emit(
+            self._rx.value(),
+            self._ry.value(),
+            self._rz.value(),
+            self._tx.value(),
+            self._ty.value(),
+            self._tz.value(),
+        )
+
+    def _update_range_btn(self):
+        """Enable 'Apply to Range' only when range != full session."""
+        s = self._start_spin.value()
+        e = self._end_spin.value()
+        is_full = (min(s, e) == 0 and max(s, e) == self._last_frame)
+        self._apply_range_btn.setEnabled(not is_full)
+
+    def _on_apply_range(self):
+        s, e = self.frame_range()
+        self.apply_range_clicked.emit(s, e)
+
+    def _on_reset(self):
+        self._rx.reset()
+        self._ry.reset()
+        self._rz.reset()
+        self._tx.reset()
+        self._ty.reset()
+        self._tz.reset()
+        self._emit()
+        self.reset_clicked.emit()

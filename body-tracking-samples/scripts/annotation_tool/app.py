@@ -18,7 +18,6 @@ from PySide6.QtWidgets import (
     QLabel,
     QFormLayout,
     QCheckBox,
-    QSpinBox,
 )
 
 from .constants import JOINT_NAMES
@@ -118,6 +117,9 @@ class AnnotationMainWindow(QMainWindow):
         self.extrinsic_panel.export_clicked.connect(self._export_extrinsic)
         self.extrinsic_panel.preview_3d_clicked.connect(self._preview_3d)
         self.model.session_loaded.connect(self._on_session_loaded_extrinsic)
+        self.model.session_loaded.connect(
+            lambda: self.extrinsic_panel.set_frame_count(self.model.frame_count)
+        )
 
     # ==================================================================
     # Menus
@@ -447,7 +449,7 @@ class AnnotationMainWindow(QMainWindow):
             f"Applied extrinsic delta to {n} frames (.bak backups created)", 5000
         )
 
-    def _apply_extrinsic_range(self):
+    def _apply_extrinsic_range(self, start: int, end: int):
         if not self.model.has_intrinsics():
             QMessageBox.warning(
                 self, "Extrinsic Tuning",
@@ -458,40 +460,6 @@ class AnnotationMainWindow(QMainWindow):
         if not self.model.has_extrinsic_delta():
             self._status.showMessage("Nothing to apply (all sliders at zero)", 3000)
             return
-
-        last = max(self.model.frame_count - 1, 0)
-
-        # --- Range dialog ---
-        dlg = QDialog(self)
-        dlg.setWindowTitle("Apply Extrinsic to Range")
-        layout = QFormLayout(dlg)
-
-        start_spin = QSpinBox()
-        start_spin.setRange(0, last)
-        start_spin.setValue(self.model.current_frame)
-        layout.addRow("Start frame:", start_spin)
-
-        end_spin = QSpinBox()
-        end_spin.setRange(0, last)
-        end_spin.setValue(last)
-        layout.addRow("End frame:", end_spin)
-
-        info = QLabel(f"Total session frames: 0\u2013{last}")
-        info.setStyleSheet("color: gray; font-size: 9pt;")
-        layout.addRow(info)
-
-        btn_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        btn_box.accepted.connect(dlg.accept)
-        btn_box.rejected.connect(dlg.reject)
-        layout.addWidget(btn_box)
-
-        if dlg.exec() != QDialog.Accepted:
-            return
-
-        start = start_spin.value()
-        end = end_spin.value()
-        if start > end:
-            start, end = end, start
 
         ans = QMessageBox.question(
             self, "Apply Extrinsic to Range",

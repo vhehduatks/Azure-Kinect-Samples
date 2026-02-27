@@ -2,7 +2,9 @@
 
 import json
 import math
+import os
 import shutil
+import tempfile
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -40,6 +42,23 @@ def _project_pinhole(x: float, y: float, z: float,
     if z <= 0:
         return (0.0, 0.0)
     return (fx * x / z + cx, fy * y / z + cy)
+
+
+def _atomic_json_write(path: str, data: dict):
+    """Write JSON atomically: serialize to a temp file, then rename.
+
+    If serialization fails (e.g. non-serializable types), the original
+    file is left untouched because the rename never happens.
+    """
+    dir_path = str(Path(path).parent)
+    fd, tmp = tempfile.mkstemp(dir=dir_path, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f, indent=2)
+        os.replace(tmp, path)
+    except BaseException:
+        os.unlink(tmp)
+        raise
 
 
 @dataclass
@@ -352,8 +371,7 @@ class AnnotationModel(QObject):
                     entry["visible"] = False
             data["skeleton_2d"] = skel_2d
 
-            with open(json_path, "w") as f:
-                json.dump(data, f, indent=2)
+            _atomic_json_write(json_path, data)
             saved_count += 1
 
         self._dirty_frames.clear()
@@ -482,10 +500,17 @@ class AnnotationModel(QObject):
 
     def apply_extrinsic_to_all_frames(self) -> int:
         """Apply current delta to all frames, transforming skeleton_3d and
-        re-projecting skeleton_2d from the new 3D coordinates.
+        updating skeleton_2d via a differential projection offset.
 
-        This ensures mathematical consistency between the saved 3D ground
-        truth and the 2D projections, which is critical for DL training.
+        Pipeline per frame:
+          1. Transform 3D:  P' = R * P + t          (written to skeleton_3d)
+          2. Update 2D:     u' = u + [proj(P') - proj(P)]   (differential)
+          3. Recalculate visibility:  z'<=0 or (u',v') out of image → invisible
+
+        The differential approach for step 2 avoids baking intrinsic-estimation
+        error into the 2D coordinates.  The estimated (fx,fy,cx,cy) appear in
+        both proj(P') and proj(P) so the error cancels, preserving image
+        alignment while still transforming the 3D ground truth.
 
         Returns number of frames updated.
         """
@@ -527,47 +552,77 @@ class AnnotationModel(QObject):
             if not skel_3d:
                 continue
 
-            # 1) Transform 3D points and build lookup for re-projection
-            transformed = {}  # joint_id -> (new_x, new_y, new_z)
+            # 1) Transform 3D points.  Keep both original and new for the
+            #    differential 2D projection in step 2.
+            # joint_id -> (original_xyz, transformed_xyz)
+            transform_pairs = {}
             for entry in skel_3d:
                 jid = entry["joint_id"]
-                x, y, z = entry["x"], entry["y"], entry["z"]
-                pt = R @ np.array([x, y, z], dtype=np.float64) + t_vec
+                orig = np.array([entry["x"], entry["y"], entry["z"]], dtype=np.float64)
+                pt = R @ orig + t_vec
                 entry["x"] = round(float(pt[0]), 2)
                 entry["y"] = round(float(pt[1]), 2)
                 entry["z"] = round(float(pt[2]), 2)
-                transformed[jid] = pt
+                transform_pairs[jid] = (orig, pt)
 
-            # 2) Re-project 2D from the new 3D coordinates and
-            #    recalculate visibility (behind camera / out of frame).
+            # 2) Update 2D using the differential projection offset and
+            #    recalculate visibility from scratch.
+            #
+            #    visible = (confidence > 0) AND (z' > 0) AND (u',v' in image)
+            #
+            #    The differential u' = u + [proj(P') - proj(P)] preserves
+            #    image alignment; visibility is then set deterministically
+            #    from the new geometry so stale flags cannot persist.
             for entry in skel_2d:
                 jid = entry["joint_id"]
-                pt = transformed.get(jid)
-                if pt is None:
-                    continue
-                # Behind camera → force invisible, keep old u/v as-is
-                if pt[2] <= 0:
+                pair = transform_pairs.get(jid)
+
+                # No matching 3D data → invisible
+                if pair is None:
                     entry["visible"] = False
                     continue
-                new_u = float(fx * pt[0] / pt[2] + cx)
-                new_v = float(fy * pt[1] / pt[2] + cy)
+
+                orig_pt, new_pt = pair
+
+                # Not detected (confidence 0) → invisible
+                if entry.get("confidence", 0) == 0:
+                    entry["visible"] = False
+                    continue
+
+                # Behind camera after transform → invisible
+                if new_pt[2] <= 0:
+                    entry["visible"] = False
+                    continue
+
+                # Original depth invalid → can't compute differential → invisible
+                if orig_pt[2] <= 0:
+                    entry["visible"] = False
+                    continue
+
+                base_u, base_v = _project_pinhole(
+                    orig_pt[0], orig_pt[1], orig_pt[2], fx, fy, cx, cy
+                )
+                proj_u, proj_v = _project_pinhole(
+                    new_pt[0], new_pt[1], new_pt[2], fx, fy, cx, cy
+                )
+                new_u = entry["u"] + (proj_u - base_u)
+                new_v = entry["v"] + (proj_v - base_v)
                 entry["u"] = round(new_u, 2)
                 entry["v"] = round(new_v, 2)
-                # Outside image bounds → force invisible
-                if new_u < 0 or new_u >= img_w or new_v < 0 or new_v >= img_h:
-                    entry["visible"] = False
+
+                # Recalculate: visible iff projection lands inside the image
+                entry["visible"] = bool(0 <= new_u < img_w and 0 <= new_v < img_h)
 
             # 3) Force pruned joints invisible
             for entry in skel_2d:
                 if entry["joint_id"] in self._pruned_joints:
                     entry["visible"] = False
 
-            # Backup and write
+            # Backup and write atomically
             shutil.copy2(json_path, json_path + ".bak")
             data["skeleton_3d"] = skel_3d
             data["skeleton_2d"] = skel_2d
-            with open(json_path, "w") as f:
-                json.dump(data, f, indent=2)
+            _atomic_json_write(json_path, data)
             updated += 1
 
         # Reload dataset to pick up new values
@@ -578,7 +633,6 @@ class AnnotationModel(QObject):
             self._dirty_frames.clear()
             self._image_cache.clear()
             self.dirty_changed.emit(False)
-            # Re-estimate intrinsics from the new 3D/2D data
             self.estimate_intrinsics()
             self.frame_changed.emit(self._current_frame)
 
@@ -612,6 +666,5 @@ class AnnotationModel(QObject):
                 "tx_mm": tx, "ty_mm": ty, "tz_mm": tz,
             },
         }
-        with open(output_path, "w") as f:
-            json.dump(result, f, indent=2)
+        _atomic_json_write(output_path, result)
         return output_path

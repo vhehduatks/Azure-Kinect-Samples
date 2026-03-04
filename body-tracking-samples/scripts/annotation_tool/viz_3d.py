@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import numpy as np
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QDialog, QVBoxLayout, QLabel
+from PySide6.QtWidgets import (
+    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QSlider,
+)
 
 from .constants import (
     BONE_CONNECTIONS,
@@ -54,16 +56,56 @@ class Skeleton3DDialog(QDialog):
             return
 
         fig = Figure(figsize=(10, 7), dpi=100)
-        canvas = FigureCanvas(fig)
-        layout.addWidget(canvas)
+        self._canvas = FigureCanvas(fig)
+        layout.addWidget(self._canvas)
 
         if delta_text:
             lbl = QLabel(delta_text)
             lbl.setAlignment(Qt.AlignCenter)
             layout.addWidget(lbl)
 
-        self._draw(fig, original_3d, adjusted_3d)
-        canvas.draw()
+        self._ax = self._draw(fig, original_3d, adjusted_3d)
+
+        # --- View angle sliders ---
+        default_elev = 20
+        default_azim = -60
+
+        elev_row = QHBoxLayout()
+        elev_row.addWidget(QLabel("Elevation:"))
+        self._elev_slider = QSlider(Qt.Horizontal)
+        self._elev_slider.setRange(-90, 90)
+        self._elev_slider.setValue(default_elev)
+        self._elev_label = QLabel(f"{default_elev}\u00b0")
+        self._elev_label.setFixedWidth(40)
+        elev_row.addWidget(self._elev_slider, stretch=1)
+        elev_row.addWidget(self._elev_label)
+        layout.addLayout(elev_row)
+
+        azim_row = QHBoxLayout()
+        azim_row.addWidget(QLabel("Azimuth:"))
+        self._azim_slider = QSlider(Qt.Horizontal)
+        self._azim_slider.setRange(-180, 180)
+        self._azim_slider.setValue(default_azim)
+        self._azim_label = QLabel(f"{default_azim}\u00b0")
+        self._azim_label.setFixedWidth(40)
+        azim_row.addWidget(self._azim_slider, stretch=1)
+        azim_row.addWidget(self._azim_label)
+        layout.addLayout(azim_row)
+
+        self._elev_slider.valueChanged.connect(self._on_view_changed)
+        self._azim_slider.valueChanged.connect(self._on_view_changed)
+
+        self._ax.view_init(elev=default_elev, azim=default_azim)
+        self._canvas.draw()
+
+    # ------------------------------------------------------------------ #
+    def _on_view_changed(self):
+        elev = self._elev_slider.value()
+        azim = self._azim_slider.value()
+        self._elev_label.setText(f"{elev}\u00b0")
+        self._azim_label.setText(f"{azim}\u00b0")
+        self._ax.view_init(elev=elev, azim=azim)
+        self._canvas.draw_idle()
 
     # ------------------------------------------------------------------ #
     def _draw(self, fig: Figure, orig: np.ndarray, adj: np.ndarray):
@@ -158,3 +200,5 @@ class Skeleton3DDialog(QDialog):
         ]
         ax.legend(handles=legend, loc="upper left", fontsize=8)
         fig.tight_layout()
+
+        return ax

@@ -271,7 +271,10 @@ class AnnotationViewport(QGraphicsView):
     def _on_joint_moved(self, frame: int, joint_id: int):
         if frame != self.model.current_frame:
             return
-        u, v, conf, vis = self.model.get_joint_2d(frame, joint_id)
+        if self.model.has_extrinsic_delta():
+            u, v, conf, vis = self.model.get_adjusted_joint_2d(frame, joint_id)
+        else:
+            u, v, conf, vis = self.model.get_joint_2d(frame, joint_id)
         item = self._joint_items.get(joint_id)
         if item is None:
             return

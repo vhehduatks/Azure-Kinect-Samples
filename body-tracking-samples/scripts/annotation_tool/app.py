@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QWidget,
     QVBoxLayout,
+    QHBoxLayout,
     QDockWidget,
     QMessageBox,
     QFileDialog,
@@ -18,6 +19,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QFormLayout,
     QCheckBox,
+    QPushButton,
 )
 
 from .constants import JOINT_NAMES
@@ -63,13 +65,25 @@ class AnnotationMainWindow(QMainWindow):
         self.hmd_panel = HMDInfoPanel(self.model)
         self.extrinsic_panel = ExtrinsicPanel()
 
-        # Central area: viewport + timeline
+        # Central area: viewport + timeline + interpolation button
         central = QWidget()
         central_layout = QVBoxLayout(central)
         central_layout.setContentsMargins(0, 0, 0, 0)
         central_layout.setSpacing(0)
         central_layout.addWidget(self.viewport, stretch=1)
-        central_layout.addWidget(self.timeline, stretch=0)
+        timeline_row = QHBoxLayout()
+        timeline_row.setContentsMargins(0, 0, 0, 0)
+        timeline_row.setSpacing(4)
+        timeline_row.addWidget(self.timeline, stretch=1)
+        self._interp_btn = QPushButton("Interpolate")
+        self._interp_btn.setEnabled(False)
+        self._interp_btn.setToolTip(
+            "Interpolate selected joint(s) between keyframes (Ctrl+I)"
+        )
+        self._interp_btn.setFixedWidth(100)
+        self._interp_btn.clicked.connect(self._apply_interpolation_auto)
+        timeline_row.addWidget(self._interp_btn)
+        central_layout.addLayout(timeline_row)
         self.setCentralWidget(central)
 
         # Right dock: joint tree + HMD info
@@ -119,6 +133,18 @@ class AnnotationMainWindow(QMainWindow):
         self.model.session_loaded.connect(self._on_session_loaded_extrinsic)
         self.model.session_loaded.connect(
             lambda: self.extrinsic_panel.set_frame_count(self.model.frame_count)
+        )
+
+        # Interpolation button state tracking
+        self.model.frame_changed.connect(
+            lambda _: self._update_interpolation_button()
+        )
+        self.model.joint_selected.connect(
+            lambda _: self._update_interpolation_button()
+        )
+        self.model.session_loaded.connect(self._update_interpolation_button)
+        self.undo_stack.indexChanged.connect(
+            lambda _: self._update_interpolation_button()
         )
 
     # ==================================================================
@@ -213,10 +239,44 @@ class AnnotationMainWindow(QMainWindow):
     def _on_group_drag(self, moves):
         """Handle drag completion for one or more joints.
 
+        Auto-sets dragged joints as keyframes for interpolation.
+        When an extrinsic delta is active (preview only, not applied),
+        converts the dragged positions from adjusted space to raw space
+        to prevent double-application of the extrinsic offset.
+
         Args:
             moves: list of (joint_id, old_u, old_v, new_u, new_v)
         """
         frame = self.model.current_frame
+
+        # Convert adjusted-space positions to raw-space when extrinsic
+        # delta is active.  The viewport shows joints at adjusted positions,
+        # so drag coordinates are in adjusted space.  The model stores raw
+        # values, and get_adjusted_joint_2d() re-applies the offset on read.
+        if self.model.has_extrinsic_delta():
+            raw_moves = []
+            for jid, _old_u_adj, _old_v_adj, new_u_adj, new_v_adj in moves:
+                raw_old_u, raw_old_v, _, _ = self.model.get_joint_2d(frame, jid)
+                adj_u, adj_v, _, _ = self.model.get_adjusted_joint_2d(frame, jid)
+                offset_u = adj_u - raw_old_u
+                offset_v = adj_v - raw_old_v
+                raw_new_u = new_u_adj - offset_u
+                raw_new_v = new_v_adj - offset_v
+                raw_moves.append((jid, raw_old_u, raw_old_v, raw_new_u, raw_new_v))
+            moves = raw_moves
+
+        # Determine which joints need auto-keyframing
+        need_kf = [
+            m[0] for m in moves
+            if frame not in self.model.get_keyframes(m[0])
+        ]
+
+        # Use macro to group move + auto-keyframe into one undo step
+        if need_kf:
+            self.undo_stack.beginMacro(
+                f"Move + auto-keyframe @ frame {frame}"
+            )
+
         if len(moves) == 1:
             jid, old_u, old_v, new_u, new_v = moves[0]
             cmd = MoveJointCommand(self.model, frame, jid,
@@ -224,6 +284,14 @@ class AnnotationMainWindow(QMainWindow):
         else:
             cmd = MoveMultipleJointsCommand(self.model, frame, moves)
         self.undo_stack.push(cmd)
+
+        for jid in need_kf:
+            self.undo_stack.push(
+                SetKeyframeCommand(self.model, frame, jid, True)
+            )
+
+        if need_kf:
+            self.undo_stack.endMacro()
 
     def _on_visibility_toggled(self, frame, jid, new_vis):
         _, _, _, old_vis = self.model.get_joint_2d(frame, jid)
@@ -385,6 +453,13 @@ class AnnotationMainWindow(QMainWindow):
                 cmd = BatchMoveCommand(self.model, jid, moves)
                 self.undo_stack.push(cmd)
                 total_frames += len(moves)
+
+        # Clear keyframes for interpolated joints
+        for jid, kf_frames in eligible.items():
+            for f in kf_frames:
+                self.undo_stack.push(
+                    SetKeyframeCommand(self.model, f, jid, False)
+                )
         self.undo_stack.endMacro()
 
         self._status.showMessage(
@@ -392,6 +467,90 @@ class AnnotationMainWindow(QMainWindow):
             f"{total_frames} frames total ({mode})",
             5000,
         )
+
+    def _apply_interpolation_auto(self):
+        """Auto-apply linear interpolation to all eligible joints.
+
+        Scans ALL joints (not just viewport selection).  Eligible: joint
+        has >= 2 keyframes AND current frame is within their keyframe range.
+        No dialog — applies immediately.
+        """
+        from .constants import NUM_JOINTS
+
+        frame = self.model.current_frame
+        eligible = {}  # jid -> sorted keyframe list
+        for jid in range(NUM_JOINTS):
+            kfs = sorted(self.model.get_keyframes(jid))
+            if len(kfs) >= 2 and kfs[0] <= frame <= kfs[-1]:
+                eligible[jid] = kfs
+
+        if not eligible:
+            return
+
+        total_frames = 0
+        self.undo_stack.beginMacro(
+            f"Interpolate {len(eligible)} joint(s) (linear)"
+        )
+        for jid, kf_frames in eligible.items():
+            keyframes = []
+            for f in kf_frames:
+                u, v, _, _ = self.model.get_joint_2d(f, jid)
+                keyframes.append((f, u, v))
+
+            interpolated = InterpolationEngine.interpolate_joint(
+                keyframes, "linear"
+            )
+            if not interpolated:
+                continue
+
+            moves = []
+            for frame_idx, (new_u, new_v) in interpolated.items():
+                old_u, old_v, _, _ = self.model.get_joint_2d(frame_idx, jid)
+                moves.append((frame_idx, old_u, old_v, new_u, new_v))
+
+            if moves:
+                cmd = BatchMoveCommand(self.model, jid, moves)
+                self.undo_stack.push(cmd)
+                total_frames += len(moves)
+
+        # Clear keyframes for interpolated joints
+        for jid, kf_frames in eligible.items():
+            for f in kf_frames:
+                self.undo_stack.push(
+                    SetKeyframeCommand(self.model, f, jid, False)
+                )
+        self.undo_stack.endMacro()
+
+        self._status.showMessage(
+            f"Interpolated {len(eligible)} joint(s), "
+            f"{total_frames} frames (linear)",
+            5000,
+        )
+
+    # ==================================================================
+    # Interpolation button state
+    # ==================================================================
+    def _update_interpolation_button(self):
+        """Enable interpolation button when ANY joint has keyframes around
+        the current frame position.
+
+        Scans all joints, not just the viewport selection, because dragging
+        a different joint deselects the previous one.
+        """
+        if self.model.dataset is None:
+            self._interp_btn.setEnabled(False)
+            return
+
+        from .constants import NUM_JOINTS
+
+        frame = self.model.current_frame
+        for jid in range(NUM_JOINTS):
+            kfs = sorted(self.model.get_keyframes(jid))
+            if len(kfs) >= 2 and kfs[0] <= frame <= kfs[-1]:
+                self._interp_btn.setEnabled(True)
+                return
+
+        self._interp_btn.setEnabled(False)
 
     # ==================================================================
     # Head-joint pruning
@@ -516,22 +675,27 @@ class AnnotationMainWindow(QMainWindow):
         import numpy as np
         from .viz_3d import Skeleton3DDialog
 
-        # Build adjusted 3D array
+        # Build adjusted 3D array (per-joint edits + extrinsic delta)
         adjusted_3d = np.copy(original_3d)
-        if self.model.has_extrinsic_delta():
-            for jid in range(len(original_3d)):
-                result = self.model.get_adjusted_joint_3d(frame, jid)
-                if result is not None:
-                    adjusted_3d[jid, 0] = result[0]
-                    adjusted_3d[jid, 1] = result[1]
-                    adjusted_3d[jid, 2] = result[2]
+        for jid in range(len(original_3d)):
+            result = self.model.get_effective_joint_3d(frame, jid)
+            if result is not None:
+                adjusted_3d[jid, 0] = result[0]
+                adjusted_3d[jid, 1] = result[1]
+                adjusted_3d[jid, 2] = result[2]
 
         rx, ry, rz, tx, ty, tz = self.model._extrinsic_delta
+        n_edits = sum(
+            1 for j in range(len(original_3d))
+            if self.model.is_joint_edited(frame, j)
+        )
         delta_text = (
             f"Frame {frame}  |  "
             f"R({rx:+.2f}\u00b0, {ry:+.2f}\u00b0, {rz:+.2f}\u00b0)  "
             f"T({tx:+.1f}, {ty:+.1f}, {tz:+.1f}) mm"
         )
+        if n_edits > 0:
+            delta_text += f"  |  {n_edits} joint(s) edited"
 
         dlg = Skeleton3DDialog(original_3d, adjusted_3d, delta_text, parent=self)
         dlg.show()

@@ -72,6 +72,10 @@ class JointEdit:
     original_u: float = 0.0
     original_v: float = 0.0
     original_visible: bool = True
+    # Back-projected 3D coordinates (set when intrinsics available)
+    x3d: Optional[float] = None
+    y3d: Optional[float] = None
+    z3d: Optional[float] = None
 
 
 class AnnotationModel(QObject):
@@ -113,6 +117,7 @@ class AnnotationModel(QObject):
             0.0, 0.0, 0.0, 0.0, 0.0, 0.0
         )  # (rx, ry, rz, tx, ty, tz)
         self._intrinsics: Optional[Tuple[float, float, float, float]] = None  # (fx, fy, cx, cy)
+        self._image_size: Optional[Tuple[int, int]] = None  # (width, height)
 
     # ------------------------------------------------------------------
     # Properties
@@ -281,8 +286,42 @@ class AnnotationModel(QObject):
         edit = self._ensure_edit(frame, joint_id)
         edit.u = u
         edit.v = v
+        # Recalculate visibility: inside image → visible, outside → not
+        if self._image_size is not None:
+            img_w, img_h = self._image_size
+            orig = self._get_original_joint(frame, joint_id)
+            conf = orig[2] if orig else 0
+            if conf > 0:
+                edit.visible = bool(0 <= u < img_w and 0 <= v < img_h)
+            else:
+                edit.visible = False
+        self._backproject_3d(frame, joint_id, edit)
         self._mark_dirty(frame)
         self.joint_moved.emit(frame, joint_id)
+
+    def _backproject_3d(self, frame: int, joint_id: int, edit: JointEdit):
+        """Compute back-projected 3D from edited (u, v) using original depth.
+
+        Uses the pinhole model inverse:
+            x = (u - cx) * z / fx
+            y = (v - cy) * z / fy
+            z = z_original  (depth unchanged)
+        """
+        if self._intrinsics is None or self._dataset is None:
+            edit.x3d = edit.y3d = edit.z3d = None
+            return
+        joints_3d = self._dataset.get_joints_3d(frame)
+        if joints_3d is None or joint_id >= len(joints_3d):
+            edit.x3d = edit.y3d = edit.z3d = None
+            return
+        _x, _y, z, _conf = joints_3d[joint_id]
+        if z < 1:
+            edit.x3d = edit.y3d = edit.z3d = None
+            return
+        fx, fy, cx, cy = self._intrinsics
+        edit.x3d = (edit.u - cx) * float(z) / fx
+        edit.y3d = (edit.v - cy) * float(z) / fy
+        edit.z3d = float(z)
 
     def set_joint_visible(self, frame: int, joint_id: int, visible: bool):
         edit = self._ensure_edit(frame, joint_id)
@@ -331,6 +370,19 @@ class AnnotationModel(QObject):
     # ------------------------------------------------------------------
     def save(self) -> int:
         """Write modified annotation JSONs.  Returns number of files written."""
+        # Resolve image dimensions for visibility bounds checking.
+        img_w, img_h = 0, 0
+        if self._intrinsics is not None:
+            img_w, img_h = int(2 * self._intrinsics[2]), int(2 * self._intrinsics[3])
+        if self._dataset is not None:
+            for fi in range(min(self.frame_count, 5)):
+                ip = self._dataset.get_frame(fi).get("_image_path", "")
+                if ip and Path(ip).exists():
+                    pix = QPixmap(ip)
+                    if not pix.isNull():
+                        img_w, img_h = pix.width(), pix.height()
+                        break
+
         saved_count = 0
         for frame_idx in sorted(self._dirty_frames):
             if frame_idx not in self._edits:
@@ -366,10 +418,29 @@ class AnnotationModel(QObject):
                     edit = self._edits[frame_idx][jid]
                     entry["u"] = round(edit.u, 2)
                     entry["v"] = round(edit.v, 2)
-                    entry["visible"] = edit.visible
+                    # Recalculate visibility from image bounds
+                    conf = entry.get("confidence", 0)
+                    if conf > 0 and img_w > 0:
+                        entry["visible"] = bool(
+                            0 <= edit.u < img_w and 0 <= edit.v < img_h
+                        )
+                    else:
+                        entry["visible"] = False
                 if jid in self._pruned_joints:
                     entry["visible"] = False
             data["skeleton_2d"] = skel_2d
+
+            # Update skeleton_3d with back-projected positions
+            skel_3d = data.get("skeleton_3d", [])
+            for entry in skel_3d:
+                jid = entry["joint_id"]
+                if jid in self._edits[frame_idx]:
+                    edit = self._edits[frame_idx][jid]
+                    if edit.x3d is not None:
+                        entry["x"] = round(edit.x3d, 2)
+                        entry["y"] = round(edit.y3d, 2)
+                        entry["z"] = round(edit.z3d, 2)
+            data["skeleton_3d"] = skel_3d
 
             _atomic_json_write(json_path, data)
             saved_count += 1
@@ -425,6 +496,16 @@ class AnnotationModel(QObject):
         fx, cx, fy, cy = result
         self._intrinsics = (float(fx), float(fy), float(cx), float(cy))
         print(f"[ExtrinsicTuning] Estimated intrinsics: fx={fx:.1f} fy={fy:.1f} cx={cx:.1f} cy={cy:.1f} ({len(A_rows)//2} pairs)")
+
+        # Resolve image dimensions
+        self._image_size = (int(2 * cx), int(2 * cy))  # fallback
+        for fi in range(min(self.frame_count, 5)):
+            ip = self._dataset.get_frame(fi).get("_image_path", "")
+            if ip and Path(ip).exists():
+                pix = QPixmap(ip)
+                if not pix.isNull():
+                    self._image_size = (pix.width(), pix.height())
+                    break
 
     def has_extrinsic_delta(self) -> bool:
         """True if any extrinsic parameter is non-zero."""
@@ -497,6 +578,25 @@ class AnnotationModel(QObject):
         R = _euler_to_rotation_matrix(rx, ry, rz)
         pt = R @ np.array([x, y, z], dtype=np.float64) + np.array([tx, ty, tz])
         return (float(pt[0]), float(pt[1]), float(pt[2]), int(conf))
+
+    def get_effective_joint_3d(self, frame: int, joint_id: int):
+        """Return (x, y, z, conf) considering per-joint edits and extrinsic delta.
+
+        Priority: edit back-projection > extrinsic delta > original.
+        Returns None if no 3D data is available.
+        """
+        # Check edit layer for back-projected 3D
+        if frame in self._edits and joint_id in self._edits[frame]:
+            edit = self._edits[frame][joint_id]
+            if edit.x3d is not None:
+                conf = 0
+                if self._dataset is not None:
+                    joints_3d = self._dataset.get_joints_3d(frame)
+                    if joints_3d is not None and joint_id < len(joints_3d):
+                        conf = int(joints_3d[joint_id, 3])
+                return (edit.x3d, edit.y3d, edit.z3d, conf)
+        # Fall back to extrinsic-adjusted or original
+        return self.get_adjusted_joint_3d(frame, joint_id)
 
     def apply_extrinsic_to_all_frames(
         self,

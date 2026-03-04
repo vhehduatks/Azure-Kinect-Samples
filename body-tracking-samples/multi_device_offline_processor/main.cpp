@@ -1001,8 +1001,8 @@ float ConfidenceToWeight(k4abt_joint_confidence_level_t conf)
 {
     switch (conf) {
         case K4ABT_JOINT_CONFIDENCE_NONE:   return 0.0f;
-        case K4ABT_JOINT_CONFIDENCE_LOW:    return 0.25f;
-        case K4ABT_JOINT_CONFIDENCE_MEDIUM: return 0.6f;
+        case K4ABT_JOINT_CONFIDENCE_LOW:    return 0.1f;
+        case K4ABT_JOINT_CONFIDENCE_MEDIUM: return 0.3f;
         case K4ABT_JOINT_CONFIDENCE_HIGH:   return 1.0f;
         default: return 0.0f;
     }
@@ -1344,6 +1344,8 @@ struct MkvProcessor {
     k4a_float3_t prevPelvisLocal = {0, 0, 0};
     bool hasPrevPelvisLocal = false;
     int jointCarryCountLocal[K4ABT_JOINT_COUNT] = {};
+    int bodyCarryCountLocal = 0;
+    int stableTrackCountLocal = 0;
 };
 
 bool InitMkvProcessor(MkvProcessor& proc, const string& filepath, int deviceIndex,
@@ -1592,7 +1594,8 @@ void PrintUsage()
          << "                             'local' fuses in helmet-local coords (avoids extrinsic errors)\n\n"
          << "BODY TRACKING:\n"
          << "  --sensor-orientation ORI - Sensor orientation: default, cw90, ccw90, flip180\n"
-         << "  --smoothing FACTOR       - Temporal smoothing factor 0.0-1.0 (default: 0.0)\n\n"
+         << "  --smoothing FACTOR       - Temporal smoothing factor 0.0-1.0 (default: 0.0)\n"
+         << "  --max-body-distance MM   - Ignore bodies with pelvis farther than this (default: 4000mm)\n\n"
          << "EXAMPLE (standard):\n"
          << "  multi_device_offline_processor.exe --calibration calib.json \\\n"
          << "      --output skeleton.csv recording_cam0.mkv recording_cam1.mkv\n\n"
@@ -1625,6 +1628,7 @@ int main(int argc, char** argv)
     string egoOutputDir = "ego_output";
     HelmetCBConfig helmetCBConfig;
     string egoFusionMode = "world";  // "world" (default) or "local"
+    float maxBodyDistanceMm = 4000.0f;  // ignore bodies farther than this from origin
 
     for (int i = 1; i < argc; i++) {
         string arg(argv[i]);
@@ -1689,6 +1693,9 @@ int main(int argc, char** argv)
                 cerr << "Smoothing factor must be between 0.0 and 1.0" << endl;
                 return -1;
             }
+        }
+        else if (arg == "--max-body-distance" && i + 1 < argc) {
+            maxBodyDistanceMm = stof(argv[++i]);
         }
         else if (arg == "--help" || arg == "-h") {
             PrintUsage();
@@ -1902,6 +1909,28 @@ int main(int argc, char** argv)
     const int MAX_CARRY_FRAMES = 5;              // ~167ms at 30fps
     int jointCarryCount[K4ABT_JOINT_COUNT] = {};
 
+    // Whole-body carry-forward limit: prevents permanent skeleton freeze when the
+    // initial body selection lands on a mis-fused phantom body.  After this many
+    // consecutive carry-forward frames, force-accept the new body.
+    const int MAX_BODY_CARRY_FRAMES = 10;        // ~333ms at 30fps
+    int bodyCarryCount = 0;
+
+    // Warm-up: don't enable carry-forward until we've had this many consecutive
+    // frames of normal EMA tracking (pelvisDist < threshold).  This prevents a
+    // transient mis-fused body on the very first frame from locking in via
+    // carry-forward for MAX_BODY_CARRY_FRAMES before correcting.
+    const int CARRY_FORWARD_WARMUP = 3;
+    int stableTrackCount = 0;  // consecutive frames of normal EMA (Case 2)
+
+    // Post-fusion temporal EMA for local mode: smooths the fused helmet-local
+    // skeleton across frames.  In world mode, cross-camera averaging in
+    // FuseBodiesAtTimestamp() provides natural noise reduction before the EMA.
+    // Local mode lacks this pre-averaging, so we add a second temporal pass
+    // after FuseHelmetLocalSkeletons() to match world mode's smoothness.
+    vector<Joint3D> prevFusedLocalSkeleton;
+    bool hasPrevFusedLocal = false;
+    uint64_t prevFusedLocalTimestamp = 0;
+
     // Seed all processors with their first frame
     for (auto& proc : processors) {
         if (!proc.isEOF) {
@@ -1993,10 +2022,25 @@ int main(int argc, char** argv)
                     }
                 }
 
+                // Distance filter: remove bodies whose pelvis exceeds maxBodyDistanceMm
+                // from the world origin.  This eliminates phantom/ghost detections
+                // at the far end of the room (e.g. reflections at ~5m).
+                if (maxBodyDistanceMm > 0) {
+                    fused.erase(
+                        remove_if(fused.begin(), fused.end(), [&](const FusedBody& fb) {
+                            const auto& p = fb.joints[K4ABT_JOINT_PELVIS].position;
+                            float dist = sqrtf(p.xyz.x * p.xyz.x +
+                                               p.xyz.y * p.xyz.y +
+                                               p.xyz.z * p.xyz.z);
+                            return dist > maxBodyDistanceMm;
+                        }),
+                        fused.end());
+                }
+
                 latestFused = fused;
                 latestFusedTimestamp = minTimestamp;
 
-                // Write to CSV
+                // Write to CSV (post-filter, so CSV also omits phantom bodies)
                 for (const auto& body : fused) {
                     WriteFusedBodyToCSV(csvFile, minTimestamp, body);
                 }
@@ -2100,14 +2144,24 @@ int main(int argc, char** argv)
                     }
 
                     if (proc.hasPrevSmoothedLocal && pelvisDist > BODY_SWITCH_THRESHOLD_MM &&
-                        (curTs - proc.prevSmoothedTimestampLocal) < SKEL_STALENESS_US) {
-                        // Large jump: carry forward previous skeleton
+                        (curTs - proc.prevSmoothedTimestampLocal) < SKEL_STALENESS_US &&
+                        proc.bodyCarryCountLocal < MAX_BODY_CARRY_FRAMES &&
+                        proc.stableTrackCountLocal >= CARRY_FORWARD_WARMUP) {
+                        // Large jump (after warm-up): carry forward previous skeleton
                         smoothedBody = proc.prevSmoothedBodyLocal;
+                        proc.bodyCarryCountLocal++;
                     } else if (proc.hasPrevSmoothedLocal && pelvisDist <= BODY_SWITCH_THRESHOLD_MM &&
                                (curTs - proc.prevSmoothedTimestampLocal) < SKEL_STALENESS_US) {
                         // Normal motion: adaptive per-joint smoothing
                         for (int j = 0; j < K4ABT_JOINT_COUNT; j++) {
                             float alpha = GetJointSmoothAlpha(j);
+                            // Confidence-adaptive smoothing: reduce alpha for
+                            // low-confidence joints to suppress noisy positions.
+                            if (selectedBody.skeleton.joints[j].confidence_level == K4ABT_JOINT_CONFIDENCE_NONE) {
+                                alpha = min(alpha, 0.15f);
+                            } else if (selectedBody.skeleton.joints[j].confidence_level == K4ABT_JOINT_CONFIDENCE_LOW) {
+                                alpha = min(alpha, 0.30f);
+                            }
                             smoothedBody.skeleton.joints[j].position.xyz.x =
                                 alpha * selectedBody.skeleton.joints[j].position.xyz.x +
                                 (1.0f - alpha) * proc.prevSmoothedBodyLocal.skeleton.joints[j].position.xyz.x;
@@ -2120,19 +2174,61 @@ int main(int argc, char** argv)
                         }
                         proc.prevPelvisLocal = selectedBody.skeleton.joints[K4ABT_JOINT_PELVIS].position;
                         proc.hasPrevPelvisLocal = true;
-                    } else {
-                        // First frame or stale: accept as-is
+                        proc.bodyCarryCountLocal = 0;
+                        proc.stableTrackCountLocal++;
+                    } else if (proc.hasPrevSmoothedLocal) {
+                        // Carry-forward limit exceeded, stale, or warm-up period:
+                        // gradual transition to avoid sudden jumps.
+                        for (int j = 0; j < K4ABT_JOINT_COUNT; j++) {
+                            float alpha = 0.30f;  // heavy smoothing for transition
+                            smoothedBody.skeleton.joints[j].position.xyz.x =
+                                alpha * selectedBody.skeleton.joints[j].position.xyz.x +
+                                (1.0f - alpha) * proc.prevSmoothedBodyLocal.skeleton.joints[j].position.xyz.x;
+                            smoothedBody.skeleton.joints[j].position.xyz.y =
+                                alpha * selectedBody.skeleton.joints[j].position.xyz.y +
+                                (1.0f - alpha) * proc.prevSmoothedBodyLocal.skeleton.joints[j].position.xyz.y;
+                            smoothedBody.skeleton.joints[j].position.xyz.z =
+                                alpha * selectedBody.skeleton.joints[j].position.xyz.z +
+                                (1.0f - alpha) * proc.prevSmoothedBodyLocal.skeleton.joints[j].position.xyz.z;
+                        }
                         proc.prevPelvisLocal = selectedBody.skeleton.joints[K4ABT_JOINT_PELVIS].position;
                         proc.hasPrevPelvisLocal = true;
+                        proc.bodyCarryCountLocal = 0;
+                        proc.stableTrackCountLocal = 0;
+                        memset(proc.jointCarryCountLocal, 0, sizeof(proc.jointCarryCountLocal));
+                    } else {
+                        // First frame: accept as-is
+                        proc.prevPelvisLocal = selectedBody.skeleton.joints[K4ABT_JOINT_PELVIS].position;
+                        proc.hasPrevPelvisLocal = true;
+                        proc.bodyCarryCountLocal = 0;
+                        proc.stableTrackCountLocal = 0;
                         memset(proc.jointCarryCountLocal, 0, sizeof(proc.jointCarryCountLocal));
                     }
 
-                    // Carry forward low-confidence joints (up to MAX_CARRY_FRAMES)
+                    // Carry forward low-confidence joints
                     if (proc.hasPrevSmoothedLocal) {
                         for (int j = 0; j < K4ABT_JOINT_COUNT; j++) {
-                            if (smoothedBody.skeleton.joints[j].confidence_level == K4ABT_JOINT_CONFIDENCE_NONE &&
+                            // Zero-position guard: (0,0,0) with conf=NONE is a sentinel
+                            bool isZeroSentinel =
+                                selectedBody.skeleton.joints[j].confidence_level == K4ABT_JOINT_CONFIDENCE_NONE &&
+                                fabsf(selectedBody.skeleton.joints[j].position.xyz.x) < 0.01f &&
+                                fabsf(selectedBody.skeleton.joints[j].position.xyz.y) < 0.01f &&
+                                fabsf(selectedBody.skeleton.joints[j].position.xyz.z) < 0.01f;
+                            bool prevHasRealPos =
+                                fabsf(proc.prevSmoothedBodyLocal.skeleton.joints[j].position.xyz.x) > 0.01f ||
+                                fabsf(proc.prevSmoothedBodyLocal.skeleton.joints[j].position.xyz.y) > 0.01f ||
+                                fabsf(proc.prevSmoothedBodyLocal.skeleton.joints[j].position.xyz.z) > 0.01f;
+
+                            if (isZeroSentinel && prevHasRealPos) {
+                                // Unlimited carry-forward for zero-position sentinels
+                                smoothedBody.skeleton.joints[j].position =
+                                    proc.prevSmoothedBodyLocal.skeleton.joints[j].position;
+                                smoothedBody.skeleton.joints[j].orientation =
+                                    proc.prevSmoothedBodyLocal.skeleton.joints[j].orientation;
+                            } else if (smoothedBody.skeleton.joints[j].confidence_level == K4ABT_JOINT_CONFIDENCE_NONE &&
                                 proc.prevSmoothedBodyLocal.skeleton.joints[j].confidence_level != K4ABT_JOINT_CONFIDENCE_NONE &&
                                 proc.jointCarryCountLocal[j] < MAX_CARRY_FRAMES) {
+                                // Regular carry-forward (up to MAX_CARRY_FRAMES)
                                 smoothedBody.skeleton.joints[j] = proc.prevSmoothedBodyLocal.skeleton.joints[j];
                                 proc.jointCarryCountLocal[j]++;
                             } else {
@@ -2204,6 +2300,33 @@ int main(int argc, char** argv)
                     }
 
                     joints3D = FuseHelmetLocalSkeletons(localCandidates);
+
+                    // Post-fusion temporal EMA: smooth the fused helmet-local
+                    // skeleton to compensate for the lack of cross-camera
+                    // pre-averaging that world mode gets from FuseBodiesAtTimestamp().
+                    uint64_t curTsLocal = processors[helmetIdx].lastTimestamp;
+                    if (hasPrevFusedLocal &&
+                        (curTsLocal - prevFusedLocalTimestamp) < SKEL_STALENESS_US &&
+                        prevFusedLocalSkeleton.size() == joints3D.size()) {
+                        for (size_t j = 0; j < joints3D.size(); j++) {
+                            float alpha = GetJointSmoothAlpha((int)j);
+                            if (joints3D[j].confidence == 0) {
+                                alpha = min(alpha, 0.15f);
+                            } else if (joints3D[j].confidence == 1) {
+                                alpha = min(alpha, 0.30f);
+                            }
+                            joints3D[j].x = alpha * joints3D[j].x +
+                                            (1.0f - alpha) * prevFusedLocalSkeleton[j].x;
+                            joints3D[j].y = alpha * joints3D[j].y +
+                                            (1.0f - alpha) * prevFusedLocalSkeleton[j].y;
+                            joints3D[j].z = alpha * joints3D[j].z +
+                                            (1.0f - alpha) * prevFusedLocalSkeleton[j].z;
+                        }
+                    }
+                    prevFusedLocalSkeleton = joints3D;
+                    hasPrevFusedLocal = true;
+                    prevFusedLocalTimestamp = curTsLocal;
+
                     joints2D = ProjectSkeleton(joints3D, helmetCalibration);
                     detectionSuccess = true;
 
@@ -2322,15 +2445,29 @@ int main(int argc, char** argv)
                     bool useCarryForward = false;
 
                     if (hasPrevSmoothed && pelvisDist > BODY_SWITCH_THRESHOLD_MM &&
-                        (curTs - prevSmoothedTimestamp) < SKEL_STALENESS_US) {
+                        (curTs - prevSmoothedTimestamp) < SKEL_STALENESS_US &&
+                        bodyCarryCount < MAX_BODY_CARRY_FRAMES &&
+                        stableTrackCount >= CARRY_FORWARD_WARMUP) {
+                        // Only carry-forward after warm-up: if the tracker hasn't
+                        // established stable tracking yet, a large pelvis jump
+                        // likely means the initial body was wrong, not that we
+                        // should freeze on it.
                         smoothedBody = prevSmoothedBody;
                         useCarryForward = true;
+                        bodyCarryCount++;
                         memset(jointCarryCount, 0, sizeof(jointCarryCount));
                     } else if (hasPrevSmoothed && pelvisDist < BODY_SWITCH_THRESHOLD_MM &&
                                (curTs - prevSmoothedTimestamp) < SKEL_STALENESS_US) {
                         smoothedBody = selectedBody;
                         for (int j = 0; j < K4ABT_JOINT_COUNT; j++) {
                             float alpha = GetJointSmoothAlpha(j);
+                            // Confidence-adaptive smoothing: reduce alpha for
+                            // low-confidence joints to suppress noisy positions.
+                            if (selectedBody.joints[j].confidence == K4ABT_JOINT_CONFIDENCE_NONE) {
+                                alpha = min(alpha, 0.15f);
+                            } else if (selectedBody.joints[j].confidence == K4ABT_JOINT_CONFIDENCE_LOW) {
+                                alpha = min(alpha, 0.30f);
+                            }
                             smoothedBody.joints[j].position.xyz.x = (float)(
                                 alpha * selectedBody.joints[j].position.xyz.x +
                                 (1.0f - alpha) * prevSmoothedBody.joints[j].position.xyz.x);
@@ -2343,18 +2480,64 @@ int main(int argc, char** argv)
                         }
                         prevPelvisWorld = selectedBody.joints[K4ABT_JOINT_PELVIS].position;
                         hasPrevPelvis = true;
+                        bodyCarryCount = 0;
+                        stableTrackCount++;
+                    } else if (hasPrevSmoothed) {
+                        // Carry-forward limit exceeded, stale, or warm-up period:
+                        // gradual transition to avoid sudden jumps.
+                        smoothedBody = selectedBody;
+                        for (int j = 0; j < K4ABT_JOINT_COUNT; j++) {
+                            float alpha = 0.30f;  // heavy smoothing for transition
+                            smoothedBody.joints[j].position.xyz.x = (float)(
+                                alpha * selectedBody.joints[j].position.xyz.x +
+                                (1.0f - alpha) * prevSmoothedBody.joints[j].position.xyz.x);
+                            smoothedBody.joints[j].position.xyz.y = (float)(
+                                alpha * selectedBody.joints[j].position.xyz.y +
+                                (1.0f - alpha) * prevSmoothedBody.joints[j].position.xyz.y);
+                            smoothedBody.joints[j].position.xyz.z = (float)(
+                                alpha * selectedBody.joints[j].position.xyz.z +
+                                (1.0f - alpha) * prevSmoothedBody.joints[j].position.xyz.z);
+                        }
+                        prevPelvisWorld = selectedBody.joints[K4ABT_JOINT_PELVIS].position;
+                        hasPrevPelvis = true;
+                        bodyCarryCount = 0;
+                        stableTrackCount = 0;
+                        memset(jointCarryCount, 0, sizeof(jointCarryCount));
                     } else {
+                        // First frame: accept as-is
                         smoothedBody = selectedBody;
                         prevPelvisWorld = selectedBody.joints[K4ABT_JOINT_PELVIS].position;
                         hasPrevPelvis = true;
+                        bodyCarryCount = 0;
+                        stableTrackCount = 0;
                         memset(jointCarryCount, 0, sizeof(jointCarryCount));
                     }
 
                     if (hasPrevSmoothed) {
                         for (int j = 0; j < K4ABT_JOINT_COUNT; j++) {
-                            if (smoothedBody.joints[j].confidence == K4ABT_JOINT_CONFIDENCE_NONE &&
+                            // Zero-position guard: (0,0,0) with conf=NONE is a sentinel
+                            // meaning "no detection", not a real position.  Always carry
+                            // forward the previous position to avoid collapsing the
+                            // skeleton toward the world origin.
+                            bool isZeroSentinel =
+                                selectedBody.joints[j].confidence == K4ABT_JOINT_CONFIDENCE_NONE &&
+                                fabsf(selectedBody.joints[j].position.xyz.x) < 0.01f &&
+                                fabsf(selectedBody.joints[j].position.xyz.y) < 0.01f &&
+                                fabsf(selectedBody.joints[j].position.xyz.z) < 0.01f;
+                            bool prevHasRealPos =
+                                fabsf(prevSmoothedBody.joints[j].position.xyz.x) > 0.01f ||
+                                fabsf(prevSmoothedBody.joints[j].position.xyz.y) > 0.01f ||
+                                fabsf(prevSmoothedBody.joints[j].position.xyz.z) > 0.01f;
+
+                            if (isZeroSentinel && prevHasRealPos) {
+                                // Unlimited carry-forward for zero-position sentinels
+                                smoothedBody.joints[j].position = prevSmoothedBody.joints[j].position;
+                                smoothedBody.joints[j].orientation = prevSmoothedBody.joints[j].orientation;
+                                // Keep confidence as NONE to indicate this is estimated
+                            } else if (smoothedBody.joints[j].confidence == K4ABT_JOINT_CONFIDENCE_NONE &&
                                 prevSmoothedBody.joints[j].confidence != K4ABT_JOINT_CONFIDENCE_NONE &&
                                 jointCarryCount[j] < MAX_CARRY_FRAMES) {
+                                // Regular carry-forward for non-zero bad detections
                                 smoothedBody.joints[j].position = prevSmoothedBody.joints[j].position;
                                 smoothedBody.joints[j].orientation = prevSmoothedBody.joints[j].orientation;
                                 smoothedBody.joints[j].confidence = prevSmoothedBody.joints[j].confidence;

@@ -161,6 +161,7 @@ def run_offline_processor(
     sensor_orientation: str,
     smoothing: float,
     ego_fusion_mode: str = "world",
+    max_body_distance: float = 4000.0,
 ) -> bool:
     """Run multi_device_offline_processor.exe for a session."""
     session_dir = output_dir / session.name
@@ -192,6 +193,7 @@ def run_offline_processor(
         "--output", str(output_csv),
         "--ego-output", str(ego_output),
         "--ego-fusion-mode", ego_fusion_mode,
+        "--max-body-distance", str(max_body_distance),
     ] + mkv_paths
 
     print(f"    Command: {' '.join(cmd[:6])} ... ({len(mkv_paths)} MKVs)")
@@ -275,6 +277,7 @@ def process_session(
     smoothing: float,
     resume: bool,
     ego_fusion_mode: str = "world",
+    max_body_distance: float = 4000.0,
 ) -> SessionResult:
     """Orchestrate processing of a single session."""
     result = SessionResult(name=session.name, status="pending")
@@ -306,6 +309,7 @@ def process_session(
             run_offline_processor(
                 session, processor_exe, calib_dir, output_dir,
                 sensor_orientation, smoothing, ego_fusion_mode,
+                max_body_distance,
             )
             result.processor_time = time.time() - t0
             print(f"    Processor done ({result.processor_time:.1f}s)")
@@ -457,6 +461,10 @@ Examples:
         choices=["world", "local"],
         help="Ego skeleton fusion mode: world (default) or local",
     )
+    parser.add_argument(
+        "--max-body-distance", type=float, default=4000.0,
+        help="Ignore bodies with pelvis farther than this in mm (default: 4000)",
+    )
 
     args = parser.parse_args()
 
@@ -510,6 +518,7 @@ Examples:
     print(f"  Orientation:  {args.sensor_orientation}")
     print(f"  Smoothing:    {args.smoothing}")
     print(f"  Ego fusion:   {args.ego_fusion_mode}")
+    print(f"  Max body dist:{args.max_body_distance}mm")
     print(f"  Resume:       {args.resume}")
     print()
 
@@ -592,6 +601,7 @@ Examples:
             smoothing=args.smoothing,
             resume=args.resume,
             ego_fusion_mode=args.ego_fusion_mode,
+            max_body_distance=args.max_body_distance,
         )
         results.append(result)
 

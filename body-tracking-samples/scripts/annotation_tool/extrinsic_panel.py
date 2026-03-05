@@ -113,6 +113,7 @@ class ExtrinsicPanel(QGroupBox):
     export_clicked = Signal()
     reset_clicked = Signal()
     preview_3d_clicked = Signal()
+    range_active_changed = Signal(bool)  # True when range != full session
 
     def __init__(self, parent=None):
         super().__init__("Extrinsic Tuning", parent)
@@ -241,6 +242,7 @@ class ExtrinsicPanel(QGroupBox):
         e = self._end_spin.value()
         is_full = (min(s, e) == 0 and max(s, e) == self._last_frame)
         self._apply_range_btn.setEnabled(not is_full)
+        self.range_active_changed.emit(not is_full)
 
     def _on_apply_range(self):
         s, e = self.frame_range()

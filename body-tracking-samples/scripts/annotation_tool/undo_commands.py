@@ -44,6 +44,54 @@ class ToggleVisibilityCommand(QUndoCommand):
         self._model.set_joint_visible(self._frame, self._jid, self._old)
 
 
+class BatchVisibilityCommand(QUndoCommand):
+    """Toggle visible flag for one joint across a range of frames."""
+
+    def __init__(self, model, joint_id, changes):
+        """
+        Args:
+            changes: list of (frame, old_visible, new_visible)
+        """
+        name = JOINT_NAMES[joint_id] if joint_id < len(JOINT_NAMES) else f"Joint {joint_id}"
+        state = "Show" if changes[0][2] else "Hide"
+        super().__init__(f"{state} {name} frames {changes[0][0]}-{changes[-1][0]}")
+        self._model = model
+        self._jid = joint_id
+        self._changes = changes
+
+    def redo(self):
+        for frame, _old, new in self._changes:
+            self._model.set_joint_visible(frame, self._jid, new)
+
+    def undo(self):
+        for frame, old, _new in reversed(self._changes):
+            self._model.set_joint_visible(frame, self._jid, old)
+
+
+class BatchMultiJointVisibilityCommand(QUndoCommand):
+    """Toggle visible flag for multiple joints across one or more frames."""
+
+    def __init__(self, model, changes, description=None):
+        """
+        Args:
+            changes: list of (frame, joint_id, old_visible, new_visible)
+        """
+        if description:
+            super().__init__(description)
+        else:
+            super().__init__(f"Toggle visibility ({len(changes)} changes)")
+        self._model = model
+        self._changes = changes
+
+    def redo(self):
+        for frame, jid, _old, new in self._changes:
+            self._model.set_joint_visible(frame, jid, new)
+
+    def undo(self):
+        for frame, jid, old, _new in reversed(self._changes):
+            self._model.set_joint_visible(frame, jid, old)
+
+
 class SetKeyframeCommand(QUndoCommand):
     """Toggle the keyframe flag for a joint at a given frame."""
 

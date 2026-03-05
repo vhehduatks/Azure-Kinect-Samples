@@ -28,6 +28,8 @@ from .undo_commands import (
     MoveJointCommand,
     MoveMultipleJointsCommand,
     ToggleVisibilityCommand,
+    BatchVisibilityCommand,
+    BatchMultiJointVisibilityCommand,
     SetKeyframeCommand,
     BatchMoveCommand,
 )
@@ -75,6 +77,14 @@ class AnnotationMainWindow(QMainWindow):
         timeline_row.setContentsMargins(0, 0, 0, 0)
         timeline_row.setSpacing(4)
         timeline_row.addWidget(self.timeline, stretch=1)
+        self._vis_btn = QPushButton("Apply to Range (Vis)")
+        self._vis_btn.setToolTip(
+            "Toggle visibility for selected joint(s) across the active frame range"
+        )
+        self._vis_btn.setFixedWidth(140)
+        self._vis_btn.setEnabled(False)
+        self._vis_btn.clicked.connect(self._apply_visibility_range)
+        timeline_row.addWidget(self._vis_btn)
         self._interp_btn = QPushButton("Interpolate")
         self._interp_btn.setEnabled(False)
         self._interp_btn.setToolTip(
@@ -130,6 +140,7 @@ class AnnotationMainWindow(QMainWindow):
         self.extrinsic_panel.apply_range_clicked.connect(self._apply_extrinsic_range)
         self.extrinsic_panel.export_clicked.connect(self._export_extrinsic)
         self.extrinsic_panel.preview_3d_clicked.connect(self._preview_3d)
+        self.extrinsic_panel.range_active_changed.connect(self._vis_btn.setEnabled)
         self.model.session_loaded.connect(self._on_session_loaded_extrinsic)
         self.model.session_loaded.connect(
             lambda: self.extrinsic_panel.set_frame_count(self.model.frame_count)
@@ -173,6 +184,7 @@ class AnnotationMainWindow(QMainWindow):
         edit_menu.addSeparator()
         edit_menu.addAction("Reset Joint to &Original", self._reset_selected_joint, QKeySequence("Delete"))
         edit_menu.addAction("Toggle &Keyframe", self._toggle_keyframe, QKeySequence("K"))
+        edit_menu.addAction("Toggle &Visibility", self._toggle_visibility, QKeySequence("V"))
         edit_menu.addSeparator()
         edit_menu.addAction("Apply &Interpolation...", self._apply_interpolation, QKeySequence("Ctrl+I"))
 
@@ -294,13 +306,96 @@ class AnnotationMainWindow(QMainWindow):
             self.undo_stack.endMacro()
 
     def _on_visibility_toggled(self, frame, jid, new_vis):
-        _, _, _, old_vis = self.model.get_joint_2d(frame, jid)
-        cmd = ToggleVisibilityCommand(self.model, frame, jid, old_vis, new_vis)
-        self.undo_stack.push(cmd)
+        start, end = self.extrinsic_panel.frame_range()
+        last_frame = self.model.frame_count - 1
+        is_full = (min(start, end) == 0 and max(start, end) >= last_frame)
+
+        if not is_full:
+            changes = []
+            for f in range(start, end + 1):
+                _, _, _, old_vis = self.model.get_joint_2d(f, jid)
+                if old_vis != new_vis:
+                    changes.append((f, old_vis, new_vis))
+            if changes:
+                cmd = BatchVisibilityCommand(self.model, jid, changes)
+                self.undo_stack.push(cmd)
+                self._status.showMessage(
+                    f"{'Show' if new_vis else 'Hide'} joint in {len(changes)} frames ({start}-{end})", 3000
+                )
+        else:
+            _, _, _, old_vis = self.model.get_joint_2d(frame, jid)
+            cmd = ToggleVisibilityCommand(self.model, frame, jid, old_vis, new_vis)
+            self.undo_stack.push(cmd)
 
     def _on_keyframe_toggled(self, frame, jid, new_kf):
         cmd = SetKeyframeCommand(self.model, frame, jid, new_kf)
         self.undo_stack.push(cmd)
+
+    def _get_selected_jids(self):
+        """Return selected joint IDs from viewport or model fallback."""
+        jids = self.viewport.get_selected_joint_ids()
+        if not jids:
+            jid = self.model.selected_joint
+            if jid >= 0:
+                jids = [jid]
+        return jids
+
+    def _toggle_visibility(self):
+        """Toggle visibility for selected joint(s) at the current frame only."""
+        jids = self._get_selected_jids()
+        if not jids:
+            self._status.showMessage("Select a joint first", 3000)
+            return
+
+        frame = self.model.current_frame
+        any_visible = any(
+            self.model.get_joint_2d(frame, jid)[3] for jid in jids
+        )
+        new_vis = not any_visible
+
+        changes = []
+        for jid in jids:
+            _, _, _, old_vis = self.model.get_joint_2d(frame, jid)
+            if old_vis != new_vis:
+                changes.append((frame, jid, old_vis, new_vis))
+        if not changes:
+            return
+
+        action = "Show" if new_vis else "Hide"
+        desc = f"{action} {len(jids)} joint(s) @ frame {frame}"
+        cmd = BatchMultiJointVisibilityCommand(self.model, changes, desc)
+        self.undo_stack.push(cmd)
+        self._status.showMessage(desc, 3000)
+
+    def _apply_visibility_range(self):
+        """Toggle visibility for selected joint(s) across the active frame range."""
+        jids = self._get_selected_jids()
+        if not jids:
+            self._status.showMessage("Select a joint first", 3000)
+            return
+
+        frame = self.model.current_frame
+        start, end = self.extrinsic_panel.frame_range()
+
+        any_visible = any(
+            self.model.get_joint_2d(frame, jid)[3] for jid in jids
+        )
+        new_vis = not any_visible
+
+        changes = []
+        for f in range(start, end + 1):
+            for jid in jids:
+                _, _, _, old_vis = self.model.get_joint_2d(f, jid)
+                if old_vis != new_vis:
+                    changes.append((f, jid, old_vis, new_vis))
+        if not changes:
+            return
+
+        action = "Show" if new_vis else "Hide"
+        desc = f"{action} {len(jids)} joint(s) frames {start}-{end}"
+        cmd = BatchMultiJointVisibilityCommand(self.model, changes, desc)
+        self.undo_stack.push(cmd)
+        self._status.showMessage(desc, 3000)
 
     def _toggle_keyframe(self):
         jids = self.viewport.get_selected_joint_ids()

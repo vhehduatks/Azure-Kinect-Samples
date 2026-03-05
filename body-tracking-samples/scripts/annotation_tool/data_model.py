@@ -338,6 +338,7 @@ class AnnotationModel(QObject):
             self._keyframes[joint_id].add(frame)
         else:
             self._keyframes[joint_id].discard(frame)
+        self.joint_moved.emit(frame, joint_id)
 
     def get_keyframes(self, joint_id: int) -> Set[int]:
         return self._keyframes.get(joint_id, set())

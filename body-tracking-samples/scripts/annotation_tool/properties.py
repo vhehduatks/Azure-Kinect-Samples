@@ -146,6 +146,8 @@ class JointTreeWidget(QTreeWidget):
         u, v, conf, vis = self.model.get_joint_2d(frame, joint_id)
         item.setText(self._COL_CONF, str(conf))
         item.setCheckState(self._COL_VIS, Qt.Checked if vis else Qt.Unchecked)
+        is_kf = frame in self.model.get_keyframes(joint_id)
+        item.setCheckState(self._COL_KF, Qt.Checked if is_kf else Qt.Unchecked)
         item.setText(self._COL_U, f"{u:.1f}")
         item.setText(self._COL_V, f"{v:.1f}")
         self._updating = False

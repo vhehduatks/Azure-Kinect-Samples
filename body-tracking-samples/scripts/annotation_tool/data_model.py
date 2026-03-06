@@ -15,6 +15,7 @@ from PySide6.QtCore import QObject, Signal
 from PySide6.QtGui import QPixmap
 
 from .constants import EgoDataset, HMDData, NUM_JOINTS
+from .ik_solver import ik_backproject
 
 
 # ======================================================================
@@ -295,11 +296,11 @@ class AnnotationModel(QObject):
                 edit.visible = bool(0 <= u < img_w and 0 <= v < img_h)
             else:
                 edit.visible = False
-        self._backproject_3d(frame, joint_id, edit)
+        self._ik_backproject_3d(frame, joint_id, edit)
         self._mark_dirty(frame)
         self.joint_moved.emit(frame, joint_id)
 
-    def _backproject_3d(self, frame: int, joint_id: int, edit: JointEdit):
+    def _pinhole_backproject_3d(self, frame: int, joint_id: int, edit: JointEdit):
         """Compute back-projected 3D from edited (u, v) using original depth.
 
         Uses the pinhole model inverse:
@@ -322,6 +323,63 @@ class AnnotationModel(QObject):
         edit.x3d = (edit.u - cx) * float(z) / fx
         edit.y3d = (edit.v - cy) * float(z) / fy
         edit.z3d = float(z)
+
+    def _ik_backproject_3d(self, frame: int, joint_id: int, edit: JointEdit):
+        """IK-aware back-projection: ray-sphere + FABRIK.
+
+        Preserves bone lengths to the parent joint and adjusts intermediate
+        joints in the kinematic chain via FABRIK.  Falls back to pinhole
+        if intrinsics or 3D data are unavailable.
+        """
+        if self._intrinsics is None or self._dataset is None:
+            edit.x3d = edit.y3d = edit.z3d = None
+            return
+
+        fx, fy, cx, cy = self._intrinsics
+
+        def get_3d(jid: int):
+            """Get effective (edited or extrinsic-adjusted) 3D for a joint."""
+            result = self.get_effective_joint_3d(frame, jid)
+            if result is None:
+                return None
+            return (result[0], result[1], result[2])
+
+        def get_original_3d(jid: int):
+            """Get original (dataset) 3D for a joint."""
+            joints_3d = self._dataset.get_joints_3d(frame)
+            if joints_3d is None or jid >= len(joints_3d):
+                return None
+            x, y, z, conf = joints_3d[jid]
+            if z < 1:
+                return None
+            return (float(x), float(y), float(z))
+
+        updates = ik_backproject(
+            joint_id, edit.u, edit.v,
+            fx, fy, cx, cy,
+            get_3d, get_original_3d,
+        )
+
+        if not updates:
+            # IK couldn't solve -- fall back to pinhole
+            self._pinhole_backproject_3d(frame, joint_id, edit)
+            return
+
+        # Apply the dragged joint's result
+        if joint_id in updates:
+            pos = updates[joint_id]
+            edit.x3d = float(pos[0])
+            edit.y3d = float(pos[1])
+            edit.z3d = float(pos[2])
+
+        # Apply intermediate joint adjustments (3D only, no u/v change)
+        for jid, pos in updates.items():
+            if jid == joint_id:
+                continue
+            intermediate_edit = self._ensure_edit(frame, jid)
+            intermediate_edit.x3d = float(pos[0])
+            intermediate_edit.y3d = float(pos[1])
+            intermediate_edit.z3d = float(pos[2])
 
     def set_joint_visible(self, frame: int, joint_id: int, visible: bool):
         edit = self._ensure_edit(frame, joint_id)
@@ -353,6 +411,63 @@ class AnnotationModel(QObject):
                 if not self.is_dirty:
                     self.dirty_changed.emit(False)
             self.joint_moved.emit(frame, joint_id)
+
+    # ------------------------------------------------------------------
+    # 3D snapshot/restore (for undo of IK side effects)
+    # ------------------------------------------------------------------
+    def snapshot_edits_3d(self, frame: int) -> Tuple[Dict[int, Tuple[float, float, float]], Set[int]]:
+        """Capture current 3D edit state at *frame* for later restore.
+
+        Returns (values, existing_jids) where:
+        - values: {jid: (x3d, y3d, z3d)} for all JointEdits at frame
+        - existing_jids: set of jids that had edits before this call
+        """
+        values: Dict[int, Tuple[float, float, float]] = {}
+        existing: Set[int] = set()
+        if frame in self._edits:
+            for jid, edit in self._edits[frame].items():
+                existing.add(jid)
+                if edit.x3d is not None:
+                    values[jid] = (edit.x3d, edit.y3d, edit.z3d)
+        return values, existing
+
+    def restore_edits_3d(self, frame: int,
+                         values: Dict[int, Tuple[float, float, float]],
+                         existing_jids: Set[int]):
+        """Restore 3D edit state from a previous snapshot.
+
+        - Deletes JointEdit entries NOT in existing_jids (IK-created side effects)
+        - Restores x3d/y3d/z3d for entries that existed before
+        - Emits joint_moved for changed joints
+        """
+        if frame not in self._edits:
+            return
+
+        # Collect jids to delete (IK-created entries not in original set)
+        to_delete = [jid for jid in self._edits[frame] if jid not in existing_jids]
+        changed_jids = list(to_delete)
+
+        for jid in to_delete:
+            del self._edits[frame][jid]
+
+        # Restore 3D values for entries that existed before
+        for jid in list(self._edits[frame].keys()):
+            edit = self._edits[frame][jid]
+            if jid in values:
+                old = values[jid]
+                if (edit.x3d != old[0] or edit.y3d != old[1] or edit.z3d != old[2]):
+                    edit.x3d, edit.y3d, edit.z3d = old
+                    changed_jids.append(jid)
+            elif edit.x3d is not None:
+                edit.x3d = edit.y3d = edit.z3d = None
+                changed_jids.append(jid)
+
+        # Clean up empty frame dict
+        if not self._edits[frame]:
+            del self._edits[frame]
+
+        for jid in changed_jids:
+            self.joint_moved.emit(frame, jid)
 
     # ------------------------------------------------------------------
     # Frame-level queries (for timeline color bar)
@@ -400,6 +515,15 @@ class AnnotationModel(QObject):
                         or edit.visible != orig[3]):
                     has_real_change = True
                     break
+                # Check 3D-only changes (IK intermediate joints)
+                if edit.x3d is not None:
+                    orig_3d = self._dataset.get_joints_3d(frame_idx)
+                    if orig_3d is not None and jid < len(orig_3d):
+                        if (abs(edit.x3d - orig_3d[jid, 0]) > 0.01
+                                or abs(edit.y3d - orig_3d[jid, 1]) > 0.01
+                                or abs(edit.z3d - orig_3d[jid, 2]) > 0.01):
+                            has_real_change = True
+                            break
             if not has_real_change:
                 continue
 

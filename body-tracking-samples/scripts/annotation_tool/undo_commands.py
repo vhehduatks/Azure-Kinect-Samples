@@ -16,12 +16,19 @@ class MoveJointCommand(QUndoCommand):
         self._jid = joint_id
         self._old_u, self._old_v = old_u, old_v
         self._new_u, self._new_v = new_u, new_v
+        self._undo_snapshot = None  # captured on first redo()
 
     def redo(self):
+        # Snapshot 3D state before IK runs
+        self._undo_snapshot = self._model.snapshot_edits_3d(self._frame)
         self._model.set_joint_2d(self._frame, self._jid, self._new_u, self._new_v)
 
     def undo(self):
         self._model.set_joint_2d(self._frame, self._jid, self._old_u, self._old_v)
+        # Restore 3D state to clean up IK side effects
+        if self._undo_snapshot is not None:
+            values, existing = self._undo_snapshot
+            self._model.restore_edits_3d(self._frame, values, existing)
 
 
 class ToggleVisibilityCommand(QUndoCommand):
@@ -123,14 +130,19 @@ class MoveMultipleJointsCommand(QUndoCommand):
         self._model = model
         self._frame = frame
         self._moves = moves
+        self._undo_snapshot = None
 
     def redo(self):
+        self._undo_snapshot = self._model.snapshot_edits_3d(self._frame)
         for jid, _old_u, _old_v, new_u, new_v in self._moves:
             self._model.set_joint_2d(self._frame, jid, new_u, new_v)
 
     def undo(self):
         for jid, old_u, old_v, _new_u, _new_v in reversed(self._moves):
             self._model.set_joint_2d(self._frame, jid, old_u, old_v)
+        if self._undo_snapshot is not None:
+            values, existing = self._undo_snapshot
+            self._model.restore_edits_3d(self._frame, values, existing)
 
 
 class BatchMoveCommand(QUndoCommand):
@@ -146,11 +158,16 @@ class BatchMoveCommand(QUndoCommand):
         self._model = model
         self._jid = joint_id
         self._moves = moves
+        self._undo_snapshots = {}  # {frame: (values, existing)}
 
     def redo(self):
         for frame, _old_u, _old_v, new_u, new_v in self._moves:
+            self._undo_snapshots[frame] = self._model.snapshot_edits_3d(frame)
             self._model.set_joint_2d(frame, self._jid, new_u, new_v)
 
     def undo(self):
         for frame, old_u, old_v, _new_u, _new_v in reversed(self._moves):
             self._model.set_joint_2d(frame, self._jid, old_u, old_v)
+            if frame in self._undo_snapshots:
+                values, existing = self._undo_snapshots[frame]
+                self._model.restore_edits_3d(frame, values, existing)

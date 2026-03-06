@@ -74,6 +74,36 @@ def ray_sphere_intersect(
     return (t1, t2)
 
 
+def _depth_constrained_sphere_point(
+    center: np.ndarray,
+    radius: float,
+    target_z: float,
+    hint: np.ndarray,
+) -> Optional[np.ndarray]:
+    """Find a point on the sphere at depth *target_z*, closest to *hint*.
+
+    The set of points on sphere(center, radius) with z = target_z is a circle
+    in the XY plane.  If target_z is out of the sphere's Z range, return None.
+    """
+    dz = target_z - center[2]
+    r2 = radius * radius - dz * dz
+    if r2 < 0:
+        return None  # target_z outside sphere
+    r_circle = math.sqrt(r2)
+    # Pick point on the circle closest to hint's XY projection
+    dx = hint[0] - center[0]
+    dy = hint[1] - center[1]
+    n = math.sqrt(dx * dx + dy * dy)
+    if n < 1e-10:
+        # hint is directly above/below center -- pick +X direction
+        return np.array([center[0] + r_circle, center[1], target_z])
+    return np.array([
+        center[0] + dx / n * r_circle,
+        center[1] + dy / n * r_circle,
+        target_z,
+    ])
+
+
 def closest_point_on_sphere_to_ray(
     origin: np.ndarray,
     direction: np.ndarray,
@@ -83,13 +113,26 @@ def closest_point_on_sphere_to_ray(
 ) -> np.ndarray:
     """Fallback when the ray misses the sphere: project radially to surface.
 
-    1. Find the point on the ray closest to *center*.
-    2. Project that point radially onto the sphere surface.
-    3. If the ray passes through *center* (degenerate), use *hint* direction.
+    Prefers a depth-constrained point (same Z as *hint*) on the sphere,
+    using the ray's XY at that depth as the reference direction so the
+    result respects the user's 2D drag.
+    Falls back to radial projection if the depth is out of range.
     """
+    target_z = hint[2]
+    # Compute where the ray is at Z = target_z to use as XY reference
+    if abs(direction[2]) > 1e-10:
+        t_at_z = target_z / direction[2]
+        ray_at_z = origin + t_at_z * direction
+    else:
+        ray_at_z = hint  # horizontal ray, use hint as fallback
+
+    dc = _depth_constrained_sphere_point(center, radius, target_z, ray_at_z)
+    if dc is not None:
+        return dc
+
+    # Depth out of range -- fall back to radial projection
     d_dot_d = float(np.dot(direction, direction))
     if d_dot_d < 1e-15:
-        # Zero-length direction -- just use hint
         diff = hint - center
         n = np.linalg.norm(diff)
         if n < 1e-10:
@@ -101,7 +144,6 @@ def closest_point_on_sphere_to_ray(
     diff = closest - center
     n = np.linalg.norm(diff)
     if n < 1e-10:
-        # Ray goes through center -- use hint to pick a direction
         diff = hint - center
         n = np.linalg.norm(diff)
         if n < 1e-10:
@@ -125,8 +167,8 @@ def ray_sphere_backproject(
 
     1. Build camera ray through (u, v).
     2. Intersect with sphere(parent_3d, bone_length).
-    3. Pick intersection closest to original_3d (forward t only).
-    4. No intersection -> closest_point_on_sphere_to_ray fallback.
+    3. Pick intersection whose depth (Z) best matches original_3d.
+    4. No intersection -> depth-constrained sphere fallback.
     5. Zero bone length -> return parent position.
     """
     if bone_length < 1e-3:
@@ -150,8 +192,10 @@ def ray_sphere_backproject(
         if t2 > 0:
             candidates.append(origin + t2 * direction)
         if candidates:
-            # Pick the one closest to the original 3D position
-            best = min(candidates, key=lambda p: float(np.sum((p - original_3d) ** 2)))
+            # Pick the one whose depth (Z) best matches the pre-edit position.
+            # Depth is the most ambiguous dimension in 2D→3D back-projection;
+            # preserving it keeps the joint on the correct side of the sphere.
+            best = min(candidates, key=lambda p: abs(p[2] - original_3d[2]))
             return best
 
     # No valid intersection -- snap to closest point on sphere surface
@@ -340,14 +384,36 @@ def ik_backproject(
     positions = np.array(chain_positions)
     solved = fabrik(positions, end_effector_3d, bone_lengths)
 
-    # Collect results: only joints that actually moved
+    # End-effector displacement — used to cap intermediate drift
+    ee_disp = float(np.linalg.norm(solved[-1] - chain_positions[-1]))
+
+    # Collect results: only joints that actually moved.
+    # For intermediate joints (not the dragged end-effector), clamp
+    # displacement to at most the end-effector's displacement.  This
+    # keeps intermediates close to their previous positions — they can
+    # move proportionally but never more than the dragged joint itself.
     for i, jid in enumerate(chain):
         if i == 0:
             continue  # anchor is pinned, never moves
         old_pos = chain_positions[i]
         new_pos = solved[i]
-        dist = float(np.linalg.norm(new_pos - old_pos))
-        if dist > 0.01:  # 0.01mm threshold
-            result[jid] = new_pos
+        is_end_effector = (i == len(chain) - 1)
+
+        if is_end_effector:
+            # Always accept the end-effector position
+            dist = float(np.linalg.norm(new_pos - old_pos))
+            if dist > 0.01:
+                result[jid] = new_pos
+        else:
+            # Intermediate: clamp to ee_disp
+            diff = new_pos - old_pos
+            dist = float(np.linalg.norm(diff))
+            if dist <= 0.01:
+                continue
+            if dist <= ee_disp:
+                result[jid] = new_pos
+            else:
+                # Scale back toward previous position
+                result[jid] = old_pos + diff * (ee_disp / dist)
 
     return result

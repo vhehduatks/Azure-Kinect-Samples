@@ -543,14 +543,7 @@ class AnnotationModel(QObject):
                     edit = self._edits[frame_idx][jid]
                     entry["u"] = round(edit.u, 2)
                     entry["v"] = round(edit.v, 2)
-                    # Recalculate visibility from image bounds
-                    conf = entry.get("confidence", 0)
-                    if conf > 0 and img_w > 0:
-                        entry["visible"] = bool(
-                            0 <= edit.u < img_w and 0 <= edit.v < img_h
-                        )
-                    else:
-                        entry["visible"] = False
+                    entry["visible"] = edit.visible
                 if jid in self._pruned_joints:
                     entry["visible"] = False
             data["skeleton_2d"] = skel_2d

@@ -119,6 +119,7 @@ class AnnotationModel(QObject):
         )  # (rx, ry, rz, tx, ty, tz)
         self._intrinsics: Optional[Tuple[float, float, float, float]] = None  # (fx, fy, cx, cy)
         self._image_size: Optional[Tuple[int, int]] = None  # (width, height)
+        self._update_3d: bool = True  # whether joint drags update 3D via IK
 
     # ------------------------------------------------------------------
     # Properties
@@ -165,6 +166,14 @@ class AnnotationModel(QObject):
     @property
     def is_dirty(self) -> bool:
         return len(self._dirty_frames) > 0
+
+    @property
+    def update_3d(self) -> bool:
+        return self._update_3d
+
+    @update_3d.setter
+    def update_3d(self, value: bool):
+        self._update_3d = value
 
     # ------------------------------------------------------------------
     # Head-joint pruning
@@ -296,7 +305,8 @@ class AnnotationModel(QObject):
                 edit.visible = bool(0 <= u < img_w and 0 <= v < img_h)
             else:
                 edit.visible = False
-        self._ik_backproject_3d(frame, joint_id, edit)
+        if self._update_3d:
+            self._ik_backproject_3d(frame, joint_id, edit)
         self._mark_dirty(frame)
         self.joint_moved.emit(frame, joint_id)
 

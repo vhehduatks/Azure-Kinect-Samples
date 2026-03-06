@@ -104,6 +104,14 @@ class AnnotationMainWindow(QMainWindow):
         right_layout.setContentsMargins(2, 2, 2, 2)
         right_layout.addWidget(self.joint_tree, stretch=1)
         right_layout.addWidget(self.hmd_panel, stretch=0)
+        self._update_3d_checkbox = QCheckBox("Update 3D on drag")
+        self._update_3d_checkbox.setChecked(True)
+        self._update_3d_checkbox.setToolTip(
+            "When checked, dragging a joint in the ego view also updates\n"
+            "its 3D position via IK back-projection (bone-length preserving).\n"
+            "Uncheck to modify only the 2D annotation."
+        )
+        right_layout.addWidget(self._update_3d_checkbox, stretch=0)
         self.prune_checkbox = QCheckBox("Prune Head Joints (26\u201331)")
         self.prune_checkbox.setToolTip(
             "Hide head/face joints (HEAD, NOSE, EYE_LEFT, EYE_RIGHT, EAR_LEFT, EAR_RIGHT)\n"
@@ -128,6 +136,11 @@ class AnnotationMainWindow(QMainWindow):
         self.joint_tree.keyframe_toggled.connect(self._on_keyframe_toggled)
         self.model.dirty_changed.connect(self._update_title)
         self.model.session_loaded.connect(self._update_title)
+
+        # Update 3D toggle
+        self._update_3d_checkbox.toggled.connect(
+            lambda on: setattr(self.model, 'update_3d', on)
+        )
 
         # Head-joint pruning
         self.prune_checkbox.toggled.connect(lambda on: self.model.set_pruning(on))

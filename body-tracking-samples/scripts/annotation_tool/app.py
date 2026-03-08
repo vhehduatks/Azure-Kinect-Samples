@@ -88,7 +88,7 @@ class AnnotationMainWindow(QMainWindow):
         self._interp_btn = QPushButton("Interpolate")
         self._interp_btn.setEnabled(False)
         self._interp_btn.setToolTip(
-            "Interpolate selected joint(s) between keyframes (Ctrl+I)"
+            "Interpolate selected joint(s) between keyframes (I)"
         )
         self._interp_btn.setFixedWidth(100)
         self._interp_btn.clicked.connect(self._apply_interpolation_auto)
@@ -199,7 +199,7 @@ class AnnotationMainWindow(QMainWindow):
         edit_menu.addAction("Toggle &Keyframe", self._toggle_keyframe, QKeySequence("K"))
         edit_menu.addAction("Toggle &Visibility", self._toggle_visibility, QKeySequence("V"))
         edit_menu.addSeparator()
-        edit_menu.addAction("Apply &Interpolation...", self._apply_interpolation, QKeySequence("Ctrl+I"))
+        edit_menu.addAction("Apply &Interpolation...", self._apply_interpolation)
 
         # View
         view_menu = mb.addMenu("&View")
@@ -221,6 +221,10 @@ class AnnotationMainWindow(QMainWindow):
         QShortcut(QKeySequence("A"), self).activated.connect(self._prev_frame)
         QShortcut(QKeySequence("D"), self).activated.connect(self._next_frame)
         QShortcut(QKeySequence("Escape"), self).activated.connect(self._deselect_all)
+        QShortcut(QKeySequence("I"), self).activated.connect(self._apply_interpolation_auto)
+        QShortcut(QKeySequence("R"), self).activated.connect(
+            self.extrinsic_panel._on_apply_range
+        )
 
     # ==================================================================
     # Navigation

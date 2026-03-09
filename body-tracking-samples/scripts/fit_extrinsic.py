@@ -36,6 +36,10 @@ Usage:
 
     # From model predictions (hierarchical, auto-discovers predictions/ dirs):
     python fit_extrinsic.py <dataset_root> --predictions
+
+    # Per-session fitting (separate delta per session):
+    python fit_extrinsic.py <dataset_root> --predictions --per-session
+    python fit_extrinsic.py <dataset_root> --predictions --per-session --apply
 """
 
 import argparse
@@ -94,6 +98,16 @@ def _project_pinhole(x: float, y: float, z: float,
 # ------------------------------------------------------------------
 # Dataset discovery (reused from apply_avg_offset.py)
 # ------------------------------------------------------------------
+
+def _session_label(ann_dir_str: str, source_dir: str) -> str:
+    """Short label for a session annotations dir, for display."""
+    try:
+        rel = Path(ann_dir_str).relative_to(Path(source_dir))
+        parts = rel.parts
+        return "/".join(parts[:2]) if len(parts) >= 2 else str(rel)
+    except ValueError:
+        return str(Path(ann_dir_str).name)
+
 
 def discover_annotations_dirs(dataset_root: str) -> List[Path]:
     """Find all annotations/ dirs under <dataset_root>/<participant>/<session>/ego_dataset/."""
@@ -504,6 +518,11 @@ def main():
         "--min-pred-confidence", type=float, default=0.5,
         help="Minimum prediction confidence for correspondences (default: 0.5)",
     )
+    parser.add_argument(
+        "--per-session", action="store_true",
+        help="Fit a separate 6DOF delta per session instead of one global delta. "
+        "Accounts for helmet re-wearing between sessions.",
+    )
     args = parser.parse_args()
 
     source_dir = args.source
@@ -613,7 +632,8 @@ def main():
     # -----------------------------------------------------------
     # Step 3: Collect correspondences
     # -----------------------------------------------------------
-    all_correspondences: List[Tuple[np.ndarray, np.ndarray]] = []
+    # Keyed by ann_dir string for per-session mode, or "_global" for global mode.
+    session_correspondences: Dict[str, List[Tuple[np.ndarray, np.ndarray]]] = {}
     per_joint_counts: Dict[int, int] = {jid: 0 for jid in range(NUM_JOINTS)}
 
     if use_predictions:
@@ -624,21 +644,18 @@ def main():
             pairs = collect_correspondences_from_predictions(
                 ann_dir, p_dir, min_pred_confidence=args.min_pred_confidence,
             )
-            if pairs:
-                if not args.flat:
-                    rel = ann_dir.relative_to(Path(source_dir))
-                    parts = rel.parts
-                    label = "/".join(parts[:2]) if len(parts) >= 2 else str(rel)
-                    print("  [%s] %d pairs" % (label, len(pairs)))
-                all_correspondences.extend(pairs)
-                # Count per-joint
-                for p3d, uv in pairs:
-                    # Identify joint by finding match -- use a simpler approach:
-                    pass  # counts done below
+            if not pairs:
+                continue
+            if not args.flat:
+                rel = ann_dir.relative_to(Path(source_dir))
+                parts = rel.parts
+                label = "/".join(parts[:2]) if len(parts) >= 2 else str(rel)
+                print("  [%s] %d pairs" % (label, len(pairs)))
 
-        # Re-count per-joint from predictions
-        for ann_dir in ann_dirs:
-            p_dir = pred_dirs_map[str(ann_dir)]
+            key = str(ann_dir) if args.per_session else "_global"
+            session_correspondences.setdefault(key, []).extend(pairs)
+
+            # Per-joint counts
             pred_files = sorted(p_dir.glob("frame_*.json"))
             for pred_path in pred_files:
                 ann_path = ann_dir / pred_path.name
@@ -673,7 +690,9 @@ def main():
                     parts = rel.parts
                     label = "/".join(parts[:2]) if len(parts) >= 2 else str(rel)
                     print("  [%s] %d pairs" % (label, len(pairs)))
-                all_correspondences.extend(pairs)
+
+                key = str(ann_dir) if args.per_session else "_global"
+                session_correspondences.setdefault(key, []).extend(pairs)
 
             # Count per-joint for reporting
             json_files = sorted(ann_dir.glob("frame_*.json"))
@@ -699,14 +718,14 @@ def main():
                     if abs(du) >= 0.5 or abs(dv) >= 0.5:
                         per_joint_counts[jid] += 1
 
-    if not all_correspondences:
+    total_pairs = sum(len(v) for v in session_correspondences.values())
+    if total_pairs == 0:
         kind = "prediction" if use_predictions else "edited"
         print("No %s correspondences found." % kind)
         return
 
-    n_corr = len(all_correspondences)
     n_used_joints = sum(1 for c in per_joint_counts.values() if c > 0)
-    print("\nTotal: %d correspondences across %d joint types" % (n_corr, n_used_joints))
+    print("\nTotal: %d correspondences across %d joint types" % (total_pairs, n_used_joints))
 
     # Show per-joint breakdown
     print("\n%3s %-18s %5s" % ("ID", "Joint", "N"))
@@ -718,48 +737,96 @@ def main():
     print()
 
     # -----------------------------------------------------------
-    # Step 4: Optimize 6DOF delta
+    # Step 4: Optimize 6DOF delta (global or per-session)
     # -----------------------------------------------------------
-    print("Optimizing 6DOF extrinsic delta...")
-    pts_3d = np.array([p[0] for p in all_correspondences])  # (N, 3)
-    pts_2d = np.array([p[1] for p in all_correspondences])  # (N, 2)
+    # session_results: key -> (params, rms_before, rms_after, n_pairs)
+    session_results: Dict[str, Tuple[np.ndarray, float, float, int]] = {}
 
-    params, rms_before, rms_after = fit_extrinsic_delta(
-        pts_3d, pts_2d, fx, fy, cx, cy
-    )
+    if args.per_session:
+        print("Optimizing per-session 6DOF deltas (%d sessions)..."
+              % len(session_correspondences))
+        print()
+        for key in sorted(session_correspondences.keys()):
+            corr = session_correspondences[key]
+            if len(corr) < 6:
+                print("  [%s] skipped (%d pairs, need >= 6)" % (_session_label(key, source_dir), len(corr)))
+                continue
+            pts_3d = np.array([p[0] for p in corr])
+            pts_2d = np.array([p[1] for p in corr])
+            params, rms_before, rms_after = fit_extrinsic_delta(
+                pts_3d, pts_2d, fx, fy, cx, cy
+            )
+            session_results[key] = (params, rms_before, rms_after, len(corr))
+            rx, ry, rz, tx, ty, tz = params
+            print("  [%s] %d pairs | RMS %.1f -> %.1f px | "
+                  "r=(%.3f, %.3f, %.3f) t=(%.1f, %.1f, %.1f)"
+                  % (_session_label(key, source_dir), len(corr),
+                     rms_before, rms_after, rx, ry, rz, tx, ty, tz))
 
-    rx, ry, rz, tx, ty, tz = params
+        if not session_results:
+            print("No sessions had enough correspondences to fit.")
+            return
 
-    print("\n" + "=" * 60)
-    print("FITTED EXTRINSIC DELTA")
-    print("=" * 60)
-    print("  rx = %+.4f deg" % rx)
-    print("  ry = %+.4f deg" % ry)
-    print("  rz = %+.4f deg" % rz)
-    print("  tx = %+.2f mm" % tx)
-    print("  ty = %+.2f mm" % ty)
-    print("  tz = %+.2f mm" % tz)
-    print()
-    print("  RMS reprojection error:")
-    print("    Before: %.2f px" % rms_before)
-    print("    After:  %.2f px" % rms_after)
-    print("    Reduction: %.1f%%" % (100.0 * (1.0 - rms_after / rms_before) if rms_before > 0 else 0))
-    print("=" * 60)
+        # Summary statistics
+        all_params = np.array([r[0] for r in session_results.values()])
+        all_rms_before = [r[1] for r in session_results.values()]
+        all_rms_after = [r[2] for r in session_results.values()]
+        print("\n" + "=" * 60)
+        print("PER-SESSION SUMMARY (%d sessions)" % len(session_results))
+        print("=" * 60)
+        labels = ["rx(deg)", "ry(deg)", "rz(deg)", "tx(mm)", "ty(mm)", "tz(mm)"]
+        print("  %12s %8s %8s %8s" % ("param", "mean", "std", "range"))
+        for i, lbl in enumerate(labels):
+            vals = all_params[:, i]
+            print("  %12s %+8.3f %8.3f  [%+.3f, %+.3f]"
+                  % (lbl, vals.mean(), vals.std(), vals.min(), vals.max()))
+        print()
+        print("  RMS reprojection error:")
+        print("    Before: %.2f px (mean), %.2f px (median)"
+              % (np.mean(all_rms_before), np.median(all_rms_before)))
+        print("    After:  %.2f px (mean), %.2f px (median)"
+              % (np.mean(all_rms_after), np.median(all_rms_after)))
+        print("=" * 60)
+    else:
+        print("Optimizing 6DOF extrinsic delta...")
+        all_corr = session_correspondences["_global"]
+        pts_3d = np.array([p[0] for p in all_corr])
+        pts_2d = np.array([p[1] for p in all_corr])
 
-    # Sanity checks
-    if abs(rx) > 10 or abs(ry) > 10 or abs(rz) > 10:
-        print("\nWARNING: Large rotation (>10 deg) -- result may be unreliable.")
-    if abs(tx) > 500 or abs(ty) > 500 or abs(tz) > 500:
-        print("\nWARNING: Large translation (>500mm) -- result may be unreliable.")
+        params, rms_before, rms_after = fit_extrinsic_delta(
+            pts_3d, pts_2d, fx, fy, cx, cy
+        )
+        session_results["_global"] = (params, rms_before, rms_after, len(all_corr))
+
+        rx, ry, rz, tx, ty, tz = params
+
+        print("\n" + "=" * 60)
+        print("FITTED EXTRINSIC DELTA")
+        print("=" * 60)
+        print("  rx = %+.4f deg" % rx)
+        print("  ry = %+.4f deg" % ry)
+        print("  rz = %+.4f deg" % rz)
+        print("  tx = %+.2f mm" % tx)
+        print("  ty = %+.2f mm" % ty)
+        print("  tz = %+.2f mm" % tz)
+        print()
+        print("  RMS reprojection error:")
+        print("    Before: %.2f px" % rms_before)
+        print("    After:  %.2f px" % rms_after)
+        print("    Reduction: %.1f%%" % (100.0 * (1.0 - rms_after / rms_before) if rms_before > 0 else 0))
+        print("=" * 60)
+
+        # Sanity checks
+        if abs(rx) > 10 or abs(ry) > 10 or abs(rz) > 10:
+            print("\nWARNING: Large rotation (>10 deg) -- result may be unreliable.")
+        if abs(tx) > 500 or abs(ty) > 500 or abs(tz) > 500:
+            print("\nWARNING: Large translation (>500mm) -- result may be unreliable.")
 
     # -----------------------------------------------------------
     # Step 5: Optionally apply to target
     # -----------------------------------------------------------
     if args.apply:
-        R = _euler_to_rotation_matrix(rx, ry, rz)
-        t_vec = np.array([tx, ty, tz], dtype=np.float64)
         mode = "2D + 3D" if args.apply_3d else "2D only"
-
         print("\nTarget: %s" % target_dir)
         print("Applying fitted delta (%s)..." % mode)
 
@@ -773,7 +840,6 @@ def main():
             print("Applying to %d annotation dirs..." % len(tgt_dirs))
 
         # Need intrinsics for the target too (for differential projection)
-        # Re-estimate from target if different from source
         if target_dir != source_dir:
             print("Estimating target intrinsics...")
             tgt_intrinsics = None
@@ -793,6 +859,20 @@ def main():
 
         total_modified = 0
         for ann_dir in tgt_dirs:
+            # Pick the right delta for this annotations dir
+            ann_key = str(ann_dir)
+            if ann_key in session_results:
+                params = session_results[ann_key][0]
+            elif "_global" in session_results:
+                params = session_results["_global"][0]
+            else:
+                # Per-session mode but this session wasn't in source -- skip
+                continue
+
+            rx, ry, rz, tx, ty, tz = params
+            R = _euler_to_rotation_matrix(rx, ry, rz)
+            t_vec = np.array([tx, ty, tz], dtype=np.float64)
+
             n = apply_delta_to_dir(
                 ann_dir, R, t_vec,
                 tgt_fx, tgt_fy, tgt_cx, tgt_cy,

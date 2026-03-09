@@ -40,6 +40,10 @@ Usage:
     # Per-session fitting (separate delta per session):
     python fit_extrinsic.py <dataset_root> --predictions --per-session
     python fit_extrinsic.py <dataset_root> --predictions --per-session --apply
+
+    # Per-frame refinement (session fit + regularized per-frame adjustment):
+    python fit_extrinsic.py <dataset_root> --predictions --per-frame
+    python fit_extrinsic.py <dataset_root> --predictions --per-frame --frame-reg 10.0 --apply
 """
 
 import argparse
@@ -315,6 +319,103 @@ def collect_correspondences_from_predictions(
     return pairs
 
 
+def collect_correspondences_per_frame(
+    annotations_dir: Path,
+    predictions_dir: Path,
+    min_pred_confidence: float = 0.5,
+) -> Dict[str, List[Tuple[np.ndarray, np.ndarray]]]:
+    """Collect correspondences grouped by frame filename.
+
+    Returns dict: frame_filename (e.g. "frame_000000.json") ->
+        list of (P_3d [3,], uv_pred [2,])
+    """
+    per_frame: Dict[str, List[Tuple[np.ndarray, np.ndarray]]] = {}
+
+    pred_files = sorted(predictions_dir.glob("frame_*.json"))
+    for pred_path in pred_files:
+        ann_path = annotations_dir / pred_path.name
+        if not ann_path.exists():
+            continue
+
+        with open(ann_path, encoding="utf-8") as f:
+            ann_data = json.load(f)
+        with open(pred_path, encoding="utf-8") as f:
+            pred_data = json.load(f)
+
+        skel_3d = {e["joint_id"]: e for e in ann_data.get("skeleton_3d", [])}
+        skel_2d_pred = {e["joint_id"]: e
+                        for e in pred_data.get("skeleton_2d_predicted", [])}
+
+        frame_pairs: List[Tuple[np.ndarray, np.ndarray]] = []
+        for jid in range(NUM_JOINTS):
+            if jid not in skel_3d or jid not in skel_2d_pred:
+                continue
+            j3 = skel_3d[jid]
+            j2p = skel_2d_pred[jid]
+            if j3.get("confidence", 0) < 2:
+                continue
+            if j2p.get("confidence", 0) < min_pred_confidence:
+                continue
+            if j3["z"] < 100:
+                continue
+            p3d = np.array([j3["x"], j3["y"], j3["z"]], dtype=np.float64)
+            uv_pred = np.array([j2p["u"], j2p["v"]], dtype=np.float64)
+            frame_pairs.append((p3d, uv_pred))
+
+        if frame_pairs:
+            per_frame[pred_path.name] = frame_pairs
+
+    return per_frame
+
+
+def collect_correspondences_per_frame_from_edits(
+    annotations_dir: Path,
+) -> Dict[str, List[Tuple[np.ndarray, np.ndarray]]]:
+    """Collect correspondences grouped by frame filename from .bak/.json diffs."""
+    per_frame: Dict[str, List[Tuple[np.ndarray, np.ndarray]]] = {}
+
+    json_files = sorted(annotations_dir.glob("frame_*.json"))
+    for json_path in json_files:
+        bak_path = Path(str(json_path) + ".bak")
+        if not bak_path.exists():
+            continue
+
+        with open(bak_path, encoding="utf-8") as f:
+            original = json.load(f)
+        with open(json_path, encoding="utf-8") as f:
+            edited = json.load(f)
+
+        orig_3d = {e["joint_id"]: e for e in original.get("skeleton_3d", [])}
+        orig_2d = {e["joint_id"]: e for e in original.get("skeleton_2d", [])}
+        edit_2d = {e["joint_id"]: e for e in edited.get("skeleton_2d", [])}
+
+        frame_pairs: List[Tuple[np.ndarray, np.ndarray]] = []
+        for jid in range(NUM_JOINTS):
+            if jid not in orig_3d or jid not in orig_2d or jid not in edit_2d:
+                continue
+            o3 = orig_3d[jid]
+            o2 = orig_2d[jid]
+            e2 = edit_2d[jid]
+            if o3.get("confidence", 0) < 2 or o2.get("confidence", 0) < 2:
+                continue
+            if e2.get("confidence", 0) < 2:
+                continue
+            if o3["z"] < 100:
+                continue
+            du = e2["u"] - o2["u"]
+            dv = e2["v"] - o2["v"]
+            if abs(du) < 0.5 and abs(dv) < 0.5:
+                continue
+            p3d = np.array([o3["x"], o3["y"], o3["z"]], dtype=np.float64)
+            uv_ann = np.array([e2["u"], e2["v"]], dtype=np.float64)
+            frame_pairs.append((p3d, uv_ann))
+
+        if frame_pairs:
+            per_frame[json_path.name] = frame_pairs
+
+    return per_frame
+
+
 # ------------------------------------------------------------------
 # Optimization
 # ------------------------------------------------------------------
@@ -386,6 +487,71 @@ def fit_extrinsic_delta(
     rms_after = np.sqrt(np.mean(result.fun ** 2))
 
     return params, rms_before, rms_after
+
+
+# Regularization scale: 1 deg rotation ≈ 10mm translation in cost
+_REG_SCALES = np.array([1.0, 1.0, 1.0, 0.1, 0.1, 0.1], dtype=np.float64)
+
+
+def compute_residuals_regularized(
+    params: np.ndarray,
+    points_3d: np.ndarray,
+    points_2d: np.ndarray,
+    fx: float, fy: float, cx: float, cy: float,
+    prior_params: np.ndarray,
+    reg_weight: float,
+) -> np.ndarray:
+    """Reprojection residuals + L2 regularization toward a prior.
+
+    The regularization appends 6 terms:
+        reg_weight * scale_i * (param_i - prior_i)
+    where scale normalizes so that 1 deg rotation ≈ 10mm translation.
+    """
+    reproj = compute_residuals(params, points_3d, points_2d, fx, fy, cx, cy)
+    reg = reg_weight * _REG_SCALES * (params - prior_params)
+    return np.concatenate([reproj, reg])
+
+
+def fit_frame_deltas(
+    per_frame_corr: Dict[str, List[Tuple[np.ndarray, np.ndarray]]],
+    session_params: np.ndarray,
+    fx: float, fy: float, cx: float, cy: float,
+    reg_weight: float = 5.0,
+    min_joints: int = 4,
+) -> Dict[str, np.ndarray]:
+    """Fit per-frame deltas regularized toward the session delta.
+
+    Args:
+        per_frame_corr: frame_filename -> [(p3d, uv), ...]
+        session_params: [rx, ry, rz, tx, ty, tz] session-level prior
+        reg_weight: regularization strength (higher = closer to session)
+        min_joints: minimum correspondences per frame to attempt fit
+
+    Returns:
+        frame_filename -> params[6].  Frames with too few joints get session_params.
+    """
+    frame_params: Dict[str, np.ndarray] = {}
+
+    for fname, corr in per_frame_corr.items():
+        if len(corr) < min_joints:
+            frame_params[fname] = session_params.copy()
+            continue
+
+        pts_3d = np.array([p[0] for p in corr])
+        pts_2d = np.array([p[1] for p in corr])
+
+        result = least_squares(
+            compute_residuals_regularized,
+            x0=session_params.copy(),
+            args=(pts_3d, pts_2d, fx, fy, cx, cy, session_params, reg_weight),
+            method="lm",
+            ftol=1e-8,
+            xtol=1e-8,
+            max_nfev=1000,
+        )
+        frame_params[fname] = result.x
+
+    return frame_params
 
 
 # ------------------------------------------------------------------
@@ -473,6 +639,86 @@ def apply_delta_to_dir(
     return updated
 
 
+def apply_per_frame_deltas_to_dir(
+    annotations_dir: Path,
+    frame_deltas: Dict[str, np.ndarray],
+    session_params: np.ndarray,
+    fx: float, fy: float, cx: float, cy: float,
+    transform_3d: bool = False,
+    create_backup: bool = True,
+) -> int:
+    """Apply per-frame extrinsic deltas to annotation JSONs.
+
+    Each frame uses its own fitted delta if available, otherwise
+    falls back to the session-level delta.
+    """
+    json_files = sorted(annotations_dir.glob("frame_*.json"))
+    updated = 0
+
+    for json_path in json_files:
+        fname = json_path.name
+        params = frame_deltas.get(fname, session_params)
+        rx, ry, rz, tx, ty, tz = params
+        R = _euler_to_rotation_matrix(rx, ry, rz)
+        t_vec = np.array([tx, ty, tz], dtype=np.float64)
+
+        with open(json_path, encoding="utf-8") as f:
+            data = json.load(f)
+
+        skel_3d = data.get("skeleton_3d", [])
+        skel_2d = data.get("skeleton_2d", [])
+        if not skel_3d:
+            continue
+
+        transform_pairs: Dict[int, Tuple[np.ndarray, np.ndarray]] = {}
+        for entry in skel_3d:
+            jid = entry["joint_id"]
+            orig = np.array([entry["x"], entry["y"], entry["z"]], dtype=np.float64)
+            pt = R @ orig + t_vec
+            transform_pairs[jid] = (orig, pt)
+            if transform_3d:
+                entry["x"] = round(float(pt[0]), 2)
+                entry["y"] = round(float(pt[1]), 2)
+                entry["z"] = round(float(pt[2]), 2)
+
+        changed = False
+        for entry in skel_2d:
+            jid = entry["joint_id"]
+            pair = transform_pairs.get(jid)
+            if pair is None or entry.get("confidence", 0) == 0:
+                continue
+            orig_pt, new_pt = pair
+            if orig_pt[2] <= 0 or new_pt[2] <= 0:
+                continue
+            base_u, base_v = _project_pinhole(
+                orig_pt[0], orig_pt[1], orig_pt[2], fx, fy, cx, cy
+            )
+            proj_u, proj_v = _project_pinhole(
+                new_pt[0], new_pt[1], new_pt[2], fx, fy, cx, cy
+            )
+            new_u = entry["u"] + (proj_u - base_u)
+            new_v = entry["v"] + (proj_v - base_v)
+            if abs(new_u - entry["u"]) > 0.001 or abs(new_v - entry["v"]) > 0.001:
+                entry["u"] = round(new_u, 2)
+                entry["v"] = round(new_v, 2)
+                changed = True
+
+        if changed or transform_3d:
+            if create_backup:
+                bak_path = str(json_path) + ".bak"
+                if not os.path.exists(bak_path):
+                    shutil.copy2(json_path, bak_path)
+            data["skeleton_3d"] = skel_3d
+            data["skeleton_2d"] = skel_2d
+            tmp = str(json_path) + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+            os.replace(tmp, json_path)
+            updated += 1
+
+    return updated
+
+
 # ------------------------------------------------------------------
 # Main
 # ------------------------------------------------------------------
@@ -523,7 +769,22 @@ def main():
         help="Fit a separate 6DOF delta per session instead of one global delta. "
         "Accounts for helmet re-wearing between sessions.",
     )
+    parser.add_argument(
+        "--per-frame", action="store_true",
+        help="Per-frame refinement on top of per-session fitting. "
+        "Each frame gets a small adjustment regularized toward its session delta.",
+    )
+    parser.add_argument(
+        "--frame-reg", type=float, default=5.0,
+        help="Per-frame regularization weight (default: 5.0). "
+        "Higher = frame deltas stay closer to the session average. "
+        "Scale: 1 deg rotation ~ 10mm translation in cost.",
+    )
     args = parser.parse_args()
+
+    # --per-frame implies --per-session
+    if args.per_frame:
+        args.per_session = True
 
     source_dir = args.source
     target_dir = args.target or source_dir
@@ -823,10 +1084,66 @@ def main():
             print("\nWARNING: Large translation (>500mm) -- result may be unreliable.")
 
     # -----------------------------------------------------------
+    # Step 4b: Per-frame refinement (if --per-frame)
+    # -----------------------------------------------------------
+    # per_frame_results: ann_dir_str -> {frame_filename -> params[6]}
+    per_frame_results: Dict[str, Dict[str, np.ndarray]] = {}
+
+    if args.per_frame and session_results:
+        print("\nRefining per-frame deltas (reg_weight=%.1f)..." % args.frame_reg)
+        total_frames = 0
+        total_refined = 0
+
+        for ann_dir in ann_dirs:
+            ann_key = str(ann_dir)
+            if ann_key not in session_results:
+                continue
+            session_params = session_results[ann_key][0]
+
+            # Collect per-frame correspondences
+            if use_predictions:
+                p_dir = pred_dirs_map[ann_key]
+                pf_corr = collect_correspondences_per_frame(
+                    ann_dir, p_dir, min_pred_confidence=args.min_pred_confidence,
+                )
+            else:
+                pf_corr = collect_correspondences_per_frame_from_edits(ann_dir)
+
+            if not pf_corr:
+                continue
+
+            frame_deltas = fit_frame_deltas(
+                pf_corr, session_params, fx, fy, cx, cy,
+                reg_weight=args.frame_reg,
+            )
+            per_frame_results[ann_key] = frame_deltas
+
+            # Stats: how much did frames deviate from session?
+            deviations = []
+            for fname, fp in frame_deltas.items():
+                diff = fp - session_params
+                # Weighted norm: 1 deg ~ 10mm
+                dev = np.sqrt(np.sum((_REG_SCALES * diff) ** 2))
+                deviations.append(dev)
+            n_frames = len(frame_deltas)
+            total_frames += n_frames
+            total_refined += sum(1 for d in deviations if d > 0.01)
+
+            if not args.flat:
+                label = _session_label(ann_key, source_dir)
+                print("  [%s] %d frames, mean deviation=%.3f, max=%.3f"
+                      % (label, n_frames, np.mean(deviations), np.max(deviations)))
+
+        print("Per-frame refinement: %d frames (%d adjusted) across %d sessions"
+              % (total_frames, total_refined, len(per_frame_results)))
+
+    # -----------------------------------------------------------
     # Step 5: Optionally apply to target
     # -----------------------------------------------------------
     if args.apply:
         mode = "2D + 3D" if args.apply_3d else "2D only"
+        if per_frame_results:
+            mode += " per-frame"
         print("\nTarget: %s" % target_dir)
         print("Applying fitted delta (%s)..." % mode)
 
@@ -859,26 +1176,35 @@ def main():
 
         total_modified = 0
         for ann_dir in tgt_dirs:
-            # Pick the right delta for this annotations dir
             ann_key = str(ann_dir)
+
+            # Pick session params for this dir
             if ann_key in session_results:
-                params = session_results[ann_key][0]
+                session_params = session_results[ann_key][0]
             elif "_global" in session_results:
-                params = session_results["_global"][0]
+                session_params = session_results["_global"][0]
             else:
-                # Per-session mode but this session wasn't in source -- skip
                 continue
 
-            rx, ry, rz, tx, ty, tz = params
-            R = _euler_to_rotation_matrix(rx, ry, rz)
-            t_vec = np.array([tx, ty, tz], dtype=np.float64)
+            # Use per-frame deltas if available
+            if ann_key in per_frame_results:
+                n = apply_per_frame_deltas_to_dir(
+                    ann_dir, per_frame_results[ann_key], session_params,
+                    tgt_fx, tgt_fy, tgt_cx, tgt_cy,
+                    transform_3d=args.apply_3d,
+                    create_backup=not args.no_backup,
+                )
+            else:
+                rx, ry, rz, tx, ty, tz = session_params
+                R = _euler_to_rotation_matrix(rx, ry, rz)
+                t_vec = np.array([tx, ty, tz], dtype=np.float64)
+                n = apply_delta_to_dir(
+                    ann_dir, R, t_vec,
+                    tgt_fx, tgt_fy, tgt_cx, tgt_cy,
+                    transform_3d=args.apply_3d,
+                    create_backup=not args.no_backup,
+                )
 
-            n = apply_delta_to_dir(
-                ann_dir, R, t_vec,
-                tgt_fx, tgt_fy, tgt_cx, tgt_cy,
-                transform_3d=args.apply_3d,
-                create_backup=not args.no_backup,
-            )
             if n > 0:
                 if not args.flat:
                     rel = ann_dir.relative_to(Path(target_dir))

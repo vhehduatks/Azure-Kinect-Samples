@@ -21,10 +21,10 @@ Manual annotations (~40K frames)
          │  skeleton_2d_predicted per frame
          ▼
 ┌─────────────────────┐
-│  fit_extrinsic.py    │  Stage 2: Optimize 6DOF extrinsic delta
-│  --predictions       │  from 3D (annotation) + 2D (predicted) pairs
+│  fit_extrinsic.py    │  Stage 2: Fit extrinsic delta
+│  --predictions       │  Global, per-session, or per-frame
 └────────┬────────────┘
-         │  (rx, ry, rz, tx, ty, tz)
+         │  6DOF delta(s)
          ▼
 ┌─────────────────────┐
 │  fit_extrinsic.py    │  Apply delta to all annotations
@@ -71,20 +71,68 @@ Output per frame (`predictions/frame_000000.json`):
 }
 ```
 
-### 3. Fit extrinsic delta from predictions
+### 3. Fit extrinsic delta
+
+Three fitting granularities, from coarsest to finest:
+
+#### Global (one delta for entire dataset)
 
 ```bash
-# Dry run (hierarchical, auto-discovers predictions/ dirs)
 python fit_extrinsic.py <dataset_root> --predictions
-
-# Dry run (single session)
-python fit_extrinsic.py <annotations_dir> --flat --predictions <predictions_dir>
-
-# Apply fitted delta to the same dataset
 python fit_extrinsic.py <dataset_root> --predictions --apply
+```
+
+Best when the helmet camera mount is rigid and consistent across sessions.
+
+#### Per-session (one delta per recording session)
+
+```bash
+python fit_extrinsic.py <dataset_root> --predictions --per-session
+python fit_extrinsic.py <dataset_root> --predictions --per-session --apply
+```
+
+Accounts for helmet re-wearing between sessions. Each session's ~40 frames
+average out per-frame noise while capturing the session-specific offset.
+Reports mean/std/range across sessions to show how much the mount varies.
+
+#### Per-frame (session fit + regularized per-frame refinement)
+
+```bash
+python fit_extrinsic.py <dataset_root> --predictions --per-frame
+python fit_extrinsic.py <dataset_root> --predictions --per-frame --apply
+
+# Tighter regularization (frames stay closer to session average)
+python fit_extrinsic.py <dataset_root> --predictions --per-frame --frame-reg 10.0 --apply
+
+# Looser regularization (more per-frame freedom)
+python fit_extrinsic.py <dataset_root> --predictions --per-frame --frame-reg 2.0 --apply
+```
+
+Two-pass approach:
+1. Fit per-session delta (same as `--per-session`)
+2. For each frame, re-fit with L2 regularization pulling toward the session delta
+
+This handles helmet loosening/shifting within a session while preventing
+overfitting to per-frame prediction noise. Frames with fewer than 4
+correspondences skip refinement and use the session delta directly.
+
+**Regularization weight** (`--frame-reg`, default 5.0):
+- Controls how tightly per-frame deltas stay near the session average
+- Scale: 1 deg rotation ≈ 10mm translation in cost
+- Higher = smoother (less per-frame variation), lower = more responsive
+- Typical range: 2.0 (loose) to 15.0 (tight)
+
+#### Other options
+
+```bash
+# Single session (flat mode)
+python fit_extrinsic.py <annotations_dir> --flat --predictions <predictions_dir>
 
 # Apply to a different target dataset
 python fit_extrinsic.py <source_root> --predictions --target <target_root> --apply
+
+# Apply with 3D joint transform
+python fit_extrinsic.py <dataset_root> --predictions --per-frame --apply --3d
 
 # Filter by prediction confidence (default 0.5)
 python fit_extrinsic.py <dataset_root> --predictions --min-pred-confidence 0.7
@@ -97,6 +145,16 @@ python train_pose_model.py eval <dataset_root> -m model.pth
 ```
 
 Reports overall PCK@5 and per-joint breakdown on the validation set.
+
+## Fitting Modes Comparison
+
+| Mode | Flag | Delta count | Best for |
+|------|------|-------------|----------|
+| Global | *(default)* | 1 total | Rigid helmet mount, consistent across sessions |
+| Per-session | `--per-session` | 1 per session | Helmet re-wearing between sessions |
+| Per-frame | `--per-frame` | 1 per frame | Helmet shifting within sessions (e.g. active movement) |
+
+Per-frame implies per-session (session delta is computed first as the prior).
 
 ## Directory Layout
 
@@ -151,3 +209,23 @@ At prediction time, a single affine transform maps bbox → 256×192 crop. The i
 ## Confidence Filtering
 
 `fit_extrinsic.py --min-pred-confidence` (default 0.5) filters which predicted joints become correspondences. Higher thresholds reduce noise at the cost of fewer pairs. The model's confidence is the heatmap peak value (0–1).
+
+## Per-Frame Regularization Details
+
+The per-frame residual function appends 6 regularization terms to the standard reprojection residuals:
+
+```
+residuals = [reproj_u_0, reproj_v_0, ..., reproj_u_N, reproj_v_N,
+             w * (rx - rx_session),
+             w * (ry - ry_session),
+             w * (rz - rz_session),
+             w * 0.1 * (tx - tx_session),
+             w * 0.1 * (ty - ty_session),
+             w * 0.1 * (tz - tz_session)]
+```
+
+The 0.1 scale on translation normalizes units so that 1 deg ≈ 10mm in cost.
+With `--frame-reg 5.0` and ~20 joints per frame:
+- A 0.5° deviation costs roughly the same as 2–3px average reprojection improvement
+- A 5mm deviation costs the same
+- The optimizer only deviates from the session mean when there's strong evidence in the frame data

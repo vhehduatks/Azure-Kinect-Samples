@@ -47,6 +47,7 @@ Usage:
 """
 
 import argparse
+import datetime
 import json
 import math
 import os
@@ -69,6 +70,10 @@ JOINT_NAMES = [
     "HIP_RIGHT", "KNEE_RIGHT", "ANKLE_RIGHT", "FOOT_RIGHT",
     "HEAD", "NOSE", "EYE_LEFT", "EYE_RIGHT", "EAR_LEFT", "EAR_RIGHT",
 ]
+
+# Distal hand joints — annotation only extends to wrist, so these have
+# unreliable 3D tracking and noisy predictions.  Excluded by default.
+EXCLUDED_JOINTS_DEFAULT = {8, 9, 10, 15, 16, 17}  # HAND/HANDTIP/THUMB L+R
 
 
 # ------------------------------------------------------------------
@@ -215,14 +220,19 @@ def estimate_intrinsics_from_dir(annotations_dir: Path) -> Optional[Tuple[float,
 # Correspondence collection
 # ------------------------------------------------------------------
 
-def collect_correspondences(annotations_dir: Path) -> List[Tuple[np.ndarray, np.ndarray, int]]:
+def collect_correspondences(
+    annotations_dir: Path,
+    excluded_joints: Optional[set] = None,
+) -> List[Tuple[np.ndarray, np.ndarray, int]]:
     """Collect (original_3d, annotated_2d, joint_id) triples from edited frames.
 
     Returns list of (P_3d [3,], uv_ann [2,], joint_id) for joints where:
       - .bak (original) has confidence >= 2 for both 3D and 2D
       - .json (edited) has a 2D change (|du| > 0.5 or |dv| > 0.5)
       - 3D depth > 100mm
+      - joint_id not in excluded_joints
     """
+    excl = excluded_joints or set()
     pairs: List[Tuple[np.ndarray, np.ndarray, int]] = []
 
     json_files = sorted(annotations_dir.glob("frame_*.json"))
@@ -241,6 +251,8 @@ def collect_correspondences(annotations_dir: Path) -> List[Tuple[np.ndarray, np.
         edit_2d = {e["joint_id"]: e for e in edited.get("skeleton_2d", [])}
 
         for jid in range(NUM_JOINTS):
+            if jid in excl:
+                continue
             if jid not in orig_3d or jid not in orig_2d or jid not in edit_2d:
                 continue
             o3 = orig_3d[jid]
@@ -272,6 +284,7 @@ def collect_correspondences_from_predictions(
     annotations_dir: Path,
     predictions_dir: Path,
     min_pred_confidence: float = 0.5,
+    excluded_joints: Optional[set] = None,
 ) -> List[Tuple[np.ndarray, np.ndarray, int]]:
     """Collect (original_3d, predicted_2d, joint_id) triples from model predictions.
 
@@ -281,7 +294,9 @@ def collect_correspondences_from_predictions(
     Returns list of (P_3d [3,], uv_pred [2,], joint_id) for joints where:
       - annotation has 3D confidence >= 2 and depth > 100mm
       - prediction confidence >= min_pred_confidence
+      - joint_id not in excluded_joints
     """
+    excl = excluded_joints or set()
     pairs: List[Tuple[np.ndarray, np.ndarray, int]] = []
 
     pred_files = sorted(predictions_dir.glob("frame_*.json"))
@@ -300,6 +315,8 @@ def collect_correspondences_from_predictions(
                         for e in pred_data.get("skeleton_2d_predicted", [])}
 
         for jid in range(NUM_JOINTS):
+            if jid in excl:
+                continue
             if jid not in skel_3d or jid not in skel_2d_pred:
                 continue
             j3 = skel_3d[jid]
@@ -323,12 +340,14 @@ def collect_correspondences_per_frame(
     annotations_dir: Path,
     predictions_dir: Path,
     min_pred_confidence: float = 0.5,
+    excluded_joints: Optional[set] = None,
 ) -> Dict[str, List[Tuple[np.ndarray, np.ndarray, int]]]:
     """Collect correspondences grouped by frame filename.
 
     Returns dict: frame_filename (e.g. "frame_000000.json") ->
         list of (P_3d [3,], uv_pred [2,], joint_id)
     """
+    excl = excluded_joints or set()
     per_frame: Dict[str, List[Tuple[np.ndarray, np.ndarray, int]]] = {}
 
     pred_files = sorted(predictions_dir.glob("frame_*.json"))
@@ -348,6 +367,8 @@ def collect_correspondences_per_frame(
 
         frame_pairs: List[Tuple[np.ndarray, np.ndarray, int]] = []
         for jid in range(NUM_JOINTS):
+            if jid in excl:
+                continue
             if jid not in skel_3d or jid not in skel_2d_pred:
                 continue
             j3 = skel_3d[jid]
@@ -370,8 +391,10 @@ def collect_correspondences_per_frame(
 
 def collect_correspondences_per_frame_from_edits(
     annotations_dir: Path,
+    excluded_joints: Optional[set] = None,
 ) -> Dict[str, List[Tuple[np.ndarray, np.ndarray, int]]]:
     """Collect correspondences grouped by frame filename from .bak/.json diffs."""
+    excl = excluded_joints or set()
     per_frame: Dict[str, List[Tuple[np.ndarray, np.ndarray, int]]] = {}
 
     json_files = sorted(annotations_dir.glob("frame_*.json"))
@@ -391,6 +414,8 @@ def collect_correspondences_per_frame_from_edits(
 
         frame_pairs: List[Tuple[np.ndarray, np.ndarray, int]] = []
         for jid in range(NUM_JOINTS):
+            if jid in excl:
+                continue
             if jid not in orig_3d or jid not in orig_2d or jid not in edit_2d:
                 continue
             o3 = orig_3d[jid]
@@ -421,11 +446,12 @@ def collect_correspondences_per_frame_from_edits(
 # ------------------------------------------------------------------
 
 # Body part grouping for weight computation
+# NOTE: hand joints (8-10, 15-17) excluded — annotation only goes to wrist
 _BODY_PARTS = {
     'spine':     [0, 1, 2, 3],
     'head':      [26, 27, 28, 29, 30, 31],
-    'left_arm':  [4, 5, 6, 7, 8, 9, 10],
-    'right_arm': [11, 12, 13, 14, 15, 16, 17],
+    'left_arm':  [4, 5, 6, 7],
+    'right_arm': [11, 12, 13, 14],
     'left_leg':  [18, 19, 20, 21],
     'right_leg': [22, 23, 24, 25],
 }
@@ -860,6 +886,150 @@ def apply_per_frame_deltas_to_dir(
 
 
 # ------------------------------------------------------------------
+# Optimization record saving
+# ------------------------------------------------------------------
+
+def save_optimization_log(
+    log_path: str,
+    args,
+    intrinsics: Tuple[float, float, float, float],
+    excluded_joints: set,
+    per_joint_counts: Dict[int, int],
+    joint_weights: Optional[Dict[int, float]],
+    session_results: Dict[str, Tuple[np.ndarray, float, float, int]],
+    source_dir: str,
+    per_frame_results: Optional[Dict[str, Dict[str, np.ndarray]]] = None,
+):
+    """Save full optimization record as JSON for reproducibility and analysis."""
+    fx, fy, cx, cy = intrinsics
+    now = datetime.datetime.now()
+
+    record: Dict = {
+        "timestamp": now.isoformat(),
+        "command": {
+            "source": args.source,
+            "target": getattr(args, "target", None),
+            "predictions": args.predictions,
+            "min_pred_confidence": args.min_pred_confidence,
+            "per_session": args.per_session,
+            "per_frame": args.per_frame,
+            "frame_reg": args.frame_reg,
+            "joint_weights_enabled": args.joint_weights,
+            "exclude_joints": sorted(excluded_joints),
+            "apply": args.apply,
+            "apply_3d": args.apply_3d,
+        },
+        "intrinsics": {"fx": fx, "fy": fy, "cx": cx, "cy": cy},
+    }
+
+    # Joint detection and weights
+    joint_info = []
+    for jid in range(NUM_JOINTS):
+        if per_joint_counts.get(jid, 0) > 0:
+            name = JOINT_NAMES[jid] if jid < len(JOINT_NAMES) else "JOINT_%d" % jid
+            part = _JOINT_TO_PART.get(jid, "unknown")
+            entry = {
+                "joint_id": jid,
+                "name": name,
+                "body_part": part,
+                "count": per_joint_counts[jid],
+            }
+            if joint_weights:
+                entry["weight"] = round(joint_weights.get(jid, 1.0), 4)
+            joint_info.append(entry)
+    record["joint_detection"] = joint_info
+
+    # Body-part summary
+    if joint_weights:
+        part_summary = {}
+        part_counts: Dict[str, int] = {}
+        for ji in joint_info:
+            part = ji["body_part"]
+            part_counts[part] = part_counts.get(part, 0) + ji["count"]
+        total = sum(part_counts.values())
+        for part in ['spine', 'head', 'left_arm', 'right_arm', 'left_leg', 'right_leg']:
+            count = part_counts.get(part, 0)
+            w = joint_weights.get(_BODY_PARTS[part][0], 1.0) if _BODY_PARTS.get(part) else 1.0
+            part_summary[part] = {
+                "count": count,
+                "percentage": round(100.0 * count / total, 2) if total > 0 else 0,
+                "weight": round(w, 4),
+            }
+        record["body_part_distribution"] = part_summary
+
+    # Per-session results
+    sessions_list = []
+    for key in sorted(session_results.keys()):
+        params, rms_before, rms_after, n_pairs = session_results[key]
+        label = _session_label(key, source_dir) if key != "_global" else "GLOBAL"
+        rx, ry, rz, tx, ty, tz = params
+        entry = {
+            "session": label,
+            "n_pairs": n_pairs,
+            "rms_before_px": round(rms_before, 3),
+            "rms_after_px": round(rms_after, 3),
+            "delta": {
+                "rx_deg": round(float(rx), 5),
+                "ry_deg": round(float(ry), 5),
+                "rz_deg": round(float(rz), 5),
+                "tx_mm": round(float(tx), 3),
+                "ty_mm": round(float(ty), 3),
+                "tz_mm": round(float(tz), 3),
+            },
+        }
+
+        # Per-frame stats for this session
+        if per_frame_results and key in per_frame_results:
+            frame_deltas = per_frame_results[key]
+            deviations = []
+            for fp in frame_deltas.values():
+                diff = fp - params
+                dev = float(np.sqrt(np.sum((_REG_SCALES * diff) ** 2)))
+                deviations.append(dev)
+            entry["per_frame"] = {
+                "n_frames": len(frame_deltas),
+                "deviation_mean": round(np.mean(deviations), 4) if deviations else 0,
+                "deviation_max": round(np.max(deviations), 4) if deviations else 0,
+            }
+
+        sessions_list.append(entry)
+    record["sessions"] = sessions_list
+
+    # Summary statistics (for per-session mode)
+    if len(session_results) > 1 or (len(session_results) == 1 and "_global" not in session_results):
+        all_p = np.array([r[0] for r in session_results.values()])
+        all_rms_b = [r[1] for r in session_results.values()]
+        all_rms_a = [r[2] for r in session_results.values()]
+        labels = ["rx_deg", "ry_deg", "rz_deg", "tx_mm", "ty_mm", "tz_mm"]
+        summary_params = {}
+        for i, lbl in enumerate(labels):
+            vals = all_p[:, i]
+            summary_params[lbl] = {
+                "mean": round(float(vals.mean()), 5),
+                "std": round(float(vals.std()), 5),
+                "min": round(float(vals.min()), 5),
+                "max": round(float(vals.max()), 5),
+            }
+        record["summary"] = {
+            "n_sessions": len(session_results),
+            "parameters": summary_params,
+            "rms_before_mean_px": round(float(np.mean(all_rms_b)), 3),
+            "rms_before_median_px": round(float(np.median(all_rms_b)), 3),
+            "rms_after_mean_px": round(float(np.mean(all_rms_a)), 3),
+            "rms_after_median_px": round(float(np.median(all_rms_a)), 3),
+        }
+
+    # Write
+    log_dir = Path(log_path).parent
+    log_dir.mkdir(parents=True, exist_ok=True)
+    tmp = log_path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(record, f, indent=2, ensure_ascii=False)
+    os.replace(tmp, log_path)
+    print("\nOptimization log saved: %s" % log_path)
+
+
+# ------------------------------------------------------------------
 # Main
 # ------------------------------------------------------------------
 
@@ -930,7 +1100,35 @@ def main():
         "--no-joint-weights", dest="joint_weights", action="store_false",
         help="Disable body-part balancing (all correspondences equal weight).",
     )
+    parser.add_argument(
+        "--exclude-joints", type=str, default="hand",
+        help="Joints to exclude from fitting. "
+        "'hand' (default) = HAND/HANDTIP/THUMB (8-10,15-17). "
+        "'none' = include all. "
+        "Comma-separated IDs for custom, e.g. '8,9,10,15,16,17,26,27'.",
+    )
+    parser.add_argument(
+        "--log", type=str, default=None,
+        help="Save optimization record to a JSON file. "
+        "If omitted, auto-saves to <source>/fit_extrinsic_log_<timestamp>.json.",
+    )
+    parser.add_argument(
+        "--no-log", action="store_true",
+        help="Disable auto-saving the optimization log.",
+    )
     args = parser.parse_args()
+
+    # Parse excluded joints
+    if args.exclude_joints.lower() == "none":
+        excluded_joints: set = set()
+    elif args.exclude_joints.lower() == "hand":
+        excluded_joints = set(EXCLUDED_JOINTS_DEFAULT)
+    else:
+        try:
+            excluded_joints = {int(x.strip()) for x in args.exclude_joints.split(",")}
+        except ValueError:
+            print("Error: --exclude-joints must be 'hand', 'none', or comma-separated IDs")
+            return
 
     # --per-frame implies --per-session
     if args.per_frame:
@@ -1047,6 +1245,10 @@ def main():
     # Each correspondence is (p3d, uv, joint_id).
     session_correspondences: Dict[str, List[Tuple[np.ndarray, np.ndarray, int]]] = {}
 
+    if excluded_joints:
+        excl_names = [JOINT_NAMES[j] if j < len(JOINT_NAMES) else str(j) for j in sorted(excluded_joints)]
+        print("\nExcluded joints: %s" % ", ".join(excl_names))
+
     if use_predictions:
         print("\nCollecting correspondences from model predictions "
               "(min_confidence=%.2f)..." % args.min_pred_confidence)
@@ -1054,6 +1256,7 @@ def main():
             p_dir = pred_dirs_map[str(ann_dir)]
             pairs = collect_correspondences_from_predictions(
                 ann_dir, p_dir, min_pred_confidence=args.min_pred_confidence,
+                excluded_joints=excluded_joints,
             )
             if not pairs:
                 continue
@@ -1068,7 +1271,7 @@ def main():
     else:
         print("\nCollecting correspondences from edited frames...")
         for ann_dir in ann_dirs:
-            pairs = collect_correspondences(ann_dir)
+            pairs = collect_correspondences(ann_dir, excluded_joints=excluded_joints)
             if pairs:
                 if not args.flat:
                     rel = ann_dir.relative_to(Path(source_dir))
@@ -1244,9 +1447,12 @@ def main():
                 p_dir = pred_dirs_map[ann_key]
                 pf_corr = collect_correspondences_per_frame(
                     ann_dir, p_dir, min_pred_confidence=args.min_pred_confidence,
+                    excluded_joints=excluded_joints,
                 )
             else:
-                pf_corr = collect_correspondences_per_frame_from_edits(ann_dir)
+                pf_corr = collect_correspondences_per_frame_from_edits(
+                    ann_dir, excluded_joints=excluded_joints,
+                )
 
             if not pf_corr:
                 continue
@@ -1364,6 +1570,28 @@ def main():
             print("\nTarget: %s (%d annotation dirs)" % (target_dir, len(tgt_dirs)))
 
         print("Dry run -- %d files would be modified. Use --apply to proceed." % n_target)
+
+    # -----------------------------------------------------------
+    # Step 6: Save optimization log
+    # -----------------------------------------------------------
+    if not args.no_log and session_results:
+        if args.log:
+            log_path = args.log
+        else:
+            ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            log_path = str(Path(source_dir) / ("fit_extrinsic_log_%s.json" % ts))
+
+        save_optimization_log(
+            log_path=log_path,
+            args=args,
+            intrinsics=(fx, fy, cx, cy),
+            excluded_joints=excluded_joints,
+            per_joint_counts=per_joint_counts,
+            joint_weights=joint_weights,
+            session_results=session_results,
+            source_dir=source_dir,
+            per_frame_results=per_frame_results if per_frame_results else None,
+        )
 
 
 if __name__ == "__main__":

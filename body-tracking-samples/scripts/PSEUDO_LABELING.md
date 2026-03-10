@@ -231,15 +231,33 @@ At prediction time, a single affine transform maps bbox → 256×192 crop. The i
 
 `fit_extrinsic.py --min-pred-confidence` (default 0.5) filters which predicted joints become correspondences. Higher thresholds reduce noise at the cost of fewer pairs. The model's confidence is the heatmap peak value (0–1).
 
+## Joint Exclusion
+
+Distal hand joints (HAND, HANDTIP, THUMB — IDs 8-10, 15-17) are excluded by default
+because annotation only extends to the wrist. These joints have unreliable 3D tracking
+and noisy predictions that corrupt the extrinsic fit — especially inflating tz (forward
+stretch to align lower body at the expense of upper body).
+
+```bash
+# Default: exclude hand joints
+python fit_extrinsic.py <dataset_root> --predictions
+
+# Include all joints (not recommended)
+python fit_extrinsic.py <dataset_root> --predictions --exclude-joints none
+
+# Custom exclusion (e.g. also exclude head/face)
+python fit_extrinsic.py <dataset_root> --predictions --exclude-joints 8,9,10,15,16,17,26,27,28,29,30,31
+```
+
 ## Body-Part Balancing (Joint Weights)
 
-In ego-view, the lower body (pelvis, hips, knees, ankles, feet) is visible in nearly every frame, while upper body joints (shoulders, elbows, wrists) frequently extend off-screen. Without correction, the optimizer minimizes total residual, effectively fitting to the lower body and under-fitting the upper body.
+In ego-view, the lower body (pelvis, hips, knees, ankles, feet) is visible in nearly every frame, while upper body joints (shoulders, elbows, wrists) frequently extend off-screen. Without correction, the optimizer minimizes total residual, effectively fitting to the lower body and under-fitting the upper body. The symptom is large tz values (>100mm) — the optimizer stretches the skeleton forward to align the always-visible lower body.
 
 **Solution**: Inverse-frequency weighting per body part (enabled by default, disable with `--no-joint-weights`).
 
 ### Algorithm
 
-1. Group joints into 6 body parts: spine, head, left_arm, right_arm, left_leg, right_leg
+1. Group joints into 6 body parts (hand joints excluded from arm groups)
 2. Count correspondences per body part
 3. Target count = total / num_parts_present (equal share)
 4. Weight for joints in part P = target / count(P)
@@ -248,14 +266,14 @@ In ego-view, the lower body (pelvis, hips, knees, ankles, feet) is visible in ne
 
 ### Body Part Groups
 
-| Part | Joint IDs |
-|------|-----------|
-| spine | 0–3 (PELVIS, SPINE_NAVAL, SPINE_CHEST, NECK) |
-| head | 26–31 (HEAD, NOSE, EYE_LEFT, EAR_LEFT, EYE_RIGHT, EAR_RIGHT) |
-| left_arm | 4–10 (CLAVICLE_LEFT → THUMB_LEFT) |
-| right_arm | 11–17 (CLAVICLE_RIGHT → THUMB_RIGHT) |
-| left_leg | 18–21 (HIP_LEFT → FOOT_LEFT) |
-| right_leg | 22–25 (HIP_RIGHT → FOOT_RIGHT) |
+| Part | Joint IDs | Notes |
+|------|-----------|-------|
+| spine | 0–3 (PELVIS → NECK) | |
+| head | 26–31 (HEAD → EAR_RIGHT) | |
+| left_arm | 4–7 (CLAVICLE_LEFT → WRIST_LEFT) | Hand joints excluded |
+| right_arm | 11–14 (CLAVICLE_RIGHT → WRIST_RIGHT) | Hand joints excluded |
+| left_leg | 18–21 (HIP_LEFT → FOOT_LEFT) | |
+| right_leg | 22–25 (HIP_RIGHT → FOOT_RIGHT) | |
 
 ### Example output
 
@@ -271,6 +289,29 @@ Body-part distribution:
 ```
 
 Arms and head (rarely visible) get higher weight; legs (almost always visible) get lower weight. The optimizer treats all body parts as equally important.
+
+## Optimization Log
+
+By default, `fit_extrinsic.py` auto-saves a JSON log after each run:
+
+```bash
+# Auto-save to <source>/fit_extrinsic_log_<timestamp>.json
+python fit_extrinsic.py <dataset_root> --predictions --per-session
+
+# Custom log path
+python fit_extrinsic.py <dataset_root> --predictions --log results/my_run.json
+
+# Disable logging
+python fit_extrinsic.py <dataset_root> --predictions --no-log
+```
+
+Log contents:
+- **command**: all CLI arguments used
+- **intrinsics**: estimated fx, fy, cx, cy
+- **joint_detection**: per-joint count, body part, and applied weight
+- **body_part_distribution**: per-part count, percentage, and weight
+- **sessions**: per-session 6DOF delta, RMS before/after, n_pairs
+- **summary**: mean/std/min/max across sessions for each parameter
 
 ## Per-Frame Regularization Details
 

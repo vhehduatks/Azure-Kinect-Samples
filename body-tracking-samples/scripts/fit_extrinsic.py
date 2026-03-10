@@ -899,6 +899,7 @@ def save_optimization_log(
     session_results: Dict[str, Tuple[np.ndarray, float, float, int]],
     source_dir: str,
     per_frame_results: Optional[Dict[str, Dict[str, np.ndarray]]] = None,
+    intrinsics_from_json: bool = False,
 ):
     """Save full optimization record as JSON for reproducibility and analysis."""
     fx, fy, cx, cy = intrinsics
@@ -919,7 +920,7 @@ def save_optimization_log(
             "apply": args.apply,
             "apply_3d": args.apply_3d,
         },
-        "intrinsics": {"fx": fx, "fy": fy, "cx": cx, "cy": cy},
+        "intrinsics": {"fx": fx, "fy": fy, "cx": cx, "cy": cy, "source": "calibration" if intrinsics_from_json else "estimated"},
     }
 
     # Joint detection and weights
@@ -1200,43 +1201,65 @@ def main():
                 pred_dirs_map[str(d)] = d.parent / "predictions"
 
     # -----------------------------------------------------------
-    # Step 2: Estimate intrinsics from original 3D/2D data
+    # Step 2: Get intrinsics (from annotation JSON or estimate)
     # -----------------------------------------------------------
-    print("\nEstimating intrinsics from original data...")
-    all_pts_3d: List[Tuple[float, float, float]] = []
-    all_pts_2d: List[Tuple[float, float]] = []
-
+    # Try to read camera_intrinsics from annotation JSON (written by offline processor)
+    intrinsics_from_json = False
+    fx = fy = cx = cy = 0.0
     for ann_dir in ann_dirs:
-        # Use .bak files if available, otherwise annotation JSONs directly
         src_files = sorted(ann_dir.glob("frame_*.json.bak"))
         if not src_files:
             src_files = sorted(ann_dir.glob("frame_*.json"))
-        for fpath in src_files[:50]:
+        for fpath in src_files[:5]:
             with open(fpath, encoding="utf-8") as f:
                 data = json.load(f)
-            s3d = {e["joint_id"]: e for e in data.get("skeleton_3d", [])}
-            s2d = {e["joint_id"]: e for e in data.get("skeleton_2d", [])}
-            for jid in range(NUM_JOINTS):
-                if jid not in s3d or jid not in s2d:
-                    continue
-                j3 = s3d[jid]
-                j2 = s2d[jid]
-                if j3.get("confidence", 0) < 2 or j2.get("confidence", 0) < 2:
-                    continue
-                if j3["z"] < 100:
-                    continue
-                all_pts_3d.append((j3["x"], j3["y"], j3["z"]))
-                all_pts_2d.append((j2["u"], j2["v"]))
-        if len(all_pts_3d) >= 200:
+            ci = data.get("camera_intrinsics")
+            if ci and "fx" in ci:
+                fx, fy = ci["fx"], ci["fy"]
+                cx, cy = ci["cx"], ci["cy"]
+                intrinsics_from_json = True
+                break
+        if intrinsics_from_json:
             break
 
-    intrinsics = estimate_intrinsics_from_pairs(all_pts_3d, all_pts_2d)
-    if intrinsics is None:
-        print("Error: could not estimate intrinsics (not enough 3D/2D pairs)")
-        return
-    fx, fy, cx, cy = intrinsics
-    print("  Intrinsics: fx=%.1f fy=%.1f cx=%.1f cy=%.1f (%d pairs)"
-          % (fx, fy, cx, cy, len(all_pts_3d)))
+    if intrinsics_from_json:
+        print("\nIntrinsics from camera calibration (annotation JSON):")
+        print("  fx=%.1f fy=%.1f cx=%.1f cy=%.1f" % (fx, fy, cx, cy))
+    else:
+        print("\nEstimating intrinsics from original data...")
+        all_pts_3d: List[Tuple[float, float, float]] = []
+        all_pts_2d: List[Tuple[float, float]] = []
+
+        for ann_dir in ann_dirs:
+            src_files = sorted(ann_dir.glob("frame_*.json.bak"))
+            if not src_files:
+                src_files = sorted(ann_dir.glob("frame_*.json"))
+            for fpath in src_files[:50]:
+                with open(fpath, encoding="utf-8") as f:
+                    data = json.load(f)
+                s3d = {e["joint_id"]: e for e in data.get("skeleton_3d", [])}
+                s2d = {e["joint_id"]: e for e in data.get("skeleton_2d", [])}
+                for jid in range(NUM_JOINTS):
+                    if jid not in s3d or jid not in s2d:
+                        continue
+                    j3 = s3d[jid]
+                    j2 = s2d[jid]
+                    if j3.get("confidence", 0) < 2 or j2.get("confidence", 0) < 2:
+                        continue
+                    if j3["z"] < 100:
+                        continue
+                    all_pts_3d.append((j3["x"], j3["y"], j3["z"]))
+                    all_pts_2d.append((j2["u"], j2["v"]))
+            if len(all_pts_3d) >= 200:
+                break
+
+        intrinsics = estimate_intrinsics_from_pairs(all_pts_3d, all_pts_2d)
+        if intrinsics is None:
+            print("Error: could not estimate intrinsics (not enough 3D/2D pairs)")
+            return
+        fx, fy, cx, cy = intrinsics
+        print("  Intrinsics (estimated): fx=%.1f fy=%.1f cx=%.1f cy=%.1f (%d pairs)"
+              % (fx, fy, cx, cy, len(all_pts_3d)))
 
     # -----------------------------------------------------------
     # Step 3: Collect correspondences
@@ -1504,12 +1527,29 @@ def main():
 
         # Need intrinsics for the target too (for differential projection)
         if target_dir != source_dir:
-            print("Estimating target intrinsics...")
             tgt_intrinsics = None
+            # Try reading from annotation JSON first
             for td in tgt_dirs[:5]:
-                tgt_intrinsics = estimate_intrinsics_from_dir(td)
-                if tgt_intrinsics is not None:
+                src_files = sorted(td.glob("frame_*.json.bak"))
+                if not src_files:
+                    src_files = sorted(td.glob("frame_*.json"))
+                for fpath in src_files[:5]:
+                    with open(fpath, encoding="utf-8") as f:
+                        data = json.load(f)
+                    ci = data.get("camera_intrinsics")
+                    if ci and "fx" in ci:
+                        tgt_intrinsics = (ci["fx"], ci["fy"], ci["cx"], ci["cy"])
+                        print("Target intrinsics from camera calibration (annotation JSON):")
+                        break
+                if tgt_intrinsics:
                     break
+            # Fall back to estimation
+            if tgt_intrinsics is None:
+                print("Estimating target intrinsics...")
+                for td in tgt_dirs[:5]:
+                    tgt_intrinsics = estimate_intrinsics_from_dir(td)
+                    if tgt_intrinsics is not None:
+                        break
             if tgt_intrinsics is None:
                 print("Warning: could not estimate target intrinsics, using source intrinsics")
                 tgt_fx, tgt_fy, tgt_cx, tgt_cy = fx, fy, cx, cy
@@ -1591,6 +1631,7 @@ def main():
             session_results=session_results,
             source_dir=source_dir,
             per_frame_results=per_frame_results if per_frame_results else None,
+            intrinsics_from_json=intrinsics_from_json,
         )
 
 

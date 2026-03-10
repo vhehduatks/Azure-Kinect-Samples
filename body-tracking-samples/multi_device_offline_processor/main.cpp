@@ -932,7 +932,8 @@ void WriteEgoFrameJson(const string& path, int frameId, uint64_t timestamp,
                        const vector<Joint3D>& joints3D,
                        const vector<Joint2D>& joints2D,
                        const string& imageFile,
-                       int numBodies)
+                       int numBodies,
+                       const k4a_calibration_t* calibration = nullptr)
 {
     json j;
     j["frame_id"] = frameId;
@@ -941,6 +942,19 @@ void WriteEgoFrameJson(const string& path, int frameId, uint64_t timestamp,
     j["checkerboard_detected"] = checkerboardDetected;
     j["detection_camera"] = detectionCamera;
     j["num_bodies"] = numBodies;
+
+    // Write camera intrinsics (pinhole model from K4A calibration)
+    if (calibration) {
+        const auto& params = calibration->color_camera_calibration.intrinsics.parameters.param;
+        j["camera_intrinsics"] = {
+            {"fx", params.fx},
+            {"fy", params.fy},
+            {"cx", params.cx},
+            {"cy", params.cy},
+            {"width", calibration->color_camera_calibration.resolution_width},
+            {"height", calibration->color_camera_calibration.resolution_height}
+        };
+    }
 
     if (helmetPose.valid) {
         j["camera_pose"]["R"] = json::array();
@@ -1516,6 +1530,22 @@ bool ProcessNextFrame(MkvProcessor& proc)
         k4abt_body_t body;
         if (k4abt_frame_get_body_skeleton(bodyFrame, i, &body.skeleton) == K4A_RESULT_SUCCEEDED) {
             body.id = k4abt_frame_get_body_id(bodyFrame, i);
+
+            // Body tracker outputs joints in DEPTH camera space, but extrinsic
+            // calibration and checkerboard detection operate in COLOR camera space.
+            // Convert each joint from depth→color to eliminate the depth-to-color
+            // baseline offset (~25-30mm) that would otherwise cause sideways shift.
+            for (int j = 0; j < K4ABT_JOINT_COUNT; j++) {
+                k4a_float3_t colorPos;
+                if (k4a_calibration_3d_to_3d(&proc.calibration,
+                        &body.skeleton.joints[j].position,
+                        K4A_CALIBRATION_TYPE_DEPTH,
+                        K4A_CALIBRATION_TYPE_COLOR,
+                        &colorPos) == K4A_RESULT_SUCCEEDED) {
+                    body.skeleton.joints[j].position = colorPos;
+                }
+            }
+
             proc.lastBodies.push_back(body);
         }
     }
@@ -2583,7 +2613,8 @@ int main(int argc, char** argv)
                               detectionSuccess, detectionCamera,
                               helmetPose, joints3D, joints2D,
                               filename.str() + ".jpg",
-                              numBodies);
+                              numBodies,
+                              &helmetCalibration);
 
             if (detectionSuccess) cbDetectedCount++;
             egoFrameCount++;

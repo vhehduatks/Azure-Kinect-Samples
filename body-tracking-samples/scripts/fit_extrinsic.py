@@ -215,15 +215,15 @@ def estimate_intrinsics_from_dir(annotations_dir: Path) -> Optional[Tuple[float,
 # Correspondence collection
 # ------------------------------------------------------------------
 
-def collect_correspondences(annotations_dir: Path) -> List[Tuple[np.ndarray, np.ndarray]]:
-    """Collect (original_3d, annotated_2d) pairs from edited frames.
+def collect_correspondences(annotations_dir: Path) -> List[Tuple[np.ndarray, np.ndarray, int]]:
+    """Collect (original_3d, annotated_2d, joint_id) triples from edited frames.
 
-    Returns list of (P_3d [3,], uv_ann [2,]) for joints where:
+    Returns list of (P_3d [3,], uv_ann [2,], joint_id) for joints where:
       - .bak (original) has confidence >= 2 for both 3D and 2D
       - .json (edited) has a 2D change (|du| > 0.5 or |dv| > 0.5)
       - 3D depth > 100mm
     """
-    pairs: List[Tuple[np.ndarray, np.ndarray]] = []
+    pairs: List[Tuple[np.ndarray, np.ndarray, int]] = []
 
     json_files = sorted(annotations_dir.glob("frame_*.json"))
     for json_path in json_files:
@@ -263,7 +263,7 @@ def collect_correspondences(annotations_dir: Path) -> List[Tuple[np.ndarray, np.
 
             p3d = np.array([o3["x"], o3["y"], o3["z"]], dtype=np.float64)
             uv_ann = np.array([e2["u"], e2["v"]], dtype=np.float64)
-            pairs.append((p3d, uv_ann))
+            pairs.append((p3d, uv_ann, jid))
 
     return pairs
 
@@ -272,17 +272,17 @@ def collect_correspondences_from_predictions(
     annotations_dir: Path,
     predictions_dir: Path,
     min_pred_confidence: float = 0.5,
-) -> List[Tuple[np.ndarray, np.ndarray]]:
-    """Collect (original_3d, predicted_2d) pairs from model predictions.
+) -> List[Tuple[np.ndarray, np.ndarray, int]]:
+    """Collect (original_3d, predicted_2d, joint_id) triples from model predictions.
 
     For each prediction JSON, finds the matching annotation JSON to get
     the original 3D joints, then pairs with the predicted 2D joints.
 
-    Returns list of (P_3d [3,], uv_pred [2,]) for joints where:
+    Returns list of (P_3d [3,], uv_pred [2,], joint_id) for joints where:
       - annotation has 3D confidence >= 2 and depth > 100mm
       - prediction confidence >= min_pred_confidence
     """
-    pairs: List[Tuple[np.ndarray, np.ndarray]] = []
+    pairs: List[Tuple[np.ndarray, np.ndarray, int]] = []
 
     pred_files = sorted(predictions_dir.glob("frame_*.json"))
     for pred_path in pred_files:
@@ -314,7 +314,7 @@ def collect_correspondences_from_predictions(
 
             p3d = np.array([j3["x"], j3["y"], j3["z"]], dtype=np.float64)
             uv_pred = np.array([j2p["u"], j2p["v"]], dtype=np.float64)
-            pairs.append((p3d, uv_pred))
+            pairs.append((p3d, uv_pred, jid))
 
     return pairs
 
@@ -323,13 +323,13 @@ def collect_correspondences_per_frame(
     annotations_dir: Path,
     predictions_dir: Path,
     min_pred_confidence: float = 0.5,
-) -> Dict[str, List[Tuple[np.ndarray, np.ndarray]]]:
+) -> Dict[str, List[Tuple[np.ndarray, np.ndarray, int]]]:
     """Collect correspondences grouped by frame filename.
 
     Returns dict: frame_filename (e.g. "frame_000000.json") ->
-        list of (P_3d [3,], uv_pred [2,])
+        list of (P_3d [3,], uv_pred [2,], joint_id)
     """
-    per_frame: Dict[str, List[Tuple[np.ndarray, np.ndarray]]] = {}
+    per_frame: Dict[str, List[Tuple[np.ndarray, np.ndarray, int]]] = {}
 
     pred_files = sorted(predictions_dir.glob("frame_*.json"))
     for pred_path in pred_files:
@@ -346,7 +346,7 @@ def collect_correspondences_per_frame(
         skel_2d_pred = {e["joint_id"]: e
                         for e in pred_data.get("skeleton_2d_predicted", [])}
 
-        frame_pairs: List[Tuple[np.ndarray, np.ndarray]] = []
+        frame_pairs: List[Tuple[np.ndarray, np.ndarray, int]] = []
         for jid in range(NUM_JOINTS):
             if jid not in skel_3d or jid not in skel_2d_pred:
                 continue
@@ -360,7 +360,7 @@ def collect_correspondences_per_frame(
                 continue
             p3d = np.array([j3["x"], j3["y"], j3["z"]], dtype=np.float64)
             uv_pred = np.array([j2p["u"], j2p["v"]], dtype=np.float64)
-            frame_pairs.append((p3d, uv_pred))
+            frame_pairs.append((p3d, uv_pred, jid))
 
         if frame_pairs:
             per_frame[pred_path.name] = frame_pairs
@@ -370,9 +370,9 @@ def collect_correspondences_per_frame(
 
 def collect_correspondences_per_frame_from_edits(
     annotations_dir: Path,
-) -> Dict[str, List[Tuple[np.ndarray, np.ndarray]]]:
+) -> Dict[str, List[Tuple[np.ndarray, np.ndarray, int]]]:
     """Collect correspondences grouped by frame filename from .bak/.json diffs."""
-    per_frame: Dict[str, List[Tuple[np.ndarray, np.ndarray]]] = {}
+    per_frame: Dict[str, List[Tuple[np.ndarray, np.ndarray, int]]] = {}
 
     json_files = sorted(annotations_dir.glob("frame_*.json"))
     for json_path in json_files:
@@ -389,7 +389,7 @@ def collect_correspondences_per_frame_from_edits(
         orig_2d = {e["joint_id"]: e for e in original.get("skeleton_2d", [])}
         edit_2d = {e["joint_id"]: e for e in edited.get("skeleton_2d", [])}
 
-        frame_pairs: List[Tuple[np.ndarray, np.ndarray]] = []
+        frame_pairs: List[Tuple[np.ndarray, np.ndarray, int]] = []
         for jid in range(NUM_JOINTS):
             if jid not in orig_3d or jid not in orig_2d or jid not in edit_2d:
                 continue
@@ -408,12 +408,98 @@ def collect_correspondences_per_frame_from_edits(
                 continue
             p3d = np.array([o3["x"], o3["y"], o3["z"]], dtype=np.float64)
             uv_ann = np.array([e2["u"], e2["v"]], dtype=np.float64)
-            frame_pairs.append((p3d, uv_ann))
+            frame_pairs.append((p3d, uv_ann, jid))
 
         if frame_pairs:
             per_frame[json_path.name] = frame_pairs
 
     return per_frame
+
+
+# ------------------------------------------------------------------
+# Joint balancing weights
+# ------------------------------------------------------------------
+
+# Body part grouping for weight computation
+_BODY_PARTS = {
+    'spine':     [0, 1, 2, 3],
+    'head':      [26, 27, 28, 29, 30, 31],
+    'left_arm':  [4, 5, 6, 7, 8, 9, 10],
+    'right_arm': [11, 12, 13, 14, 15, 16, 17],
+    'left_leg':  [18, 19, 20, 21],
+    'right_leg': [22, 23, 24, 25],
+}
+
+# Reverse map: joint_id -> body part name
+_JOINT_TO_PART = {}
+for _part, _jids in _BODY_PARTS.items():
+    for _jid in _jids:
+        _JOINT_TO_PART[_jid] = _part
+
+
+def compute_joint_weights(
+    correspondences: List[Tuple[np.ndarray, np.ndarray, int]],
+) -> Dict[int, float]:
+    """Compute inverse-frequency weights per joint so all body parts
+    contribute equally to the optimization cost.
+
+    Algorithm:
+      1. Count correspondences per body part (spine, head, arms, legs)
+      2. Target count = total / num_parts_present (equal share per part)
+      3. Weight for joints in part P = target_count / count(P)
+      4. Normalize so mean weight = 1.0
+
+    Returns: {joint_id: weight}. Joints not in correspondences get 0.
+    """
+    # Count per body part
+    part_counts: Dict[str, int] = {}
+    for _, _, jid in correspondences:
+        part = _JOINT_TO_PART.get(jid, 'spine')
+        part_counts[part] = part_counts.get(part, 0) + 1
+
+    if not part_counts:
+        return {}
+
+    total = sum(part_counts.values())
+    n_parts = len(part_counts)
+    target_per_part = total / n_parts
+
+    # Weight per part = target / actual_count
+    part_weights: Dict[str, float] = {}
+    for part, count in part_counts.items():
+        part_weights[part] = target_per_part / count
+
+    # Assign to joints
+    joint_weights: Dict[int, float] = {}
+    for _, _, jid in correspondences:
+        part = _JOINT_TO_PART.get(jid, 'spine')
+        joint_weights[jid] = part_weights[part]
+
+    # Normalize so mean weight = 1.0
+    if joint_weights:
+        # Weighted by occurrence: compute mean weight across all correspondences
+        w_sum = sum(joint_weights.get(jid, 1.0) for _, _, jid in correspondences)
+        w_mean = w_sum / len(correspondences)
+        if w_mean > 0:
+            for jid in joint_weights:
+                joint_weights[jid] /= w_mean
+
+    return joint_weights
+
+
+def build_weight_vector(
+    joint_ids: np.ndarray,   # (N,) int array of joint IDs
+    joint_weights: Dict[int, float],
+) -> np.ndarray:
+    """Build per-correspondence weight vector from joint_ids and weight dict.
+
+    Returns (N,) array of sqrt(weight) — applied to residuals so that
+    least_squares minimizes weighted sum of squares.
+    """
+    weights = np.ones(len(joint_ids), dtype=np.float64)
+    for i, jid in enumerate(joint_ids):
+        weights[i] = joint_weights.get(int(jid), 1.0)
+    return np.sqrt(weights)
 
 
 # ------------------------------------------------------------------
@@ -453,38 +539,78 @@ def compute_residuals(
     return residuals
 
 
+def compute_residuals_weighted(
+    params: np.ndarray,
+    points_3d: np.ndarray,
+    points_2d: np.ndarray,
+    fx: float, fy: float, cx: float, cy: float,
+    sqrt_weights: np.ndarray,  # (N,) — sqrt of per-correspondence weights
+) -> np.ndarray:
+    """Weighted reprojection residuals. Each correspondence's (u,v) residuals
+    are multiplied by sqrt(weight) so that least_squares minimizes the
+    weighted sum of squares."""
+    raw = compute_residuals(params, points_3d, points_2d, fx, fy, cx, cy)
+    # raw is (2*N,): interleaved [u0, v0, u1, v1, ...].  Apply weight per pair.
+    weighted = raw.copy()
+    for i in range(len(sqrt_weights)):
+        weighted[2 * i] *= sqrt_weights[i]
+        weighted[2 * i + 1] *= sqrt_weights[i]
+    return weighted
+
+
 def fit_extrinsic_delta(
     points_3d: np.ndarray,   # (N, 3)
     points_2d: np.ndarray,   # (N, 2)
     fx: float, fy: float, cx: float, cy: float,
+    sqrt_weights: Optional[np.ndarray] = None,  # (N,) sqrt per-correspondence weights
 ) -> Tuple[np.ndarray, float, float]:
     """Fit optimal 6DOF extrinsic delta minimizing reprojection error.
 
+    Args:
+        sqrt_weights: If provided, applies per-correspondence weighting.
+            Pass sqrt(w) so that least_squares minimizes sum(w_i * r_i^2).
+
     Returns:
         params: [rx, ry, rz, tx, ty, tz] (degrees, mm)
-        rms_before: RMS reprojection error with identity transform
-        rms_after: RMS reprojection error with fitted transform
+        rms_before: RMS reprojection error with identity transform (unweighted)
+        rms_after: RMS reprojection error with fitted transform (unweighted)
     """
-    # RMS before (identity transform)
+    use_weights = sqrt_weights is not None and len(sqrt_weights) == len(points_3d)
+
+    # RMS before (identity, unweighted for reporting)
     res_before = compute_residuals(
         np.zeros(6), points_3d, points_2d, fx, fy, cx, cy
     )
     rms_before = np.sqrt(np.mean(res_before ** 2))
 
-    # Optimize
-    result = least_squares(
-        compute_residuals,
-        x0=np.zeros(6),
-        args=(points_3d, points_2d, fx, fy, cx, cy),
-        method="lm",
-        ftol=1e-10,
-        xtol=1e-10,
-        gtol=1e-10,
-        max_nfev=5000,
-    )
+    # Optimize (weighted or unweighted)
+    if use_weights:
+        result = least_squares(
+            compute_residuals_weighted,
+            x0=np.zeros(6),
+            args=(points_3d, points_2d, fx, fy, cx, cy, sqrt_weights),
+            method="lm",
+            ftol=1e-10,
+            xtol=1e-10,
+            gtol=1e-10,
+            max_nfev=5000,
+        )
+    else:
+        result = least_squares(
+            compute_residuals,
+            x0=np.zeros(6),
+            args=(points_3d, points_2d, fx, fy, cx, cy),
+            method="lm",
+            ftol=1e-10,
+            xtol=1e-10,
+            gtol=1e-10,
+            max_nfev=5000,
+        )
 
     params = result.x
-    rms_after = np.sqrt(np.mean(result.fun ** 2))
+    # Report unweighted RMS for consistent comparison
+    res_after = compute_residuals(params, points_3d, points_2d, fx, fy, cx, cy)
+    rms_after = np.sqrt(np.mean(res_after ** 2))
 
     return params, rms_before, rms_after
 
@@ -500,6 +626,7 @@ def compute_residuals_regularized(
     fx: float, fy: float, cx: float, cy: float,
     prior_params: np.ndarray,
     reg_weight: float,
+    sqrt_weights: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     """Reprojection residuals + L2 regularization toward a prior.
 
@@ -507,25 +634,32 @@ def compute_residuals_regularized(
         reg_weight * scale_i * (param_i - prior_i)
     where scale normalizes so that 1 deg rotation ≈ 10mm translation.
     """
-    reproj = compute_residuals(params, points_3d, points_2d, fx, fy, cx, cy)
+    if sqrt_weights is not None and len(sqrt_weights) == len(points_3d):
+        reproj = compute_residuals_weighted(
+            params, points_3d, points_2d, fx, fy, cx, cy, sqrt_weights
+        )
+    else:
+        reproj = compute_residuals(params, points_3d, points_2d, fx, fy, cx, cy)
     reg = reg_weight * _REG_SCALES * (params - prior_params)
     return np.concatenate([reproj, reg])
 
 
 def fit_frame_deltas(
-    per_frame_corr: Dict[str, List[Tuple[np.ndarray, np.ndarray]]],
+    per_frame_corr: Dict[str, List[Tuple[np.ndarray, np.ndarray, int]]],
     session_params: np.ndarray,
     fx: float, fy: float, cx: float, cy: float,
     reg_weight: float = 5.0,
     min_joints: int = 4,
+    joint_weights: Optional[Dict[int, float]] = None,
 ) -> Dict[str, np.ndarray]:
     """Fit per-frame deltas regularized toward the session delta.
 
     Args:
-        per_frame_corr: frame_filename -> [(p3d, uv), ...]
+        per_frame_corr: frame_filename -> [(p3d, uv, joint_id), ...]
         session_params: [rx, ry, rz, tx, ty, tz] session-level prior
         reg_weight: regularization strength (higher = closer to session)
         min_joints: minimum correspondences per frame to attempt fit
+        joint_weights: if provided, applies body-part balancing weights
 
     Returns:
         frame_filename -> params[6].  Frames with too few joints get session_params.
@@ -540,10 +674,16 @@ def fit_frame_deltas(
         pts_3d = np.array([p[0] for p in corr])
         pts_2d = np.array([p[1] for p in corr])
 
+        # Per-frame weights from joint balancing
+        sw = None
+        if joint_weights:
+            jids = np.array([p[2] for p in corr], dtype=np.int32)
+            sw = build_weight_vector(jids, joint_weights)
+
         result = least_squares(
             compute_residuals_regularized,
             x0=session_params.copy(),
-            args=(pts_3d, pts_2d, fx, fy, cx, cy, session_params, reg_weight),
+            args=(pts_3d, pts_2d, fx, fy, cx, cy, session_params, reg_weight, sw),
             method="lm",
             ftol=1e-8,
             xtol=1e-8,
@@ -780,6 +920,16 @@ def main():
         "Higher = frame deltas stay closer to the session average. "
         "Scale: 1 deg rotation ~ 10mm translation in cost.",
     )
+    parser.add_argument(
+        "--joint-weights", action="store_true", default=True,
+        help="Balance body-part contribution via inverse-frequency weighting "
+        "(default: enabled). Upper body joints that appear less often get "
+        "higher weight so the fit isn't dominated by always-visible lower body.",
+    )
+    parser.add_argument(
+        "--no-joint-weights", dest="joint_weights", action="store_false",
+        help="Disable body-part balancing (all correspondences equal weight).",
+    )
     args = parser.parse_args()
 
     # --per-frame implies --per-session
@@ -894,8 +1044,8 @@ def main():
     # Step 3: Collect correspondences
     # -----------------------------------------------------------
     # Keyed by ann_dir string for per-session mode, or "_global" for global mode.
-    session_correspondences: Dict[str, List[Tuple[np.ndarray, np.ndarray]]] = {}
-    per_joint_counts: Dict[int, int] = {jid: 0 for jid in range(NUM_JOINTS)}
+    # Each correspondence is (p3d, uv, joint_id).
+    session_correspondences: Dict[str, List[Tuple[np.ndarray, np.ndarray, int]]] = {}
 
     if use_predictions:
         print("\nCollecting correspondences from model predictions "
@@ -915,32 +1065,6 @@ def main():
 
             key = str(ann_dir) if args.per_session else "_global"
             session_correspondences.setdefault(key, []).extend(pairs)
-
-            # Per-joint counts
-            pred_files = sorted(p_dir.glob("frame_*.json"))
-            for pred_path in pred_files:
-                ann_path = ann_dir / pred_path.name
-                if not ann_path.exists():
-                    continue
-                with open(ann_path, encoding="utf-8") as f:
-                    ann_data = json.load(f)
-                with open(pred_path, encoding="utf-8") as f:
-                    pred_data = json.load(f)
-                skel_3d = {e["joint_id"]: e for e in ann_data.get("skeleton_3d", [])}
-                skel_2d_pred = {e["joint_id"]: e
-                                for e in pred_data.get("skeleton_2d_predicted", [])}
-                for jid in range(NUM_JOINTS):
-                    if jid not in skel_3d or jid not in skel_2d_pred:
-                        continue
-                    j3 = skel_3d[jid]
-                    j2p = skel_2d_pred[jid]
-                    if j3.get("confidence", 0) < 2:
-                        continue
-                    if j2p.get("confidence", 0) < args.min_pred_confidence:
-                        continue
-                    if j3["z"] < 100:
-                        continue
-                    per_joint_counts[jid] += 1
     else:
         print("\nCollecting correspondences from edited frames...")
         for ann_dir in ann_dirs:
@@ -955,46 +1079,52 @@ def main():
                 key = str(ann_dir) if args.per_session else "_global"
                 session_correspondences.setdefault(key, []).extend(pairs)
 
-            # Count per-joint for reporting
-            json_files = sorted(ann_dir.glob("frame_*.json"))
-            for json_path in json_files:
-                bak_path = Path(str(json_path) + ".bak")
-                if not bak_path.exists():
-                    continue
-                with open(bak_path, encoding="utf-8") as f:
-                    original = json.load(f)
-                with open(json_path, encoding="utf-8") as f:
-                    edited = json.load(f)
-                orig_2d = {e["joint_id"]: e for e in original.get("skeleton_2d", [])}
-                edit_2d = {e["joint_id"]: e for e in edited.get("skeleton_2d", [])}
-                for jid in range(NUM_JOINTS):
-                    if jid not in orig_2d or jid not in edit_2d:
-                        continue
-                    o2 = orig_2d[jid]
-                    e2 = edit_2d[jid]
-                    if o2.get("confidence", 0) < 2 or e2.get("confidence", 0) < 2:
-                        continue
-                    du = e2["u"] - o2["u"]
-                    dv = e2["v"] - o2["v"]
-                    if abs(du) >= 0.5 or abs(dv) >= 0.5:
-                        per_joint_counts[jid] += 1
-
     total_pairs = sum(len(v) for v in session_correspondences.values())
     if total_pairs == 0:
         kind = "prediction" if use_predictions else "edited"
         print("No %s correspondences found." % kind)
         return
 
+    # Count per-joint from collected correspondences
+    per_joint_counts: Dict[int, int] = {jid: 0 for jid in range(NUM_JOINTS)}
+    all_corr_flat = []
+    for corr_list in session_correspondences.values():
+        for _, _, jid in corr_list:
+            per_joint_counts[jid] += 1
+        all_corr_flat.extend(corr_list)
+
     n_used_joints = sum(1 for c in per_joint_counts.values() if c > 0)
     print("\nTotal: %d correspondences across %d joint types" % (total_pairs, n_used_joints))
 
-    # Show per-joint breakdown
-    print("\n%3s %-18s %5s" % ("ID", "Joint", "N"))
-    print("-" * 30)
+    # Show per-joint breakdown with body part and weight
+    joint_weights: Optional[Dict[int, float]] = None
+    if args.joint_weights:
+        joint_weights = compute_joint_weights(all_corr_flat)
+
+    print("\n%3s %-18s %7s %5s %6s" % ("ID", "Joint", "Part", "N", "Weight"))
+    print("-" * 45)
     for jid in range(NUM_JOINTS):
         if per_joint_counts[jid] > 0:
             name = JOINT_NAMES[jid] if jid < len(JOINT_NAMES) else "JOINT_%d" % jid
-            print("%3d %-18s %5d" % (jid, name, per_joint_counts[jid]))
+            part = _JOINT_TO_PART.get(jid, "?")[:7]
+            w = joint_weights.get(jid, 1.0) if joint_weights else 1.0
+            print("%3d %-18s %7s %5d %6.2f" % (jid, name, part, per_joint_counts[jid], w))
+
+    if args.joint_weights and joint_weights:
+        # Show per-body-part summary
+        part_counts: Dict[str, int] = {}
+        for _, _, jid in all_corr_flat:
+            part = _JOINT_TO_PART.get(jid, 'spine')
+            part_counts[part] = part_counts.get(part, 0) + 1
+        print("\nBody-part distribution:")
+        for part in ['spine', 'head', 'left_arm', 'right_arm', 'left_leg', 'right_leg']:
+            n = part_counts.get(part, 0)
+            pct = 100.0 * n / total_pairs if total_pairs > 0 else 0
+            w = joint_weights.get(_BODY_PARTS[part][0], 1.0) if joint_weights else 1.0
+            print("  %-12s %6d (%5.1f%%)  weight=%.2f" % (part, n, pct, w))
+        print("  Joint balancing: ENABLED")
+    else:
+        print("\n  Joint balancing: DISABLED")
     print()
 
     # -----------------------------------------------------------
@@ -1002,6 +1132,13 @@ def main():
     # -----------------------------------------------------------
     # session_results: key -> (params, rms_before, rms_after, n_pairs)
     session_results: Dict[str, Tuple[np.ndarray, float, float, int]] = {}
+
+    # Helper: build sqrt-weight vector for a correspondence list
+    def _make_sqrt_weights(corr_list):
+        if not joint_weights:
+            return None
+        jids = np.array([p[2] for p in corr_list], dtype=np.int32)
+        return build_weight_vector(jids, joint_weights)
 
     if args.per_session:
         print("Optimizing per-session 6DOF deltas (%d sessions)..."
@@ -1014,8 +1151,9 @@ def main():
                 continue
             pts_3d = np.array([p[0] for p in corr])
             pts_2d = np.array([p[1] for p in corr])
+            sw = _make_sqrt_weights(corr)
             params, rms_before, rms_after = fit_extrinsic_delta(
-                pts_3d, pts_2d, fx, fy, cx, cy
+                pts_3d, pts_2d, fx, fy, cx, cy, sqrt_weights=sw,
             )
             session_results[key] = (params, rms_before, rms_after, len(corr))
             rx, ry, rz, tx, ty, tz = params
@@ -1053,9 +1191,10 @@ def main():
         all_corr = session_correspondences["_global"]
         pts_3d = np.array([p[0] for p in all_corr])
         pts_2d = np.array([p[1] for p in all_corr])
+        sw = _make_sqrt_weights(all_corr)
 
         params, rms_before, rms_after = fit_extrinsic_delta(
-            pts_3d, pts_2d, fx, fy, cx, cy
+            pts_3d, pts_2d, fx, fy, cx, cy, sqrt_weights=sw,
         )
         session_results["_global"] = (params, rms_before, rms_after, len(all_corr))
 
@@ -1115,6 +1254,7 @@ def main():
             frame_deltas = fit_frame_deltas(
                 pf_corr, session_params, fx, fy, cx, cy,
                 reg_weight=args.frame_reg,
+                joint_weights=joint_weights,
             )
             per_frame_results[ann_key] = frame_deltas
 

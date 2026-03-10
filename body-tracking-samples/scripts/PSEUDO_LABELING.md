@@ -136,6 +136,9 @@ python fit_extrinsic.py <dataset_root> --predictions --per-frame --apply --3d
 
 # Filter by prediction confidence (default 0.5)
 python fit_extrinsic.py <dataset_root> --predictions --min-pred-confidence 0.7
+
+# Disable body-part balancing weights (equal weight for all joints)
+python fit_extrinsic.py <dataset_root> --predictions --no-joint-weights
 ```
 
 ### 4. Evaluate model quality
@@ -145,6 +148,24 @@ python train_pose_model.py eval <dataset_root> -m model.pth
 ```
 
 Reports overall PCK@5 and per-joint breakdown on the validation set.
+
+### 5. Visualize predictions
+
+```bash
+# Interactive overlay (annotation=muted, prediction=bright)
+python visualize_predictions.py <dataset_root>
+
+# Side-by-side comparison
+python visualize_predictions.py <dataset_root> --mode side-by-side
+
+# Per-session error summary table
+python visualize_predictions.py <dataset_root> --mode summary
+
+# Export comparison images to disk
+python visualize_predictions.py <dataset_root> --mode export -o comparison/
+```
+
+Keyboard: arrows=frame, PgUp/PgDn=skip 10, N/P=next/prev session.
 
 ## Fitting Modes Comparison
 
@@ -209,6 +230,47 @@ At prediction time, a single affine transform maps bbox → 256×192 crop. The i
 ## Confidence Filtering
 
 `fit_extrinsic.py --min-pred-confidence` (default 0.5) filters which predicted joints become correspondences. Higher thresholds reduce noise at the cost of fewer pairs. The model's confidence is the heatmap peak value (0–1).
+
+## Body-Part Balancing (Joint Weights)
+
+In ego-view, the lower body (pelvis, hips, knees, ankles, feet) is visible in nearly every frame, while upper body joints (shoulders, elbows, wrists) frequently extend off-screen. Without correction, the optimizer minimizes total residual, effectively fitting to the lower body and under-fitting the upper body.
+
+**Solution**: Inverse-frequency weighting per body part (enabled by default, disable with `--no-joint-weights`).
+
+### Algorithm
+
+1. Group joints into 6 body parts: spine, head, left_arm, right_arm, left_leg, right_leg
+2. Count correspondences per body part
+3. Target count = total / num_parts_present (equal share)
+4. Weight for joints in part P = target / count(P)
+5. Normalize so mean weight = 1.0
+6. Scale each correspondence's residual by sqrt(weight) → least_squares minimizes weighted sum of squares
+
+### Body Part Groups
+
+| Part | Joint IDs |
+|------|-----------|
+| spine | 0–3 (PELVIS, SPINE_NAVAL, SPINE_CHEST, NECK) |
+| head | 26–31 (HEAD, NOSE, EYE_LEFT, EAR_LEFT, EYE_RIGHT, EAR_RIGHT) |
+| left_arm | 4–10 (CLAVICLE_LEFT → THUMB_LEFT) |
+| right_arm | 11–17 (CLAVICLE_RIGHT → THUMB_RIGHT) |
+| left_leg | 18–21 (HIP_LEFT → FOOT_LEFT) |
+| right_leg | 22–25 (HIP_RIGHT → FOOT_RIGHT) |
+
+### Example output
+
+```
+Body-part distribution:
+  spine          1800 ( 25.0%)  weight=0.52
+  head            300 (  4.2%)  weight=3.12
+  left_arm        500 (  6.9%)  weight=1.87
+  right_arm       520 (  7.2%)  weight=1.80
+  left_leg       2040 ( 28.3%)  weight=0.46
+  right_leg      2040 ( 28.3%)  weight=0.46
+  Joint balancing: ENABLED
+```
+
+Arms and head (rarely visible) get higher weight; legs (almost always visible) get lower weight. The optimizer treats all body parts as equally important.
 
 ## Per-Frame Regularization Details
 

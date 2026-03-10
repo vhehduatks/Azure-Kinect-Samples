@@ -2,6 +2,7 @@
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
+    QCheckBox,
     QGroupBox,
     QVBoxLayout,
     QHBoxLayout,
@@ -140,6 +141,17 @@ class ExtrinsicPanel(QGroupBox):
         layout.addLayout(self._tx)
         layout.addLayout(self._ty)
         layout.addLayout(self._tz)
+
+        # -- Projection mode --
+        self._direct_proj_checkbox = QCheckBox("Direct projection")
+        self._direct_proj_checkbox.setToolTip(
+            "Direct: project transformed 3D directly via pinhole model.\n"
+            "  Accurate when intrinsics come from camera calibration.\n"
+            "Differential (unchecked): add projection offset to original 2D.\n"
+            "  Error-cancelling when intrinsics are estimated."
+        )
+        self._direct_proj_checkbox.setChecked(True)
+        layout.addWidget(self._direct_proj_checkbox)
 
         # -- Frame range inputs --
         range_row = QHBoxLayout()

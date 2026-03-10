@@ -154,6 +154,9 @@ class AnnotationMainWindow(QMainWindow):
         self.extrinsic_panel.export_clicked.connect(self._export_extrinsic)
         self.extrinsic_panel.preview_3d_clicked.connect(self._preview_3d)
         self.extrinsic_panel.range_active_changed.connect(self._vis_btn.setEnabled)
+        self.extrinsic_panel._direct_proj_checkbox.toggled.connect(
+            lambda on: setattr(self.model, 'direct_projection', on)
+        )
         self.model.session_loaded.connect(self._on_session_loaded_extrinsic)
         self.model.session_loaded.connect(
             lambda: self.extrinsic_panel.set_frame_count(self.model.frame_count)
@@ -683,7 +686,12 @@ class AnnotationMainWindow(QMainWindow):
     # ==================================================================
     def _on_session_loaded_extrinsic(self):
         if self.model.has_intrinsics():
-            self._status.showMessage("Intrinsics estimated from 3D/2D pairs", 5000)
+            if self.model.intrinsics_from_calibration:
+                self._status.showMessage("Intrinsics from camera calibration (direct projection)", 5000)
+            else:
+                self._status.showMessage("Intrinsics estimated from 3D/2D pairs (differential projection)", 5000)
+            # Sync checkbox with model default
+            self.extrinsic_panel._direct_proj_checkbox.setChecked(self.model.direct_projection)
         else:
             self._status.showMessage(
                 "Extrinsic tuning unavailable: could not estimate intrinsics", 5000

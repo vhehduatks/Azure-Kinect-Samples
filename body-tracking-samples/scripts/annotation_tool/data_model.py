@@ -118,6 +118,8 @@ class AnnotationModel(QObject):
             0.0, 0.0, 0.0, 0.0, 0.0, 0.0
         )  # (rx, ry, rz, tx, ty, tz)
         self._intrinsics: Optional[Tuple[float, float, float, float]] = None  # (fx, fy, cx, cy)
+        self._intrinsics_from_calibration: bool = False  # True if from camera_intrinsics JSON
+        self._direct_projection: bool = True  # True=direct projection, False=differential
         self._image_size: Optional[Tuple[int, int]] = None  # (width, height)
         self._update_3d: bool = True  # whether joint drags update 3D via IK
 
@@ -175,6 +177,22 @@ class AnnotationModel(QObject):
     def update_3d(self, value: bool):
         self._update_3d = value
 
+    @property
+    def direct_projection(self) -> bool:
+        """True = direct projection (use intrinsics to project 3D→2D directly).
+        False = differential projection (add projection offset to original 2D)."""
+        return self._direct_projection
+
+    @direct_projection.setter
+    def direct_projection(self, value: bool):
+        self._direct_projection = value
+        # Refresh preview when toggled
+        self.extrinsic_preview_changed.emit(self._current_frame)
+
+    @property
+    def intrinsics_from_calibration(self) -> bool:
+        return self._intrinsics_from_calibration
+
     # ------------------------------------------------------------------
     # Head-joint pruning
     # ------------------------------------------------------------------
@@ -208,9 +226,10 @@ class AnnotationModel(QObject):
         self._pruned_joints = set()
         self._extrinsic_delta = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
         self._intrinsics = None
+        self._intrinsics_from_calibration = False
         self.dirty_changed.emit(False)
         self.session_loaded.emit()
-        # Estimate intrinsics from 3D/2D correspondences
+        # Load or estimate intrinsics
         self.estimate_intrinsics()
 
     # ------------------------------------------------------------------
@@ -581,15 +600,40 @@ class AnnotationModel(QObject):
     # Extrinsic fine-tuning
     # ------------------------------------------------------------------
     def estimate_intrinsics(self):
-        """Estimate pinhole camera params (fx, fy, cx, cy) from 3D/2D pairs.
+        """Load or estimate pinhole camera params (fx, fy, cx, cy).
 
-        Uses first frames with valid skeleton data.  Solves the pinhole
-        equations via least-squares:
-            u = fx * (x / z) + cx
-            v = fy * (y / z) + cy
+        First tries to read camera_intrinsics from the annotation JSON
+        (written by offline processor from K4A factory calibration).
+        Falls back to least-squares estimation from 3D/2D pairs.
         """
         if self._dataset is None:
             return
+
+        # Try reading camera_intrinsics from annotation JSON
+        for frame_idx in range(min(self.frame_count, 5)):
+            frame_data = self._dataset.get_frame(frame_idx)
+            json_path = frame_data.get("_json_path", "")
+            if not json_path or not Path(json_path).exists():
+                continue
+            with open(json_path, encoding="utf-8") as f:
+                data = json.load(f)
+            ci = data.get("camera_intrinsics")
+            if ci and "fx" in ci:
+                self._intrinsics = (ci["fx"], ci["fy"], ci["cx"], ci["cy"])
+                self._intrinsics_from_calibration = True
+                self._direct_projection = True  # default to direct when calibration available
+                print(f"[ExtrinsicTuning] Intrinsics from camera calibration: "
+                      f"fx={ci['fx']:.1f} fy={ci['fy']:.1f} cx={ci['cx']:.1f} cy={ci['cy']:.1f}")
+                # Resolve image dimensions from calibration if available
+                if "width" in ci and "height" in ci:
+                    self._image_size = (ci["width"], ci["height"])
+                else:
+                    self._image_size = (int(2 * ci["cx"]), int(2 * ci["cy"]))
+                return
+
+        # Fall back to least-squares estimation
+        self._intrinsics_from_calibration = False
+        self._direct_projection = False  # default to differential when estimated
         A_rows: List[List[float]] = []
         b_rows: List[float] = []
         for frame_idx in range(min(self.frame_count, 50)):
@@ -604,13 +648,11 @@ class AnnotationModel(QObject):
                     continue
                 xz = float(x / z)
                 yz = float(y / z)
-                # u = fx * x/z + cx  -->  [x/z, 1, 0, 0] . [fx, cx, fy, cy] = u
                 A_rows.append([xz, 1.0, 0.0, 0.0])
                 b_rows.append(float(u))
-                # v = fy * y/z + cy  -->  [0, 0, y/z, 1] . [fx, cx, fy, cy] = v
                 A_rows.append([0.0, 0.0, yz, 1.0])
                 b_rows.append(float(v))
-            if len(A_rows) >= 60:  # well over-determined
+            if len(A_rows) >= 60:
                 break
 
         if len(A_rows) < 8:
@@ -651,11 +693,11 @@ class AnnotationModel(QObject):
     def get_adjusted_joint_2d(self, frame: int, joint_id: int) -> Tuple[float, float, int, bool]:
         """Return (u, v, conf, vis) with extrinsic delta applied.
 
-        Uses a differential approach: project the 3D point with and without
-        the delta, then add only the *difference* to the original 2D coords.
-        This avoids intrinsic-estimation error replacing the ground-truth 2D
-        positions, which would cause the skeleton to visibly shift/shrink
-        the moment any slider is touched.
+        Two modes controlled by self._direct_projection:
+        - Direct: project transformed 3D point directly via pinhole model.
+          Accurate when intrinsics come from camera calibration.
+        - Differential: add projection offset to original 2D coords.
+          Avoids intrinsic-estimation error when intrinsics are estimated.
 
         Falls back to get_joint_2d if intrinsics are unavailable or 3D data missing.
         """
@@ -673,20 +715,22 @@ class AnnotationModel(QObject):
         orig_u, orig_v, conf, vis = self.get_joint_2d(frame, joint_id)
         fx, fy, cx, cy = self._intrinsics
 
-        # Baseline: project the unmodified 3D point
-        base_u, base_v = _project_pinhole(x, y, z, fx, fy, cx, cy)
-
-        # Delta: project the transformed 3D point
+        # Transform 3D point
         rx, ry, rz, tx, ty, tz = self._extrinsic_delta
         R = _euler_to_rotation_matrix(rx, ry, rz)
         pt = R @ np.array([x, y, z], dtype=np.float64) + np.array([tx, ty, tz])
         if pt[2] <= 0:
             return self.get_joint_2d(frame, joint_id)
-        delta_u, delta_v = _project_pinhole(pt[0], pt[1], pt[2], fx, fy, cx, cy)
 
-        # Apply only the projection offset to the original 2D coordinates
-        u = orig_u + (delta_u - base_u)
-        v = orig_v + (delta_v - base_v)
+        if self._direct_projection:
+            # Direct: project transformed 3D → 2D
+            u, v = _project_pinhole(pt[0], pt[1], pt[2], fx, fy, cx, cy)
+        else:
+            # Differential: u' = u + [proj(P') - proj(P)]
+            base_u, base_v = _project_pinhole(x, y, z, fx, fy, cx, cy)
+            delta_u, delta_v = _project_pinhole(pt[0], pt[1], pt[2], fx, fy, cx, cy)
+            u = orig_u + (delta_u - base_u)
+            v = orig_v + (delta_v - base_v)
         return (u, v, conf, vis)
 
     def get_adjusted_joint_3d(self, frame: int, joint_id: int):
@@ -732,7 +776,7 @@ class AnnotationModel(QObject):
         end_frame: Optional[int] = None,
     ) -> int:
         """Apply current delta to frames, transforming skeleton_3d and
-        updating skeleton_2d via a differential projection offset.
+        updating skeleton_2d.
 
         Parameters
         ----------
@@ -743,13 +787,13 @@ class AnnotationModel(QObject):
 
         Pipeline per frame:
           1. Transform 3D:  P' = R * P + t          (written to skeleton_3d)
-          2. Update 2D:     u' = u + [proj(P') - proj(P)]   (differential)
+          2. Update 2D:
+             - Direct mode:       u' = proj(P')     (accurate with calibration intrinsics)
+             - Differential mode: u' = u + [proj(P') - proj(P)]  (error-cancelling)
           3. Recalculate visibility:  z'<=0 or (u',v') out of image → invisible
 
-        The differential approach for step 2 avoids baking intrinsic-estimation
-        error into the 2D coordinates.  The estimated (fx,fy,cx,cy) appear in
-        both proj(P') and proj(P) so the error cancels, preserving image
-        alignment while still transforming the 3D ground truth.
+        Direct mode is default when camera_intrinsics are from calibration.
+        Differential mode is default when intrinsics are estimated (error cancels).
 
         Returns number of frames updated.
         """
@@ -809,14 +853,9 @@ class AnnotationModel(QObject):
                 entry["z"] = round(float(pt[2]), 2)
                 transform_pairs[jid] = (orig, pt)
 
-            # 2) Update 2D using the differential projection offset and
-            #    recalculate visibility from scratch.
-            #
+            # 2) Update 2D and recalculate visibility from scratch.
             #    visible = (confidence > 0) AND (z' > 0) AND (u',v' in image)
-            #
-            #    The differential u' = u + [proj(P') - proj(P)] preserves
-            #    image alignment; visibility is then set deterministically
-            #    from the new geometry so stale flags cannot persist.
+            use_direct = self._direct_projection
             for entry in skel_2d:
                 jid = entry["joint_id"]
                 pair = transform_pairs.get(jid)
@@ -838,19 +877,25 @@ class AnnotationModel(QObject):
                     entry["visible"] = False
                     continue
 
-                # Original depth invalid → can't compute differential → invisible
-                if orig_pt[2] <= 0:
-                    entry["visible"] = False
-                    continue
+                if use_direct:
+                    # Direct: project transformed 3D → 2D
+                    new_u, new_v = _project_pinhole(
+                        new_pt[0], new_pt[1], new_pt[2], fx, fy, cx, cy
+                    )
+                else:
+                    # Differential: u' = u + [proj(P') - proj(P)]
+                    if orig_pt[2] <= 0:
+                        entry["visible"] = False
+                        continue
+                    base_u, base_v = _project_pinhole(
+                        orig_pt[0], orig_pt[1], orig_pt[2], fx, fy, cx, cy
+                    )
+                    proj_u, proj_v = _project_pinhole(
+                        new_pt[0], new_pt[1], new_pt[2], fx, fy, cx, cy
+                    )
+                    new_u = entry["u"] + (proj_u - base_u)
+                    new_v = entry["v"] + (proj_v - base_v)
 
-                base_u, base_v = _project_pinhole(
-                    orig_pt[0], orig_pt[1], orig_pt[2], fx, fy, cx, cy
-                )
-                proj_u, proj_v = _project_pinhole(
-                    new_pt[0], new_pt[1], new_pt[2], fx, fy, cx, cy
-                )
-                new_u = entry["u"] + (proj_u - base_u)
-                new_v = entry["v"] + (proj_v - base_v)
                 entry["u"] = round(new_u, 2)
                 entry["v"] = round(new_v, 2)
 

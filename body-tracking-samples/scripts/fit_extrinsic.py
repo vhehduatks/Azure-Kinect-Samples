@@ -900,6 +900,7 @@ def save_optimization_log(
     source_dir: str,
     per_frame_results: Optional[Dict[str, Dict[str, np.ndarray]]] = None,
     intrinsics_from_json: bool = False,
+    session_joint_weights: Optional[Dict[str, Dict[int, float]]] = None,
 ):
     """Save full optimization record as JSON for reproducibility and analysis."""
     fx, fy, cx, cy = intrinsics
@@ -916,6 +917,7 @@ def save_optimization_log(
             "per_frame": args.per_frame,
             "frame_reg": args.frame_reg,
             "joint_weights_enabled": args.joint_weights,
+            "joint_weights_scope": "per-session" if (args.joint_weights and args.per_session) else ("global" if args.joint_weights else "none"),
             "exclude_joints": sorted(excluded_joints),
             "apply": args.apply,
             "apply_3d": args.apply_3d,
@@ -978,6 +980,16 @@ def save_optimization_log(
                 "tz_mm": round(float(tz), 3),
             },
         }
+
+        # Per-session joint weights
+        if session_joint_weights and key in session_joint_weights:
+            sw_dict = session_joint_weights[key]
+            session_parts = {}
+            for part in ['spine', 'head', 'left_arm', 'right_arm', 'left_leg', 'right_leg']:
+                jids = _BODY_PARTS.get(part, [])
+                w = sw_dict.get(jids[0], 0.0) if jids and jids[0] in sw_dict else 0.0
+                session_parts[part] = round(w, 4)
+            entry["joint_weights"] = session_parts
 
         # Per-frame stats for this session
         if per_frame_results and key in per_frame_results:
@@ -1311,7 +1323,7 @@ def main():
         print("No %s correspondences found." % kind)
         return
 
-    # Count per-joint from collected correspondences
+    # Count per-joint from collected correspondences (global aggregate for reporting)
     per_joint_counts: Dict[int, int] = {jid: 0 for jid in range(NUM_JOINTS)}
     all_corr_flat = []
     for corr_list in session_correspondences.values():
@@ -1322,11 +1334,28 @@ def main():
     n_used_joints = sum(1 for c in per_joint_counts.values() if c > 0)
     print("\nTotal: %d correspondences across %d joint types" % (total_pairs, n_used_joints))
 
-    # Show per-joint breakdown with body part and weight
-    joint_weights: Optional[Dict[int, float]] = None
-    if args.joint_weights:
-        joint_weights = compute_joint_weights(all_corr_flat)
+    # -----------------------------------------------------------
+    # Compute joint weights
+    # -----------------------------------------------------------
+    # In per-session mode: compute weights per session so each session's fit
+    # depends only on its own body-part distribution.
+    # In global mode: compute once from all pooled correspondences.
+    # session_joint_weights: key -> {joint_id: weight} (or None if disabled)
+    session_joint_weights: Dict[str, Dict[int, float]] = {}
+    joint_weights: Optional[Dict[int, float]] = None  # global (for reporting / global mode)
 
+    if args.joint_weights:
+        if args.per_session:
+            # Per-session weights
+            for key, corr_list in session_correspondences.items():
+                session_joint_weights[key] = compute_joint_weights(corr_list)
+            # Also compute global aggregate for the summary report
+            joint_weights = compute_joint_weights(all_corr_flat)
+        else:
+            # Global weights
+            joint_weights = compute_joint_weights(all_corr_flat)
+
+    # Show per-joint breakdown (global aggregate)
     print("\n%3s %-18s %7s %5s %6s" % ("ID", "Joint", "Part", "N", "Weight"))
     print("-" * 45)
     for jid in range(NUM_JOINTS):
@@ -1337,18 +1366,21 @@ def main():
             print("%3d %-18s %7s %5d %6.2f" % (jid, name, part, per_joint_counts[jid], w))
 
     if args.joint_weights and joint_weights:
-        # Show per-body-part summary
+        # Show per-body-part summary (global aggregate)
         part_counts: Dict[str, int] = {}
         for _, _, jid in all_corr_flat:
             part = _JOINT_TO_PART.get(jid, 'spine')
             part_counts[part] = part_counts.get(part, 0) + 1
-        print("\nBody-part distribution:")
+        print("\nBody-part distribution (global aggregate):")
         for part in ['spine', 'head', 'left_arm', 'right_arm', 'left_leg', 'right_leg']:
             n = part_counts.get(part, 0)
             pct = 100.0 * n / total_pairs if total_pairs > 0 else 0
             w = joint_weights.get(_BODY_PARTS[part][0], 1.0) if joint_weights else 1.0
             print("  %-12s %6d (%5.1f%%)  weight=%.2f" % (part, n, pct, w))
-        print("  Joint balancing: ENABLED")
+        if args.per_session:
+            print("  Joint balancing: ENABLED (per-session weights)")
+        else:
+            print("  Joint balancing: ENABLED")
     else:
         print("\n  Joint balancing: DISABLED")
     print()
@@ -1360,11 +1392,11 @@ def main():
     session_results: Dict[str, Tuple[np.ndarray, float, float, int]] = {}
 
     # Helper: build sqrt-weight vector for a correspondence list
-    def _make_sqrt_weights(corr_list):
-        if not joint_weights:
+    def _make_sqrt_weights(corr_list, weights_dict):
+        if not weights_dict:
             return None
         jids = np.array([p[2] for p in corr_list], dtype=np.int32)
-        return build_weight_vector(jids, joint_weights)
+        return build_weight_vector(jids, weights_dict)
 
     if args.per_session:
         print("Optimizing per-session 6DOF deltas (%d sessions)..."
@@ -1377,7 +1409,8 @@ def main():
                 continue
             pts_3d = np.array([p[0] for p in corr])
             pts_2d = np.array([p[1] for p in corr])
-            sw = _make_sqrt_weights(corr)
+            # Use this session's own weights
+            sw = _make_sqrt_weights(corr, session_joint_weights.get(key))
             params, rms_before, rms_after = fit_extrinsic_delta(
                 pts_3d, pts_2d, fx, fy, cx, cy, sqrt_weights=sw,
             )
@@ -1391,6 +1424,27 @@ def main():
         if not session_results:
             print("No sessions had enough correspondences to fit.")
             return
+
+        # Per-session weight distribution report
+        if args.joint_weights and session_joint_weights:
+            print()
+            _PARTS_ORDER = ['spine', 'head', 'left_arm', 'right_arm', 'left_leg', 'right_leg']
+            hdr = "%-30s" % "Session"
+            for p in _PARTS_ORDER:
+                hdr += " %8s" % p[:8]
+            print(hdr)
+            print("-" * (30 + 9 * len(_PARTS_ORDER)))
+            for key in sorted(session_results.keys()):
+                sw_dict = session_joint_weights.get(key, {})
+                label = _session_label(key, source_dir)
+                if len(label) > 28:
+                    label = "..." + label[-25:]
+                row = "%-30s" % label
+                for p in _PARTS_ORDER:
+                    jids = _BODY_PARTS.get(p, [])
+                    w = sw_dict.get(jids[0], 1.0) if jids and jids[0] in sw_dict else 0.0
+                    row += " %8.2f" % w
+                print(row)
 
         # Summary statistics
         all_params = np.array([r[0] for r in session_results.values()])
@@ -1417,7 +1471,7 @@ def main():
         all_corr = session_correspondences["_global"]
         pts_3d = np.array([p[0] for p in all_corr])
         pts_2d = np.array([p[1] for p in all_corr])
-        sw = _make_sqrt_weights(all_corr)
+        sw = _make_sqrt_weights(all_corr, joint_weights)
 
         params, rms_before, rms_after = fit_extrinsic_delta(
             pts_3d, pts_2d, fx, fy, cx, cy, sqrt_weights=sw,
@@ -1480,10 +1534,12 @@ def main():
             if not pf_corr:
                 continue
 
+            # Use session's own weights in per-session mode, global weights otherwise
+            frame_jw = session_joint_weights.get(ann_key, joint_weights)
             frame_deltas = fit_frame_deltas(
                 pf_corr, session_params, fx, fy, cx, cy,
                 reg_weight=args.frame_reg,
-                joint_weights=joint_weights,
+                joint_weights=frame_jw,
             )
             per_frame_results[ann_key] = frame_deltas
 
@@ -1632,6 +1688,7 @@ def main():
             source_dir=source_dir,
             per_frame_results=per_frame_results if per_frame_results else None,
             intrinsics_from_json=intrinsics_from_json,
+            session_joint_weights=session_joint_weights if session_joint_weights else None,
         )
 
 

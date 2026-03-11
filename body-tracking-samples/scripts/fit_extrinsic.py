@@ -1129,6 +1129,12 @@ def main():
         "--no-log", action="store_true",
         help="Disable auto-saving the optimization log.",
     )
+    parser.add_argument(
+        "--restore", action="store_true",
+        help="Restore annotations from .bak files (undo --apply). "
+        "Copies every frame_*.json.bak back to frame_*.json, then exits. "
+        "Use --flat for a single annotations dir.",
+    )
     args = parser.parse_args()
 
     # Parse excluded joints
@@ -1155,6 +1161,33 @@ def main():
         return
     if not Path(target_dir).is_dir():
         print("Error: target directory not found: %s" % target_dir)
+        return
+
+    # -----------------------------------------------------------
+    # Restore mode: undo --apply by copying .bak -> .json
+    # -----------------------------------------------------------
+    if args.restore:
+        root = Path(target_dir)
+        if args.flat:
+            bak_files = sorted(root.glob("frame_*.json.bak"))
+        else:
+            bak_files = sorted(root.rglob("frame_*.json.bak"))
+
+        if not bak_files:
+            print("No .bak files found under %s" % target_dir)
+            return
+
+        restored = 0
+        for bak_path in bak_files:
+            json_path = bak_path.with_suffix("")  # remove .bak
+            shutil.copy2(bak_path, json_path)
+            restored += 1
+
+        print("Restored %d annotation files from .bak backups" % restored)
+
+        # Optionally clean up .bak files
+        print("Backup files (.bak) are still present. "
+              "Delete them manually if no longer needed.")
         return
 
     # -----------------------------------------------------------

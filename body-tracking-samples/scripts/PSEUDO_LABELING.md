@@ -313,6 +313,42 @@ Log contents:
 - **sessions**: per-session 6DOF delta, RMS before/after, n_pairs
 - **summary**: mean/std/min/max across sessions for each parameter
 
+## Validation
+
+`validate_fit.py` detects outlier sessions and compares projected 3D joints against model predictions.
+
+```bash
+# Basic outlier detection from log file
+python validate_fit.py <dataset_root> --log fit_extrinsic_log_xxx.json
+
+# Custom thresholds (tz-specific, tighter IQR)
+python validate_fit.py <dataset_root> --log fit.json --tz-max 120 --iqr-factor 1.0
+
+# Include projection vs prediction comparison
+python validate_fit.py <dataset_root> --log fit.json --predictions
+
+# Export flagged frames to CSV
+python validate_fit.py <dataset_root> --log fit.json --predictions -o flagged.csv
+
+# Full JSON report
+python validate_fit.py <dataset_root> --log fit.json --predictions --json report.json
+```
+
+### Delta outlier detection
+
+Two methods applied per session:
+- **Absolute threshold**: flag if rotation > 5° or translation > 150mm (configurable)
+- **IQR-based**: flag if parameter outside [Q1 − 1.5×IQR, Q3 + 1.5×IQR]
+
+### Projection vs prediction comparison (`--predictions`)
+
+For each frame with both annotation (3D) and prediction (2D) data:
+1. Project 3D skeleton using the session's fitted delta: `u' = proj(R @ P3d + t)`
+2. Compare against model's predicted 2D positions per joint
+3. Flag frames where mean distance > 30px or max distance > 90px (configurable)
+
+Output shows worst joints per flagged frame, grouped by session.
+
 ## Per-Frame Regularization Details
 
 The per-frame residual function appends 6 regularization terms to the standard reprojection residuals:

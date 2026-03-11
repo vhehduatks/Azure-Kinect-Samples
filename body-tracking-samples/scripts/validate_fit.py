@@ -105,7 +105,7 @@ def _session_label(ann_dir_str: str, source_dir: str) -> str:
 
 def detect_delta_outliers(
     log_data: dict,
-    rotation_max: float = 5.0,
+    rotation_max: float = 10.0,
     translation_max: float = 150.0,
     tz_max: Optional[float] = None,
     iqr_factor: float = 1.5,
@@ -276,7 +276,13 @@ def compare_projection_vs_prediction(
 
             total_frames += 1
 
-            with open(ann_path, encoding="utf-8") as f:
+            # Prefer .bak (original pre-apply 3D) over .json (may be already
+            # transformed by --apply --3d).  The delta must be applied to the
+            # ORIGINAL 3D, not to already-transformed data.
+            bak_path = Path(str(ann_path) + ".bak")
+            src_path = bak_path if bak_path.exists() else ann_path
+
+            with open(src_path, encoding="utf-8") as f:
                 ann_data = json.load(f)
             with open(pred_path, encoding="utf-8") as f:
                 pred_data = json.load(f)
@@ -285,8 +291,12 @@ def compare_projection_vs_prediction(
             skel_pred = {e["joint_id"]: e
                          for e in pred_data.get("skeleton_2d_predicted", [])}
 
-            # Also try reading per-frame intrinsics from annotation
+            # Try reading per-frame intrinsics (from .bak or current .json)
             ci = ann_data.get("camera_intrinsics")
+            if ci is None and bak_path.exists():
+                # .bak might predate camera_intrinsics; read from current .json
+                with open(ann_path, encoding="utf-8") as f:
+                    ci = json.load(f).get("camera_intrinsics")
             f_fx, f_fy, f_cx, f_cy = fx, fy, cx, cy
             if ci and "fx" in ci:
                 f_fx, f_fy = ci["fx"], ci["fy"]

@@ -58,6 +58,12 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 from scipy.optimize import least_squares
 
+try:
+    from tqdm import tqdm
+except ImportError:
+    def tqdm(iterable, **kwargs):
+        return iterable
+
 NUM_JOINTS = 32
 
 JOINT_NAMES = [
@@ -1178,7 +1184,7 @@ def main():
             return
 
         restored = 0
-        for bak_path in bak_files:
+        for bak_path in tqdm(bak_files, desc="Restoring", unit="file"):
             json_path = bak_path.with_suffix("")  # remove .bak
             shutil.copy2(bak_path, json_path)
             restored += 1

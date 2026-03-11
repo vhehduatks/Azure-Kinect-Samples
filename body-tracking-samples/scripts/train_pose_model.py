@@ -46,6 +46,13 @@ except ImportError:
     print("ERROR: OpenCV is required. Install with: pip install opencv-python")
     sys.exit(1)
 
+try:
+    from tqdm import tqdm
+except ImportError:
+    # Fallback: no-op wrapper that just passes through the iterable
+    def tqdm(iterable, **kwargs):
+        return iterable
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -97,11 +104,7 @@ def build_frame_index(dataset_root: str, min_visible_joints: int = 3) -> List[Di
 
     frames = []
     skipped = 0
-    n_dirs = len(ann_dirs)
-    for di, ann_dir in enumerate(ann_dirs):
-        if (di + 1) % 50 == 0 or di == n_dirs - 1:
-            print(f"  Scanning {di+1}/{n_dirs} dirs ({len(frames)} frames so far)...",
-                  flush=True)
+    for ann_dir in tqdm(ann_dirs, desc="Scanning dirs", unit="dir"):
         images_dir = ann_dir.parent / "images"
         if not images_dir.exists():
             continue
@@ -589,7 +592,8 @@ def evaluate(model: nn.Module, dataloader: DataLoader,
     total_pck_n = 0
     n_batches = 0
 
-    for imgs, targets, weights in dataloader:
+    for imgs, targets, weights in tqdm(dataloader, desc="Evaluating",
+                                       leave=False, unit="batch"):
         imgs = imgs.to(device)
         targets = targets.to(device)
         weights = weights.to(device)
@@ -676,7 +680,9 @@ def train(args):
         n_batches = 0
         t0 = time.time()
 
-        for imgs, targets, weights in train_loader:
+        for imgs, targets, weights in tqdm(train_loader,
+                                           desc=f"Epoch {epoch+1}/{args.epochs}",
+                                           leave=False, unit="batch"):
             imgs = imgs.to(device)
             targets = targets.to(device)
             weights = weights.to(device)
@@ -755,7 +761,7 @@ def _predict_one_session(
     normalize = T.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD)
     json_files = sorted(ann_dir.glob("frame_*.json"))
 
-    for jf in json_files:
+    for jf in tqdm(json_files, desc="Predicting", leave=False, unit="frame"):
         with open(jf) as f:
             data = json.load(f)
 
@@ -870,7 +876,8 @@ def predict_all(args):
     total_frames = 0
     total_sessions = 0
 
-    for i, ann_dir in enumerate(ann_dirs):
+    pbar = tqdm(ann_dirs, desc="Predicting sessions", unit="session")
+    for ann_dir in pbar:
         ego_dir = ann_dir.parent  # ego_dataset/
         out_dir = ego_dir / "predictions"
 
@@ -881,20 +888,12 @@ def predict_all(args):
             if len(existing) >= len(expected):
                 continue
 
-        rel = ego_dir
-        try:
-            rel = ego_dir.relative_to(root)
-        except ValueError:
-            pass
-
         n = _predict_one_session(model, device, ego_dir, out_dir)
         total_frames += n
         if n > 0:
             total_sessions += 1
 
-        if (i + 1) % 20 == 0 or i == len(ann_dirs) - 1:
-            print(f"  [{i+1}/{len(ann_dirs)}] {total_frames} frames, "
-                  f"{total_sessions} sessions", flush=True)
+        pbar.set_postfix(frames=total_frames, sessions=total_sessions)
 
     print(f"\nDone: {total_frames} frames across {total_sessions} sessions")
 

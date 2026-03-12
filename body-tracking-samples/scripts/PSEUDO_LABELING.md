@@ -180,8 +180,8 @@ the projection-based 2D with model-predicted 2D to produce the final
 `skeleton_2d` ground truth.
 
 ```bash
-# Projection-only (just recalculate visible flags, no coordinate changes)
-python blend_2d_annotations.py --dataset-root <root> --mode projection
+# Vis-fix only (recalculate visible flags, no predictions needed)
+python blend_2d_annotations.py --dataset-root <root> --mode vis-fix
 
 # Replace with model predictions
 python blend_2d_annotations.py --dataset-root <root> --mode prediction
@@ -199,11 +199,12 @@ python blend_2d_annotations.py --dataset-root <root> --mode blend --dry-run
 python blend_2d_annotations.py --dataset-root <root> --mode blend --min-pred-confidence 0.3
 ```
 
-| Mode | skeleton_2d source | When to use |
-|------|-------------------|-------------|
-| `projection` | Keep current u,v (only recalculates visible) | Vis-fix pass after `--apply` |
-| `prediction` | Replace u,v with model predictions | Model more trusted than projection |
-| `blend` | `(1-α)*proj + α*pred`, α = pred_confidence | Best of both (recommended) |
+| Mode | skeleton_2d source | Predictions needed | When to use |
+|------|-------------------|--------------------|-------------|
+| `vis-fix` | Keep current u,v (only recalculates visible) | No | Standalone visibility repair |
+| `projection` | Keep current u,v (recalculates visible) | Yes (dir must exist) | Vis-fix when predictions are present |
+| `prediction` | Replace u,v with model predictions | Yes | Model more trusted than projection |
+| `blend` | `(1-α)*proj + α*pred`, α = pred_confidence | Yes | Best of both (recommended) |
 
 For joints with no prediction or confidence below `--min-pred-confidence` (default 0.1),
 the projection value is kept (α=0).

@@ -1,7 +1,8 @@
 """Blend projected 2D annotations with model-predicted 2D keypoints.
 
-Three modes:
-    projection  — keep current u,v, only recalculate visible flag
+Four modes:
+    vis-fix     — only recalculate visible flag from current u,v (no predictions needed)
+    projection  — keep current u,v, recalculate visible (needs predictions dir to exist)
     prediction  — replace u,v with model predictions
     blend       — weighted average: u = (1-α)*u_proj + α*u_pred  where α = pred_confidence
 
@@ -14,9 +15,9 @@ Dataset structure:
                     predictions/    frame_*.json  (from train_pose_model.py predict-all)
 
 Usage:
+    python blend_2d_annotations.py --dataset-root <root> --mode vis-fix
     python blend_2d_annotations.py --dataset-root <root> --mode blend
     python blend_2d_annotations.py --session-dir <ego_dataset_dir> --mode prediction
-    python blend_2d_annotations.py --dataset-root <root> --mode projection  # vis-fix only
 """
 
 import argparse
@@ -76,6 +77,22 @@ def blend_frame(
     for entry in skel_2d:
         jid = entry["joint_id"]
         conf = entry.get("confidence", 0)
+
+        if mode == "vis-fix":
+            # Recalculate visible for ALL joints (including conf==0)
+            stats["joints_processed"] += 1
+            old_vis = entry.get("visible", True)
+            if img_w is not None and img_h is not None:
+                new_vis = bool(conf > 0 and 0 <= entry["u"] < img_w and 0 <= entry["v"] < img_h)
+                if new_vis != old_vis:
+                    entry["visible"] = new_vis
+                    changed = True
+                    if old_vis and not new_vis:
+                        stats["vis_to_invis"] += 1
+                    elif not old_vis and new_vis:
+                        stats["invis_to_vis"] += 1
+            continue
+
         if conf == 0:
             continue
 
@@ -151,7 +168,7 @@ def blend_session(
         return {"error": "no annotations/ dir"}
 
     has_predictions = pred_dir.is_dir()
-    if mode != "projection" and not has_predictions:
+    if mode not in ("projection", "vis-fix") and not has_predictions:
         return {"error": f"mode={mode} requires predictions/ dir"}
 
     json_files = sorted(ann_dir.glob("frame_*.json"))
@@ -233,7 +250,7 @@ def print_summary(all_stats: List[Tuple[str, Dict]], mode: str):
     print(f"  Frames:              {totals['frames']}")
     print(f"  Frames changed:      {totals['frames_changed']}")
     print(f"  Joints processed:    {totals['joints_processed']}")
-    if mode != "projection":
+    if mode not in ("projection", "vis-fix"):
         print(f"  Joints blended:      {totals['joints_blended']}")
         print(f"  Joints proj-only:    {totals['joints_projection_only']}")
         print(f"  Joints no-pred:      {totals['joints_no_prediction']}")
@@ -253,8 +270,9 @@ def main():
                        help="Root of hierarchical dataset (discovers all sessions)")
     group.add_argument("--session-dir",
                        help="Single ego_dataset/ directory")
-    parser.add_argument("--mode", required=True, choices=["projection", "prediction", "blend"],
-                        help="Blending mode")
+    parser.add_argument("--mode", required=True,
+                        choices=["vis-fix", "projection", "prediction", "blend"],
+                        help="Blending mode (vis-fix: only recalculate visible flags)")
     parser.add_argument("--min-pred-confidence", type=float, default=0.1,
                         help="Minimum prediction confidence to use (default: 0.1)")
     parser.add_argument("--no-backup", action="store_true",

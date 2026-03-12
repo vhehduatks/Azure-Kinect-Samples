@@ -770,6 +770,11 @@ def apply_delta_to_dir(
                 entry["y"] = round(float(pt[1]), 2)
                 entry["z"] = round(float(pt[2]), 2)
 
+        # Read image dimensions for visibility check
+        ci = data.get("camera_intrinsics", {})
+        img_w = ci.get("width", int(2 * ci["cx"]) if "cx" in ci else None)
+        img_h = ci.get("height", int(2 * ci["cy"]) if "cy" in ci else None)
+
         # Differential 2D update
         changed = False
         for entry in skel_2d:
@@ -780,6 +785,9 @@ def apply_delta_to_dir(
 
             orig_pt, new_pt = pair
             if orig_pt[2] <= 0 or new_pt[2] <= 0:
+                if new_pt is not None and new_pt[2] <= 0 and entry.get("visible", False):
+                    entry["visible"] = False
+                    changed = True
                 continue
 
             base_u, base_v = _project_pinhole(
@@ -794,6 +802,12 @@ def apply_delta_to_dir(
                 entry["u"] = round(new_u, 2)
                 entry["v"] = round(new_v, 2)
                 changed = True
+            # Recalculate visible flag
+            if img_w is not None and img_h is not None:
+                new_vis = bool(0 <= entry["u"] < img_w and 0 <= entry["v"] < img_h)
+                if entry.get("visible") != new_vis:
+                    entry["visible"] = new_vis
+                    changed = True
 
         if changed or transform_3d:
             if create_backup:
@@ -853,6 +867,11 @@ def apply_per_frame_deltas_to_dir(
                 entry["y"] = round(float(pt[1]), 2)
                 entry["z"] = round(float(pt[2]), 2)
 
+        # Read image dimensions for visibility check
+        ci = data.get("camera_intrinsics", {})
+        img_w = ci.get("width", int(2 * ci["cx"]) if "cx" in ci else None)
+        img_h = ci.get("height", int(2 * ci["cy"]) if "cy" in ci else None)
+
         changed = False
         for entry in skel_2d:
             jid = entry["joint_id"]
@@ -861,6 +880,9 @@ def apply_per_frame_deltas_to_dir(
                 continue
             orig_pt, new_pt = pair
             if orig_pt[2] <= 0 or new_pt[2] <= 0:
+                if new_pt is not None and new_pt[2] <= 0 and entry.get("visible", False):
+                    entry["visible"] = False
+                    changed = True
                 continue
             base_u, base_v = _project_pinhole(
                 orig_pt[0], orig_pt[1], orig_pt[2], fx, fy, cx, cy
@@ -874,6 +896,12 @@ def apply_per_frame_deltas_to_dir(
                 entry["u"] = round(new_u, 2)
                 entry["v"] = round(new_v, 2)
                 changed = True
+            # Recalculate visible flag
+            if img_w is not None and img_h is not None:
+                new_vis = bool(0 <= entry["u"] < img_w and 0 <= entry["v"] < img_h)
+                if entry.get("visible") != new_vis:
+                    entry["visible"] = new_vis
+                    changed = True
 
         if changed or transform_3d:
             if create_backup:

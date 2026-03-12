@@ -28,7 +28,13 @@ Manual annotations (~40K frames)
          ▼
 ┌─────────────────────┐
 │  fit_extrinsic.py    │  Apply delta to all annotations
-│  --apply             │  (differential 2D projection)
+│  --apply             │  (differential 2D projection + visible fix)
+└────────┬────────────┘
+         │  updated u,v + visible flag
+         ▼
+┌─────────────────────┐
+│  blend_2d_annota... │  Stage 3 (optional): Blend projected 2D
+│  --mode blend       │  with model predictions (α = pred_conf)
 └─────────────────────┘
 ```
 
@@ -166,6 +172,53 @@ python visualize_predictions.py <dataset_root> --mode export -o comparison/
 ```
 
 Keyboard: arrows=frame, PgUp/PgDn=skip 10, N/P=next/prev session.
+
+### 6. Blend 2D annotations (optional)
+
+After `--apply` updates projected u,v, `blend_2d_annotations.py` can blend
+the projection-based 2D with model-predicted 2D to produce the final
+`skeleton_2d` ground truth.
+
+```bash
+# Projection-only (just recalculate visible flags, no coordinate changes)
+python blend_2d_annotations.py --dataset-root <root> --mode projection
+
+# Replace with model predictions
+python blend_2d_annotations.py --dataset-root <root> --mode prediction
+
+# Weighted blend: u = (1-α)*u_proj + α*u_pred, α = pred_confidence
+python blend_2d_annotations.py --dataset-root <root> --mode blend
+
+# Single session
+python blend_2d_annotations.py --session-dir <ego_dataset_dir> --mode blend
+
+# Dry run (report changes without writing)
+python blend_2d_annotations.py --dataset-root <root> --mode blend --dry-run
+
+# Higher minimum prediction confidence threshold
+python blend_2d_annotations.py --dataset-root <root> --mode blend --min-pred-confidence 0.3
+```
+
+| Mode | skeleton_2d source | When to use |
+|------|-------------------|-------------|
+| `projection` | Keep current u,v (only recalculates visible) | Vis-fix pass after `--apply` |
+| `prediction` | Replace u,v with model predictions | Model more trusted than projection |
+| `blend` | `(1-α)*proj + α*pred`, α = pred_confidence | Best of both (recommended) |
+
+For joints with no prediction or confidence below `--min-pred-confidence` (default 0.1),
+the projection value is kept (α=0).
+
+## Visible Flag Fix
+
+`fit_extrinsic.py --apply`, `apply_per_frame_deltas_to_dir()`, and `apply_avg_offset.py`
+all recalculate the `visible` flag after updating u,v coordinates:
+
+- **Behind camera**: `new_pt[2] <= 0` → `visible = False`
+- **Out of frame**: `u < 0` or `u >= width` or `v < 0` or `v >= height` → `visible = False`
+- **Image dims**: read from `camera_intrinsics.width/height`, falling back to `2*cx / 2*cy`
+
+This prevents joints that moved out of frame from remaining `visible=True`, which
+previously corrupted training (visible=False → zero weight in loss function).
 
 ## Fitting Modes Comparison
 

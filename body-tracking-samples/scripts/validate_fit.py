@@ -29,6 +29,18 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
+try:
+    import cv2
+    HAS_CV2 = True
+except ImportError:
+    HAS_CV2 = False
+
+try:
+    from tqdm import tqdm
+except ImportError:
+    def tqdm(it, *a, **kw):
+        return it
+
 # ---------------------------------------------------------------------------
 # Constants (shared with fit_extrinsic.py)
 # ---------------------------------------------------------------------------
@@ -252,7 +264,7 @@ def compare_projection_vs_prediction(
     total_frames = 0
     total_compared = 0
 
-    for ann_dir in ann_dirs:
+    for ann_dir in tqdm(ann_dirs, desc="Comparing sessions", unit="session"):
         # Find matching session in log
         label = _session_label(str(ann_dir), dataset_root)
         if label not in session_deltas:
@@ -361,6 +373,12 @@ def compare_projection_vs_prediction(
             if is_flagged:
                 # Sort details by distance descending
                 joint_details.sort(key=lambda x: x["distance_px"], reverse=True)
+
+                # Resolve image path for visualization
+                image_file = ann_data.get("image_file", "")
+                images_dir = ann_dir.parent / "images"
+                image_path = str(images_dir / image_file) if image_file else ""
+
                 flagged_frames.append({
                     "session": label,
                     "frame": pred_path.stem,
@@ -369,6 +387,8 @@ def compare_projection_vs_prediction(
                     "median_dist_px": round(median_dist, 1),
                     "max_dist_px": round(max_dist, 1),
                     "worst_joints": joint_details[:5],
+                    "all_joints": joint_details,
+                    "image_path": image_path,
                 })
 
     return flagged_frames
@@ -489,6 +509,180 @@ def export_flagged_csv(flagged: List[dict], output_path: str):
     print("\nFlagged frames exported to: %s (%d rows)" % (output_path, len(flagged)))
 
 
+# ---------------------------------------------------------------------------
+# Flagged image visualization
+# ---------------------------------------------------------------------------
+
+_BONE_CONNECTIONS = [
+    (0, 1), (1, 2), (2, 3), (3, 26),
+    (26, 27), (27, 28), (28, 29), (27, 30), (30, 31),
+    (2, 4), (4, 5), (5, 6), (6, 7),
+    (2, 11), (11, 12), (12, 13), (13, 14),
+    (0, 18), (18, 19), (19, 20), (20, 21),
+    (0, 22), (22, 23), (23, 24), (24, 25),
+]
+
+# Colors (BGR)
+_COL_PRED = (255, 150, 50)     # blue — predicted 2D joints
+_COL_PROJ = (0, 220, 0)       # green — projected 3D joints
+_COL_WORST = (0, 0, 255)      # red — worst joint
+_COL_LINE = (0, 0, 255)       # red — distance line
+_COL_OUTLINE = (0, 0, 0)      # black — text outline
+_NUM_WORST_LABELED = 5         # number of worst joints to label with name + distance
+
+
+def _put_outlined_text(img, text, org, font, scale, color, thickness,
+                       outline_color=_COL_OUTLINE, outline_thickness=None):
+    """Draw text with a thin black outline for improved visibility."""
+    if outline_thickness is None:
+        outline_thickness = thickness + 2
+    cv2.putText(img, text, org, font, scale, outline_color,
+                outline_thickness, cv2.LINE_AA)
+    cv2.putText(img, text, org, font, scale, color, thickness, cv2.LINE_AA)
+
+
+def save_flagged_images(flagged: List[dict], output_dir: str, max_images: int = 0):
+    """Save annotated images for flagged frames.
+
+    Each image shows:
+      - Predicted 2D joints (blue) with skeleton and joint name labels
+      - Projected 3D joints (green) with skeleton
+      - Worst N joints highlighted (red) with distance lines and name+distance labels
+      - Title: session / frame / distances (outlined text)
+    """
+    if not HAS_CV2:
+        print("Error: OpenCV required for --save-images. Install: pip install opencv-python")
+        return
+
+    out = Path(output_dir)
+    out.mkdir(parents=True, exist_ok=True)
+
+    saved = 0
+    # Sort by max distance descending so we save the worst first if max_images is set
+    sorted_flagged = sorted(flagged, key=lambda f: f["max_dist_px"], reverse=True)
+    if max_images > 0:
+        sorted_flagged = sorted_flagged[:max_images]
+
+    for fr in tqdm(sorted_flagged, desc="Saving images", unit="img"):
+        img_path = fr.get("image_path", "")
+        if not img_path or not Path(img_path).exists():
+            continue
+
+        img = cv2.imread(img_path)
+        if img is None:
+            continue
+
+        all_joints = fr.get("all_joints", [])
+        if not all_joints:
+            continue
+
+        # Build lookup: joint_id -> joint detail
+        jmap = {j["joint_id"]: j for j in all_joints}
+        worst_jid = all_joints[0]["joint_id"]  # sorted by distance desc
+
+        # Draw skeleton bones — predicted (blue)
+        for pid, cid in _BONE_CONNECTIONS:
+            if pid in jmap and cid in jmap:
+                p1 = (int(jmap[pid]["pred_u"]), int(jmap[pid]["pred_v"]))
+                p2 = (int(jmap[cid]["pred_u"]), int(jmap[cid]["pred_v"]))
+                cv2.line(img, p1, p2, _COL_PRED, 1, cv2.LINE_AA)
+
+        # Draw skeleton bones — projected (green)
+        for pid, cid in _BONE_CONNECTIONS:
+            if pid in jmap and cid in jmap:
+                p1 = (int(jmap[pid]["proj_u"]), int(jmap[pid]["proj_v"]))
+                p2 = (int(jmap[cid]["proj_u"]), int(jmap[cid]["proj_v"]))
+                cv2.line(img, p1, p2, _COL_PROJ, 1, cv2.LINE_AA)
+
+        # Determine worst N joints for highlighting
+        worst_jids = set(j["joint_id"] for j in all_joints[:_NUM_WORST_LABELED])
+
+        # Draw joints — predicted (blue circles) with name labels
+        for j in all_joints:
+            pt = (int(j["pred_u"]), int(j["pred_v"]))
+            is_worst = j["joint_id"] in worst_jids
+            color = _COL_WORST if is_worst else _COL_PRED
+            cv2.circle(img, pt, 5, color, -1, cv2.LINE_AA)
+            _put_outlined_text(img, j["name"], (pt[0] + 7, pt[1] - 7),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.35, _COL_PRED, 1)
+
+        # Draw joints — projected (green circles) with name labels
+        for j in all_joints:
+            pt = (int(j["proj_u"]), int(j["proj_v"]))
+            is_worst = j["joint_id"] in worst_jids
+            color = _COL_WORST if is_worst else _COL_PROJ
+            cv2.circle(img, pt, 5, color, -1, cv2.LINE_AA)
+            _put_outlined_text(img, j["name"], (pt[0] + 7, pt[1] + 14),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.35, _COL_PROJ, 1)
+
+        # Draw distance lines + labels for worst N joints
+        for j in all_joints[:_NUM_WORST_LABELED]:
+            pt_pred = (int(j["pred_u"]), int(j["pred_v"]))
+            pt_proj = (int(j["proj_u"]), int(j["proj_v"]))
+            _draw_dashed_line(img, pt_pred, pt_proj, _COL_LINE, 2, 8)
+
+            # Name + distance label at midpoint
+            mid_x = (pt_pred[0] + pt_proj[0]) // 2
+            mid_y = (pt_pred[1] + pt_proj[1]) // 2
+            dist_text = "%s: %.1f px" % (j["name"], j["distance_px"])
+            _put_outlined_text(img, dist_text, (mid_x + 5, mid_y - 5),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.5, _COL_WORST, 1)
+
+        # Title bar (outlined for visibility)
+        h, w_img = img.shape[:2]
+        title = "%s / %s" % (fr["session"], fr["frame"])
+        stats = "mean=%.1f  median=%.1f  max=%.1f px  (%d joints)" % (
+            fr["mean_dist_px"], fr["median_dist_px"],
+            fr["max_dist_px"], fr["n_joints"],
+        )
+        _put_outlined_text(img, title, (10, 30),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+        _put_outlined_text(img, stats, (10, 60),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 1)
+
+        # Legend (outlined)
+        legend_y = h - 20
+        cv2.circle(img, (15, legend_y), 5, _COL_PRED, -1)
+        _put_outlined_text(img, "Predicted", (25, legend_y + 5),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, _COL_PRED, 1)
+        cv2.circle(img, (135, legend_y), 5, _COL_PROJ, -1)
+        _put_outlined_text(img, "Projected", (145, legend_y + 5),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, _COL_PROJ, 1)
+        cv2.circle(img, (255, legend_y), 5, _COL_WORST, -1)
+        _put_outlined_text(img, "Worst", (265, legend_y + 5),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, _COL_WORST, 1)
+
+        # Save
+        session_safe = fr["session"].replace("/", "_").replace("\\", "_")
+        filename = "%s_%s.jpg" % (session_safe, fr["frame"])
+        cv2.imwrite(str(out / filename), img, [cv2.IMWRITE_JPEG_QUALITY, 90])
+        saved += 1
+
+    print("\nSaved %d flagged images to: %s" % (saved, output_dir))
+
+
+def _draw_dashed_line(img, pt1, pt2, color, thickness, dash_len):
+    """Draw a dashed line between two points."""
+    x1, y1 = pt1
+    x2, y2 = pt2
+    dx = x2 - x1
+    dy = y2 - y1
+    length = math.sqrt(dx * dx + dy * dy)
+    if length < 1:
+        return
+    dx_n, dy_n = dx / length, dy / length
+    pos = 0.0
+    drawing = True
+    while pos < length:
+        seg_end = min(pos + dash_len, length)
+        if drawing:
+            p1 = (int(x1 + dx_n * pos), int(y1 + dy_n * pos))
+            p2 = (int(x1 + dx_n * seg_end), int(y1 + dy_n * seg_end))
+            cv2.line(img, p1, p2, color, thickness, cv2.LINE_AA)
+        pos = seg_end
+        drawing = not drawing
+
+
 def export_report_json(delta_result: dict, flagged: List[dict], output_path: str):
     """Export full validation report as JSON."""
     report = {
@@ -515,8 +709,8 @@ def main():
                         help="Path to fit_extrinsic_log_xxx.json")
 
     # Delta outlier thresholds
-    parser.add_argument("--rotation-max", type=float, default=5.0,
-                        help="Absolute rotation threshold (deg, default: 5.0)")
+    parser.add_argument("--rotation-max", type=float, default=10.0,
+                        help="Absolute rotation threshold (deg, default: 10.0)")
     parser.add_argument("--translation-max", type=float, default=150.0,
                         help="Absolute translation threshold (mm, default: 150.0)")
     parser.add_argument("--tz-max", type=float, default=None,
@@ -542,6 +736,10 @@ def main():
                         help="Export flagged frames to CSV file")
     parser.add_argument("--json", type=str, default=None,
                         help="Export full validation report as JSON")
+    parser.add_argument("--save-images", type=str, default=None, metavar="DIR",
+                        help="Save annotated images for flagged frames to DIR")
+    parser.add_argument("--max-images", type=int, default=0,
+                        help="Max number of flagged images to save (0=all, default: 0)")
 
     args = parser.parse_args()
 
@@ -597,6 +795,9 @@ def main():
     # Export
     if args.output and flagged:
         export_flagged_csv(flagged, args.output)
+
+    if args.save_images and flagged:
+        save_flagged_images(flagged, args.save_images, args.max_images)
 
     if args.json:
         export_report_json(delta_result, flagged, args.json)

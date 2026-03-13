@@ -101,6 +101,9 @@ def blend_frame(
 
         pred = pred_lookup.get(jid)
         pred_conf = pred.get("confidence", 0) if pred else 0
+        # Treat (0,0) predictions as failed detections
+        if pred and pred_conf > 0 and pred.get("u", 0) == 0 and pred.get("v", 0) == 0:
+            pred_conf = 0
 
         if mode == "projection":
             # Only recalculate visible flag, keep u,v

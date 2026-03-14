@@ -21,6 +21,7 @@ Usage:
 """
 
 import argparse
+import datetime
 import json
 import os
 import shutil
@@ -327,6 +328,89 @@ def main():
                   f"vis: +{stats['invis_to_vis']}/-{stats['vis_to_invis']}")
 
     print_summary(all_stats, args.mode)
+
+    # Save log file
+    if not args.dry_run:
+        dataset_dir = args.dataset_root or args.session_dir
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        log_path = os.path.join(dataset_dir, f"blend_log_{timestamp}.json")
+
+        totals = {
+            "sessions": 0,
+            "frames": 0,
+            "frames_changed": 0,
+            "joints_processed": 0,
+            "joints_blended": 0,
+            "joints_projection_only": 0,
+            "joints_no_prediction": 0,
+            "alpha_sum": 0.0,
+            "vis_to_invis": 0,
+            "invis_to_vis": 0,
+            "errors": 0,
+        }
+        session_logs = []
+        for name, stats in all_stats:
+            if "error" in stats:
+                totals["errors"] += 1
+                session_logs.append({"session": name, "error": stats["error"]})
+                continue
+            totals["sessions"] += 1
+            for k in ("frames", "frames_changed", "joints_processed", "joints_blended",
+                       "joints_projection_only", "joints_no_prediction", "alpha_sum",
+                       "vis_to_invis", "invis_to_vis"):
+                totals[k] += stats[k]
+            avg_alpha = (stats["alpha_sum"] / stats["joints_processed"]
+                         if stats["joints_processed"] else 0)
+            session_logs.append({
+                "session": name,
+                "frames": stats["frames"],
+                "frames_changed": stats["frames_changed"],
+                "joints_processed": stats["joints_processed"],
+                "joints_blended": stats["joints_blended"],
+                "joints_projection_only": stats["joints_projection_only"],
+                "joints_no_prediction": stats["joints_no_prediction"],
+                "avg_alpha": round(avg_alpha, 4),
+                "vis_to_invis": stats["vis_to_invis"],
+                "invis_to_vis": stats["invis_to_vis"],
+            })
+
+        avg_alpha_total = (totals["alpha_sum"] / totals["joints_processed"]
+                           if totals["joints_processed"] else 0)
+        log_data = {
+            "timestamp": timestamp,
+            "command": {
+                "dataset_root": args.dataset_root,
+                "session_dir": args.session_dir,
+                "mode": args.mode,
+                "min_pred_confidence": args.min_pred_confidence,
+                "no_backup": args.no_backup,
+            },
+            "summary": {
+                "sessions": totals["sessions"],
+                "errors": totals["errors"],
+                "frames": totals["frames"],
+                "frames_changed": totals["frames_changed"],
+                "joints_processed": totals["joints_processed"],
+                "joints_blended": totals["joints_blended"],
+                "joints_projection_only": totals["joints_projection_only"],
+                "joints_no_prediction": totals["joints_no_prediction"],
+                "avg_alpha": round(avg_alpha_total, 4),
+                "vis_to_invis": totals["vis_to_invis"],
+                "invis_to_vis": totals["invis_to_vis"],
+            },
+            "sessions": session_logs,
+        }
+
+        try:
+            with open(log_path, "w", encoding="utf-8") as f:
+                json.dump(log_data, f, indent=2)
+            print(f"\nBlend log saved: {log_path}")
+        except PermissionError:
+            # Fall back to current directory
+            fallback = f"blend_log_{timestamp}.json"
+            with open(fallback, "w", encoding="utf-8") as f:
+                json.dump(log_data, f, indent=2)
+            print(f"\nBlend log saved: {fallback}")
 
 
 if __name__ == "__main__":

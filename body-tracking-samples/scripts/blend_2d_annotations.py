@@ -81,10 +81,13 @@ def blend_frame(
 
         if mode == "vis-fix":
             # Recalculate visible for ALL joints (including conf==0)
+            # Treat (0,0) as a failed detection (not a real joint position)
             stats["joints_processed"] += 1
             old_vis = entry.get("visible", True)
             if img_w is not None and img_h is not None:
-                new_vis = bool(conf > 0 and 0 <= entry["u"] < img_w and 0 <= entry["v"] < img_h)
+                at_origin = (entry["u"] == 0 and entry["v"] == 0)
+                new_vis = bool(conf > 0 and not at_origin
+                               and 0 <= entry["u"] < img_w and 0 <= entry["v"] < img_h)
                 if new_vis != old_vis:
                     entry["visible"] = new_vis
                     changed = True
@@ -140,9 +143,11 @@ def blend_frame(
                 if not pred or pred_conf < min_pred_conf:
                     stats["joints_no_prediction"] += 1
 
-        # Recalculate visible flag
+        # Recalculate visible flag (treat (0,0) as failed detection)
         if img_w is not None and img_h is not None:
-            new_vis = bool(conf > 0 and 0 <= entry["u"] < img_w and 0 <= entry["v"] < img_h)
+            at_origin = (entry["u"] == 0 and entry["v"] == 0)
+            new_vis = bool(conf > 0 and not at_origin
+                           and 0 <= entry["u"] < img_w and 0 <= entry["v"] < img_h)
             if new_vis != old_vis:
                 entry["visible"] = new_vis
                 changed = True

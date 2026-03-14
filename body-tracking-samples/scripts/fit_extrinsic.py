@@ -802,9 +802,11 @@ def apply_delta_to_dir(
                 entry["u"] = round(new_u, 2)
                 entry["v"] = round(new_v, 2)
                 changed = True
-            # Recalculate visible flag
+            # Recalculate visible flag (treat (0,0) as failed detection)
             if img_w is not None and img_h is not None:
-                new_vis = bool(0 <= entry["u"] < img_w and 0 <= entry["v"] < img_h)
+                at_origin = (entry["u"] == 0 and entry["v"] == 0)
+                new_vis = bool(not at_origin
+                               and 0 <= entry["u"] < img_w and 0 <= entry["v"] < img_h)
                 if entry.get("visible") != new_vis:
                     entry["visible"] = new_vis
                     changed = True
@@ -896,9 +898,11 @@ def apply_per_frame_deltas_to_dir(
                 entry["u"] = round(new_u, 2)
                 entry["v"] = round(new_v, 2)
                 changed = True
-            # Recalculate visible flag
+            # Recalculate visible flag (treat (0,0) as failed detection)
             if img_w is not None and img_h is not None:
-                new_vis = bool(0 <= entry["u"] < img_w and 0 <= entry["v"] < img_h)
+                at_origin = (entry["u"] == 0 and entry["v"] == 0)
+                new_vis = bool(not at_origin
+                               and 0 <= entry["u"] < img_w and 0 <= entry["v"] < img_h)
                 if entry.get("visible") != new_vis:
                     entry["visible"] = new_vis
                     changed = True
